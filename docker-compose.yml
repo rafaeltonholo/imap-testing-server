@@ -1,0 +1,21 @@
+services:
+  dovecot:
+    image: dovecot/dovecot:latest
+    container_name: dovecot-dev
+    restart: unless-stopped
+    ports:
+      - "143:31143"   # map container's IMAP (STARTTLS) to localhost:143
+      - "993:31993"   # map container's IMAPS (TLS)   to localhost:993
+    volumes:
+      - ./config:/etc/dovecot/conf.d:ro
+      - ./ssl:/etc/dovecot/ssl:ro
+      - ./vmail:/srv/vmail
+      - ./logs:/var/log/dovecot
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: mailhog-dev
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI

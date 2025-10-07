@@ -1,0 +1,5 @@
+dev@local.test:{PLAIN}secret3
+dev1@local.test:{PLAIN}secret3
+dev2@local.test:{PLAIN}secret3
+dev3@local.test:{PLAIN}secret3
+dev4@local.test:{PLAIN}secret3
