@@ -1,0 +1,15 @@
+From: Billing <billing@example.com>
+To: dev@local.test
+Subject: Invoice #2025-0001
+Date: Wed, 03 Jan 2025 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Hello,
+
+Your invoice #2025-0001 is ready.
+Total: $199.00  
+Due Date: Jan 15, 2025
+
+Thanks,
+Billing Dept.

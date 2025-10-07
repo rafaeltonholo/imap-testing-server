@@ -1,0 +1,93 @@
+MIME-Version: 1.0
+From: Test Sender <sender@example.com>
+To: dev@local.test
+Subject: [Test Case 2] - Modern & Responsive
+Date: Tue, 7 Oct 2025 09:26:35 -0300
+Content-Type: multipart/alternative;
+	boundary="----=_NextPart_000_001C_01D3A211.C8B56790"
+
+------=_NextPart_000_001C_01D3A211.C8B56790
+Content-Type: text/plain;
+	charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+This email tests responsive design. On a wide screen, the two columns below should be side-by-side. On a narrow screen, they should stack vertically.
+
+Column 1
+This is the first column. It contains content that should appear on the left.
+
+Column 2
+This is the second column. It contains content that should appear on the right.
+
+------=_NextPart_000_001C_01D3A211.C8B56790
+Content-Type: text/html;
+	charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset=3D"utf-8">
+<meta name=3D"viewport" content=3D"width=3Ddevice-width, initial-scale=3D1.=
+0">
+<title>Modern Responsive Email</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=3DLato:wght@400;700&=
+display=3Dswap');
+  @media screen and (max-width: 600px) {
+    .container { width: 100% !important; }
+    .column { width: 100% !important; display: block !important; }
+  }
+</style>
+</head>
+<body style=3D"margin: 0; padding: 0;">
+  <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=3D"100%">
+    <tr>
+      <td>
+        <table class=3D"container" align=3D"center" border=3D"0" cellpadding=
+=3D"0" cellspacing=3D"0" width=3D"600" style=3D"border-collapse: collapse;">
+          <tr>
+            <td background=3D"https://via.placeholder.com/600x200/007bff/fff=
+fff?text=3DHeader+Image" bgcolor=3D"#007bff" width=3D"600" height=3D"200" va=
+lign=3D"top" style=3D"background-image: url('https://via.placeholder.com/600=
+x200/007bff/ffffff?text=3DHeader+Image'); background-size: cover; background=
+-position: center;">
+              </td>
+          </tr>
+          <tr>
+            <td style=3D"padding: 20px; font-family: 'Lato', Helvetica, Aria=
+l, sans-serif; font-size: 16px;">
+              This email tests responsive design. On a wide screen, the two=
+ columns below should be side-by-side. On a narrow screen, they should stac=
+k vertically.
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=
+=3D"100%">
+                <tr>
+                  <td class=3D"column" width=3D"50%" valign=3D"top" style=3D=
+"padding: 10px;">
+                    <h3 style=3D"margin-top: 0;">Column 1</h3>
+                    <p>This is the first column. It contains content that s=
+hould appear on the left.</p>
+                  </td>
+                  <td class=3D"column" width=3D"50%" valign=3D"top" style=3D=
+"padding: 10px;">
+                    <h3 style=3D"margin-top: 0;">Column 2</h3>
+                    <p>This is the second column. It contains content that =
+should appear on the right.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+
+------=_NextPart_000_001C_01D3A211.C8B56790--

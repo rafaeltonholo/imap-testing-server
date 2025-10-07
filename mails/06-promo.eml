@@ -1,0 +1,13 @@
+From: Store <store@example.com>
+To: dev@local.test
+Subject: 🛍️ 50% OFF This Weekend!
+Date: Sat, 06 Jan 2025 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+
+<html>
+  <body>
+    <h2>Biggest Sale Ever</h2>
+    <p>Use code <b>SALE50</b> at checkout.</p>
+  </body>
+</html>

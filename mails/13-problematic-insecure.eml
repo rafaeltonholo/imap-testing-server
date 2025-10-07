@@ -1,0 +1,89 @@
+MIME-Version: 1.0
+From: Test Sender <sender@example.com>
+To: dev@local.test
+Subject: [Test Case 3] - Problematic & Insecure
+Date: Tue, 7 Oct 2025 09:26:35 -0300
+Content-Type: multipart/alternative;
+	boundary="----=_NextPart_000_001D_01D3A211.C8B56790"
+
+------=_NextPart_000_001D_01D3A211.C8B56790
+Content-Type: text/plain;
+	charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security and Unsupported Content Test
+
+This email contains elements that your client should block or ignore.
+
+1. JavaScript Test
+If you see an alert box, the client has failed this test.
+
+2. Embedded Video Test
+The video below should not be playable.
+
+3. Form Test
+This form should not be submittable from the email.
+
+4. Modern CSS (Flexbox) Test
+The two boxes below should NOT be side-by-side if flexbox is unsupported.
+
+5. Animated GIF Test
+Does the rocket animate?
+
+------=_NextPart_000_001D_01D3A211.C8B56790
+Content-Type: text/html;
+	charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html>
+<head>
+<title>Problematic Email</title>
+</head>
+<body>
+  <h1>Security and Unsupported Content Test</h1>
+  
+  <p>This email contains elements that your client should block or ignore.<=
+/p>
+
+  <h2>1. JavaScript Test</h2>
+  <p>If you see an alert box, the client has failed this test.</p>
+  <script>alert('JavaScript is executing!');</script>
+
+  <h2>2. Embedded Video Test</h2>
+  <p>The video below should not be playable.</p>
+  <video controls width=3D"250">
+    <source src=3D"https://www.w3schools.com/tags/movie.mp4" type=3D"video/m=
+p4">
+    Your browser does not support the video tag.
+  </video>
+
+  <h2>3. Form Test</h2>
+  <p>This form should not be submittable from the email.</p>
+  <form action=3D"/submit" method=3D"post">
+    <label for=3D"name">Name:</label>
+    <input type=3D"text" id=3D"name" name=3D"name">
+    <input type=3D"submit" value=3D"Submit">
+  </form>
+
+  <h2>4. Modern CSS (Flexbox) Test</h2>
+  <p>The two boxes below should NOT be side-by-side if flexbox is unsupport=
+ed.</p>
+  <div style=3D"display: flex; justify-content: space-between; border: 1px =
+solid grey; padding: 10px;">
+    <div style=3D"background-color: lightblue; padding: 10px;">Flex Item 1<=
+/div>
+    <div style=3D"background-color: lightcoral; padding: 10px;">Flex Item 2=
+</div>
+  </div>
+  
+  <h2>5. Animated GIF Test</h2>
+  <p>Does the rocket animate?</p>
+  <img src=3D"https://i.giphy.com/media/v1.Y2lkPTc5MGI3NjExd2g3cnR5bWkyc202N=
+mpkMG16aTV6ZnRrd200ZHk1b3RhcHh2cWQwNyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw=
+/mih2T3AaZk8s8/giphy.gif" alt=3D"Animated Rocket">
+
+</body>
+</html>
+
+------=_NextPart_000_001D_01D3A211.C8B56790--

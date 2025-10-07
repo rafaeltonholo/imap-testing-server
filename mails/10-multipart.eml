@@ -1,0 +1,25 @@
+From: HR <hr@example.com>
+To: dev@local.test
+Subject: Onboarding Documents
+Date: Wed, 10 Jan 2025 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="BOUNDARY"
+
+--BOUNDARY
+Content-Type: text/plain; charset=UTF-8
+
+Hi,
+
+Welcome aboard!  
+Please check the attached onboarding PDF.
+
+--BOUNDARY
+Content-Type: text/html; charset=UTF-8
+
+<html>
+  <body>
+    <p>Hi,</p>
+    <p>Welcome aboard! <b>Please check the attached onboarding PDF.</b></p>
+  </body>
+</html>
+--BOUNDARY--

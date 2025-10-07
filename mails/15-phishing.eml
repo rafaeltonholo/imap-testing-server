@@ -1,0 +1,65 @@
+Return-Path: <no-reply@accounts.example.com>
+Received: from mail.example.com (mail.example.com [127.0.0.1]) by localhost with ESMTP id testphish01
+From: "Accounts Team" <no-reply@accounts.example.com>
+Reply-To: support@example.com
+To: dev@local.test
+Subject: [PHISHING TEST] Action required: Verify your account NOW
+Date: Tue, 07 Oct 2025 14:00:00 +0000
+Message-ID: <phish-20251007-0001@example.com>
+MIME-Version: 1.0
+X-Priority: 1 (Highest)
+X-Mailer: PhishSim v1.0
+X-Spam-Flag: YES
+List-Unsubscribe: <mailto:unsubscribe@example.com?subject=unsubscribe>
+Content-Type: multipart/alternative; boundary="PHISH_BOUNDARY_001"
+
+--PHISH_BOUNDARY_001
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+*** PHISHING TEST MESSAGE ***
+This message is a simulated phishing email for testing only.
+Do NOT use this content to target real users.
+
+Dear user,
+
+We detected suspicious activity on your account. To avoid suspension you must verify your account within 24 hours.
+
+Verify now: http://example.com/security/verify?uid=dev%40local.test
+
+If you do not verify your account, it will be temporarily suspended.
+
+Thank you,
+Accounts Team
+
+--PHISH_BOUNDARY_001
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:18px;">
+    <div style="max-width:600px;margin:0 auto;border:1px solid #ddd;padding:18px;">
+      <h2 style="color:#b71c1c;margin:0 0 10px 0;">[PHISHING TEST] Urgent: Verify Your Account</h2>
+      <p>Dear user,</p>
+      <p style="color:#333;">
+        We detected <strong>unusual activity</strong> on your account. To avoid suspension, please verify your account now.
+      </p>
+
+      <p style="text-align:center;margin:18px 0;">
+        <!-- Link intentionally points to example.com for safety -->
+        <a href="http://example.com/security/verify?uid=dev%40local.test" style="display:inline-block;padding:12px 20px;background:#d32f2f;color:#fff;text-decoration:none;border-radius:4px;font-weight:bold;">
+          Verify My Account
+        </a>
+      </p>
+
+      <p style="font-size:12px;color:#666;">
+        This is a simulated phishing test message. If you are a real user, ignore this message.
+      </p>
+
+      <!-- tracking pixel (example only) -->
+      <img src="http://example.com/track/open.gif?tid=phish-test-0001" width="1" height="1" alt="" style="display:block;border:0;margin:0;padding:0;" />
+    </div>
+  </body>
+</html>
+
+--PHISH_BOUNDARY_001--

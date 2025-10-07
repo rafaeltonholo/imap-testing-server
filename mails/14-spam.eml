@@ -1,0 +1,59 @@
+Return-Path: <bounce@cheapmeds.example.com>
+Received: from mail.example.com (mail.example.com [127.0.0.1]) by localhost with ESMTP id 12345
+From: "Cheap Meds Online" <offers@cheapmeds.example.com>
+Reply-To: support@cheapmeds.example.com
+To: dev@local.test
+Subject: ⚠️ LIMITED TIME: 90% OFF on Prescription Meds — ACT NOW!!!
+Date: Wed, 08 Oct 2025 14:22:00 +0000
+Message-ID: <spam-$(date +%s)@cheapmeds.example.com>
+MIME-Version: 1.0
+X-Priority: 1 (Highest)
+X-Mailer: CheapMedsMailer v2.8
+X-Spam-Flag: YES
+List-Unsubscribe: <mailto:unsubscribe@cheapmeds.example.com?subject=unsubscribe>
+Content-Type: multipart/alternative; boundary="SPAM_BOUNDARY_001"
+
+--SPAM_BOUNDARY_001
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+URGENT: LIMITED TIME OFFER!
+
+We have 90% OFF on prescription meds — no prescription required.
+Visit the link below to claim your order before the stock runs out.
+
+http://example.com/redeem?offer=90OFF
+
+If you don't want these emails, reply with "UNSUBSCRIBE" or mailto:unsubscribe@cheapmeds.example.com
+
+--SPAM_BOUNDARY_001
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:24px;">
+    <div style="max-width:600px;margin:0 auto;border:1px solid #eee;padding:18px;">
+      <h2 style="color:#cc0000;margin:0 0 8px 0;">⚠️ LIMITED TIME: 90% OFF</h2>
+      <p style="margin:0 0 12px 0;">
+        Hello,<br><br>
+        For the next 48 hours only, we are offering <strong>HUGE SAVINGS</strong> on prescription meds.
+        Fast shipping worldwide. No prescription required.
+      </p>
+
+      <p style="text-align:center;margin:18px 0;">
+        <a href="http://example.com/redeem?offer=90OFF" style="display:inline-block;padding:12px 22px;background:#ff6b00;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold;">
+          CLAIM YOUR 90% OFF
+        </a>
+      </p>
+
+      <p style="font-size:12px;color:#666;margin-top:18px;">
+        Hurry — limited stock! If you did not sign up for this, ignore this message or <a href="mailto:unsubscribe@cheapmeds.example.com?subject=unsubscribe">unsubscribe</a>.
+      </p>
+
+      <!-- tracking pixel (example.com) -->
+      <img src="http://example.com/track/open.gif?tid=spam12345" width="1" height="1" alt="" style="display:block;margin:0;padding:0;border:0;" />
+    </div>
+  </body>
+</html>
+
+--SPAM_BOUNDARY_001--

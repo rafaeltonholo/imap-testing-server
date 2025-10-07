@@ -1,0 +1,14 @@
+From: Support <support@example.com>
+To: dev@local.test
+Subject: Welcome to Dovecot Test!
+Date: Mon, 01 Jan 2025 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Hello there 👋
+
+Welcome to your local Dovecot IMAP test server.
+This is your first test message.
+
+Thanks,
+The Dovecot Team

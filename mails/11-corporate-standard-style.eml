@@ -1,0 +1,74 @@
+MIME-Version: 1.0
+From: Test Sender <sender@example.com>
+To: dev@local.test
+Subject: [Test Case 1] - Corporate Standard
+Date: Tue, 7 Oct 2025 09:26:35 -0300
+Content-Type: multipart/alternative;
+	boundary="----=_NextPart_000_001B_01D3A211.C8B56790"
+
+------=_NextPart_000_001B_01D3A211.C8B56790
+Content-Type: text/plain;
+	charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Hello Team,
+
+This is a notice regarding the upcoming Q4 planning session. The meeting is scheduled for Tuesday, October 7, 2025, at 10:00 AM ADT. Please ensure all relevant documents are submitted beforehand.
+
+© 2025 Your Company Inc. | Bedford, NS, Canada
+
+------=_NextPart_000_001B_01D3A211.C8B56790
+Content-Type: text/html;
+	charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset=3D"utf-8">
+<title>Standard Corporate Email</title>
+</head>
+<body style=3D"margin: 0; padding: 0; background-color: #f4f4f4;">
+  <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=3D"100%">
+    <tr>
+      <td>
+        <table align=3D"center" border=3D"0" cellpadding=3D"0" cellspacing=3D=
+"0" width=3D"600" style=3D"border-collapse: collapse;">
+          <tr>
+            <td align=3D"center" bgcolor=3D"#007bff" style=3D"padding: 20px 0=
+;">
+              <h1 style=3D"color: #ffffff; font-family: Arial, sans-serif; m=
+argin: 0;">Company Announcement</h1>
+            </td>
+          </tr>
+          <tr>
+            <td bgcolor=3D"#ffffff" style=3D"padding: 40px 30px;">
+              <p style=3D"margin: 0 0 15px 0; color: #333333; font-family: A=
+rial, sans-serif; font-size: 16px; line-height: 1.5;">
+                Hello Team,
+              </p>
+              <p style=3D"margin: 0; color: #333333; font-family: Arial, san=
+s-serif; font-size: 16px; line-height: 1.5;">
+                This is a notice regarding the upcoming Q4 planning session=
+. The meeting is scheduled for <strong>Tuesday, October 7, 2025, at 10:00 A=
+M ADT</strong>. Please ensure all relevant documents are submitted beforehan=
+d.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td bgcolor=3D"#eeeeee" style=3D"padding: 20px 30px;">
+              <p style=3D"margin: 0; color: #555555; font-family: Arial, san=
+s-serif; font-size: 12px;">
+                =C2=A9 2025 Your Company Inc. | Bedford, NS, Canada
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+
+------=_NextPart_000_001B_01D3A211.C8B56790--

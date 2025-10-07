@@ -1,0 +1,14 @@
+From: Marketing <marketing@example.com>
+To: dev@local.test
+Subject: 🌟 Introducing Our New Product
+Date: Mon, 08 Jan 2025 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+
+<html>
+  <body>
+    <h1>Introducing SuperApp 2.0</h1>
+    <p>Now faster, smarter, and easier to use.</p>
+    <a href="https://example.com/product">Learn More</a>
+  </body>
+</html>
