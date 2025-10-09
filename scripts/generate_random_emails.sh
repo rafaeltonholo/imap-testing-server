@@ -71,6 +71,7 @@ EOF
   docker exec dovecot-dev doveadm save -u "$EMAIL" -m "$mailbox" "/tmp/$filename" >/dev/null 2>&1
 
   echo "[$i] Added \"$subject #$i\" → $mailbox"
+  sleep 2.5
 done
 
 rm -r $MAILDIR
