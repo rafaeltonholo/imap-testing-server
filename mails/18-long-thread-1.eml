@@ -1,0 +1,242 @@
+MIME-Version: 1.0
+Date: Tue, 28 Oct 2025 08:12:00 -0300
+From: dev@local.test
+To: dev2@local.test
+Subject: Re: Styling regression: thread stress test
+Message-ID: <thread-sample-11@local.test>
+In-Reply-To: <thread-sample-10@local.test>
+References: <thread-sample-1@local.test> <thread-sample-2@local.test> <thread-sample-3@local.test> <thread-sample-4@local.test> <thread-sample-5@local.test> <thread-sample-6@local.test> <thread-sample-7@local.test> <thread-sample-8@local.test> <thread-sample-9@local.test> <thread-sample-10@local.test>
+Content-Language: en-US
+X-Mailer: ChatGPT Test Mailer
+Content-Type: multipart/alternative; boundary="----=_ThreadBoundary_568785"
+
+------=_ThreadBoundary_568785
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Re: Styling regression: thread stress test
+
+Hi dev2,
+
+Sending this synthetic email thread to reproduce the styling issue. It mixes paragraphs,
+lists, code, and tables, with nested blockquotes for 10 prior replies.
+Please check whether the app preserves fonts, line heights, margins, blockquote borders,
+and table borders.
+
+Notes:
+ - Top-level uses sans-serif and explicit margins (HTML part).
+ - Quoted replies use blockquote with a border-left.
+ - Code blocks within <pre> should be monospaced.
+ - Tables have inline borders and padding.
+
+Thanks,
+dev
+
+> On Sun, 19 Oct 2025 08:02:00 -0300, dev@local.test wrote to dev2@local.test:
+> Medium reply content with bullets and numbers:
+>  - First bullet with inline color (approx)
+>  - Second bullet long description for wrapping
+>  - Third bullet
+>  1) Step one
+>  2) Step two
+>  3) Step three
+
+> On Mon, 20 Oct 2025 07:55:00 -0300, dev2@local.test wrote to dev@local.test:
+> This is a large content reply meant to stress styling in clients.
+> It includes a pseudo code block and a table-like list:
+> 
+>   for (int i = 0; i < 200; i++) {
+>       processItem(i);
+>   }
+> 
+> Table:
+>   Row 1: Lorem ipsum dolor sit amet 1
+>   Row 2: Lorem ipsum dolor sit amet 2
+>   Row 3: Lorem ipsum dolor sit amet 3
+>   Row 4: Lorem ipsum dolor sit amet 4
+>   Row 5: Lorem ipsum dolor sit amet 5
+>   Row 6: Lorem ipsum dolor sit amet 6
+>   Row 7: Lorem ipsum dolor sit amet 7
+>   Row 8: Lorem ipsum dolor sit amet 8
+
+> On Tue, 21 Oct 2025 07:48:00 -0300, dev@local.test wrote to dev2@local.test:
+> Medium reply content with bullets and numbers:
+>  - First bullet with inline color (approx)
+>  - Second bullet long description for wrapping
+>  - Third bullet
+>  1) Step one
+>  2) Step two
+>  3) Step three
+
+> On Wed, 22 Oct 2025 07:41:00 -0300, dev2@local.test wrote to dev@local.test:
+> This is a large content reply meant to stress styling in clients.
+> It includes a pseudo code block and a table-like list:
+> 
+>   for (int i = 0; i < 200; i++) {
+>       processItem(i);
+>   }
+> 
+> Table:
+>   Row 1: Lorem ipsum dolor sit amet 1
+>   Row 2: Lorem ipsum dolor sit amet 2
+>   Row 3: Lorem ipsum dolor sit amet 3
+>   Row 4: Lorem ipsum dolor sit amet 4
+>   Row 5: Lorem ipsum dolor sit amet 5
+>   Row 6: Lorem ipsum dolor sit amet 6
+>   Row 7: Lorem ipsum dolor sit amet 7
+>   Row 8: Lorem ipsum dolor sit amet 8
+
+> On Thu, 23 Oct 2025 07:34:00 -0300, dev@local.test wrote to dev2@local.test:
+> Medium reply content with bullets and numbers:
+>  - First bullet with inline color (approx)
+>  - Second bullet long description for wrapping
+>  - Third bullet
+>  1) Step one
+>  2) Step two
+>  3) Step three
+
+> On Fri, 24 Oct 2025 07:27:00 -0300, dev2@local.test wrote to dev@local.test:
+> This is a large content reply meant to stress styling in clients.
+> It includes a pseudo code block and a table-like list:
+> 
+>   for (int i = 0; i < 200; i++) {
+>       processItem(i);
+>   }
+> 
+> Table:
+>   Row 1: Lorem ipsum dolor sit amet 1
+>   Row 2: Lorem ipsum dolor sit amet 2
+>   Row 3: Lorem ipsum dolor sit amet 3
+>   Row 4: Lorem ipsum dolor sit amet 4
+>   Row 5: Lorem ipsum dolor sit amet 5
+>   Row 6: Lorem ipsum dolor sit amet 6
+>   Row 7: Lorem ipsum dolor sit amet 7
+>   Row 8: Lorem ipsum dolor sit amet 8
+
+> On Sat, 25 Oct 2025 07:20:00 -0300, dev@local.test wrote to dev2@local.test:
+> Medium reply content with bullets and numbers:
+>  - First bullet with inline color (approx)
+>  - Second bullet long description for wrapping
+>  - Third bullet
+>  1) Step one
+>  2) Step two
+>  3) Step three
+
+> On Sun, 26 Oct 2025 07:13:00 -0300, dev2@local.test wrote to dev@local.test:
+> This is a large content reply meant to stress styling in clients.
+> It includes a pseudo code block and a table-like list:
+> 
+>   for (int i = 0; i < 200; i++) {
+>       processItem(i);
+>   }
+> 
+> Table:
+>   Row 1: Lorem ipsum dolor sit amet 1
+>   Row 2: Lorem ipsum dolor sit amet 2
+>   Row 3: Lorem ipsum dolor sit amet 3
+>   Row 4: Lorem ipsum dolor sit amet 4
+>   Row 5: Lorem ipsum dolor sit amet 5
+>   Row 6: Lorem ipsum dolor sit amet 6
+>   Row 7: Lorem ipsum dolor sit amet 7
+>   Row 8: Lorem ipsum dolor sit amet 8
+
+> On Mon, 27 Oct 2025 07:06:00 -0300, dev@local.test wrote to dev2@local.test:
+> Medium reply content with bullets and numbers:
+>  - First bullet with inline color (approx)
+>  - Second bullet long description for wrapping
+>  - Third bullet
+>  1) Step one
+>  2) Step two
+>  3) Step three
+
+> On Tue, 28 Oct 2025 06:59:00 -0300, dev2@local.test wrote to dev@local.test:
+> This is a large content reply meant to stress styling in clients.
+> It includes a pseudo code block and a table-like list:
+> 
+>   for (int i = 0; i < 200; i++) {
+>       processItem(i);
+>   }
+> 
+> Table:
+>   Row 1: Lorem ipsum dolor sit amet 1
+>   Row 2: Lorem ipsum dolor sit amet 2
+>   Row 3: Lorem ipsum dolor sit amet 3
+>   Row 4: Lorem ipsum dolor sit amet 4
+>   Row 5: Lorem ipsum dolor sit amet 5
+>   Row 6: Lorem ipsum dolor sit amet 6
+>   Row 7: Lorem ipsum dolor sit amet 7
+>   Row 8: Lorem ipsum dolor sit amet 8
+
+
+------=_ThreadBoundary_568785
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222;">
+  <h1 style="font-size:20px;margin:0 0 12px 0;">Re: Styling regression: thread stress test</h1>
+  <p style="margin:0 0 12px 0;">Hi dev2,</p>
+  <p style="margin:0 0 12px 0;">Sending this synthetic email thread to reproduce the styling issue. It mixes paragraphs,
+  lists, code, and tables, with nested blockquotes for 10 prior replies. Some sections use inline CSS; others rely on default
+  client styles. Please confirm whether the app preserves fonts, line heights, margins, blockquote borders, and table borders.</p>
+  <p style="margin:0 0 12px 0;">Notes:</p>
+  <ul style="margin:0 0 12px 24px;">
+    <li>Top-level uses sans-serif and explicit margins.</li>
+    <li>Quoted replies use <code>&lt;blockquote type="cite"&gt;</code> with a border-left.</li>
+    <li>Code blocks within <code>&lt;pre&gt;</code> should be monospaced and preserve spacing.</li>
+    <li>Tables have inline borders and padding.</li>
+  </ul>
+  <p style="margin:0 0 12px 0;">Thanks,<br>dev</p>
+  <hr style="border:none;border-top:1px solid #ddd;margin:16px 0;">
+  <blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Sun, 19 Oct 2025 08:02:00 -0300, dev@local.test wrote to dev2@local.test:<br><br>Medium reply content. Includes bullets and a numbered list to check list styling:
+<ul style="margin:0 0 0 20px;"><li>First bullet with <span style="color:#0055cc;">inline color</span></li><li>Second bullet with a long description to test wrapping behavior across clients.</li><li>Third bullet</li></ul><ol style="margin:8px 0 0 20px;"><li>Step one</li><li>Step two</li><li>Step three</li></ol></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Mon, 20 Oct 2025 07:55:00 -0300, dev2@local.test wrote to dev@local.test:<br><br>This is a large content reply with multiple paragraphs meant to stress styling in clients. It includes long lines with inline <strong>bold</strong> and <em>italics</em>, plus a fake code fence.
+
+<pre style="padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow:auto;">for (int i = 0; i < 200; i++) {
+    // simulate long code block
+    processItem(i);
+}
+</pre>
+Below is a simple table with inline styles used by some senders:<br><br><table style="border-collapse:collapse;width:100%;"><thead><tr><th style="border:1px solid #999;padding:6px;text-align:left;">Key</th><th style="border:1px solid #999;padding:6px;text-align:left;">Value</th></tr></thead><tbody><tr><td style='border:1px solid #999;padding:6px;'>Row 1</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 1</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 2</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 2</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 3</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 3</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 4</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 4</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 5</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 5</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 6</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 6</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 7</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 7</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 8</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 8</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 9</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 9</td></tr></tbody></table></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Tue, 21 Oct 2025 07:48:00 -0300, dev@local.test wrote to dev2@local.test:<br><br>Medium reply content. Includes bullets and a numbered list to check list styling:
+<ul style="margin:0 0 0 20px;"><li>First bullet with <span style="color:#0055cc;">inline color</span></li><li>Second bullet with a long description to test wrapping behavior across clients.</li><li>Third bullet</li></ul><ol style="margin:8px 0 0 20px;"><li>Step one</li><li>Step two</li><li>Step three</li></ol></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Wed, 22 Oct 2025 07:41:00 -0300, dev2@local.test wrote to dev@local.test:<br><br>This is a large content reply with multiple paragraphs meant to stress styling in clients. It includes long lines with inline <strong>bold</strong> and <em>italics</em>, plus a fake code fence.
+
+<pre style="padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow:auto;">for (int i = 0; i < 200; i++) {
+    // simulate long code block
+    processItem(i);
+}
+</pre>
+Below is a simple table with inline styles used by some senders:<br><br><table style="border-collapse:collapse;width:100%;"><thead><tr><th style="border:1px solid #999;padding:6px;text-align:left;">Key</th><th style="border:1px solid #999;padding:6px;text-align:left;">Value</th></tr></thead><tbody><tr><td style='border:1px solid #999;padding:6px;'>Row 1</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 1</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 2</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 2</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 3</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 3</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 4</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 4</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 5</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 5</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 6</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 6</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 7</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 7</td></tr></tbody></table></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Thu, 23 Oct 2025 07:34:00 -0300, dev@local.test wrote to dev2@local.test:<br><br>Medium reply content. Includes bullets and a numbered list to check list styling:
+<ul style="margin:0 0 0 20px;"><li>First bullet with <span style="color:#0055cc;">inline color</span></li><li>Second bullet with a long description to test wrapping behavior across clients.</li><li>Third bullet</li></ul><ol style="margin:8px 0 0 20px;"><li>Step one</li><li>Step two</li><li>Step three</li></ol></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Fri, 24 Oct 2025 07:27:00 -0300, dev2@local.test wrote to dev@local.test:<br><br>This is a large content reply with multiple paragraphs meant to stress styling in clients. It includes long lines with inline <strong>bold</strong> and <em>italics</em>, plus a fake code fence.
+
+<pre style="padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow:auto;">for (int i = 0; i < 200; i++) {
+    // simulate long code block
+    processItem(i);
+}
+</pre>
+Below is a simple table with inline styles used by some senders:<br><br><table style="border-collapse:collapse;width:100%;"><thead><tr><th style="border:1px solid #999;padding:6px;text-align:left;">Key</th><th style="border:1px solid #999;padding:6px;text-align:left;">Value</th></tr></thead><tbody><tr><td style='border:1px solid #999;padding:6px;'>Row 1</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 1</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 2</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 2</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 3</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 3</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 4</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 4</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 5</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 5</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 6</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 6</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 7</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 7</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 8</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 8</td></tr></tbody></table></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Sat, 25 Oct 2025 07:20:00 -0300, dev@local.test wrote to dev2@local.test:<br><br>Medium reply content. Includes bullets and a numbered list to check list styling:
+<ul style="margin:0 0 0 20px;"><li>First bullet with <span style="color:#0055cc;">inline color</span></li><li>Second bullet with a long description to test wrapping behavior across clients.</li><li>Third bullet</li></ul><ol style="margin:8px 0 0 20px;"><li>Step one</li><li>Step two</li><li>Step three</li></ol></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Sun, 26 Oct 2025 07:13:00 -0300, dev2@local.test wrote to dev@local.test:<br><br>This is a large content reply with multiple paragraphs meant to stress styling in clients. It includes long lines with inline <strong>bold</strong> and <em>italics</em>, plus a fake code fence.
+
+<pre style="padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow:auto;">for (int i = 0; i < 200; i++) {
+    // simulate long code block
+    processItem(i);
+}
+</pre>
+Below is a simple table with inline styles used by some senders:<br><br><table style="border-collapse:collapse;width:100%;"><thead><tr><th style="border:1px solid #999;padding:6px;text-align:left;">Key</th><th style="border:1px solid #999;padding:6px;text-align:left;">Value</th></tr></thead><tbody><tr><td style='border:1px solid #999;padding:6px;'>Row 1</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 1</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 2</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 2</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 3</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 3</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 4</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 4</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 5</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 5</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 6</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 6</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 7</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 7</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 8</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 8</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 9</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 9</td></tr></tbody></table></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Mon, 27 Oct 2025 07:06:00 -0300, dev@local.test wrote to dev2@local.test:<br><br>Medium reply content. Includes bullets and a numbered list to check list styling:
+<ul style="margin:0 0 0 20px;"><li>First bullet with <span style="color:#0055cc;">inline color</span></li><li>Second bullet with a long description to test wrapping behavior across clients.</li><li>Third bullet</li></ul><ol style="margin:8px 0 0 20px;"><li>Step one</li><li>Step two</li><li>Step three</li></ol></div></blockquote>
+<blockquote type="cite" style="margin:0 0 0 1em;padding-left:1em;border-left:3px solid #ccc;"><div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;">On Tue, 28 Oct 2025 06:59:00 -0300, dev2@local.test wrote to dev@local.test:<br><br>This is a large content reply with multiple paragraphs meant to stress styling in clients. It includes long lines with inline <strong>bold</strong> and <em>italics</em>, plus a fake code fence.
+
+<pre style="padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow:auto;">for (int i = 0; i < 200; i++) {
+    // simulate long code block
+    processItem(i);
+}
+</pre>
+Below is a simple table with inline styles used by some senders:<br><br><table style="border-collapse:collapse;width:100%;"><thead><tr><th style="border:1px solid #999;padding:6px;text-align:left;">Key</th><th style="border:1px solid #999;padding:6px;text-align:left;">Value</th></tr></thead><tbody><tr><td style='border:1px solid #999;padding:6px;'>Row 1</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 1</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 2</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 2</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 3</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 3</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 4</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 4</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 5</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 5</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 6</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 6</td></tr><tr><td style='border:1px solid #999;padding:6px;'>Row 7</td><td style='border:1px solid #999;padding:6px;'>Lorem ipsum dolor sit amet 7</td></tr></tbody></table></div></blockquote>
+
+</div>
+------=_ThreadBoundary_568785--

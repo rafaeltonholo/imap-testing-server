@@ -1,0 +1,86 @@
+Date: Tue, 18 Nov 2025 14:30:00 +0000
+From: dev@local.test
+To: dev1@local.test
+Subject: Draft review: The Riemann Zeta documentation
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+    body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        color: #2c3e50;
+        line-height: 1.6;
+        max-width: 600px;
+    }
+    .math-block {
+        background-color: #f8f9fa;
+        border-left: 4px solid #007bff;
+        padding: 20px;
+        margin: 20px 0;
+        font-size: 1.2em;
+        text-align: center;
+    }
+    code {
+        background-color: #eef;
+        padding: 2px 4px;
+        border-radius: 4px;
+        font-family: monospace;
+    }
+</style>
+</head>
+<body>
+    <p>Hi there,</p>
+
+    <p>I’ve finished drafting the new section for the numeric analysis library. I wanted to double-check the MathML rendering for the <strong>Basler Problem</strong> before we push this to production. We need to make sure the summation limits align correctly across different clients.</p>
+
+    <p>Specifically, this is the exact markup I’m planning to inject into the <a href="#">Infinite Series module</a>. It represents the value of the Riemann zeta function at $s = 2$.</p>
+
+    <p>
+        Here is the expression:
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="block">
+            <mrow>
+                <munderover>
+                    <mo>∑</mo>
+                    <mrow>
+                        <mi>n</mi>
+                        <mo>=</mo>
+                        <mn>1</mn>
+                    </mrow>
+                    <mi>∞</mi>
+                </munderover>
+                <mfrac>
+                    <mn>1</mn>
+                    <msup>
+                        <mi>n</mi>
+                        <mn>2</mn>
+                    </msup>
+                </mfrac>
+                <mo>=</mo>
+                <mfrac>
+                    <msup>
+                        <mi>π</mi>
+                        <mn>2</mn>
+                    </msup>
+                    <mn>6</mn>
+                </mfrac>
+            </mrow>
+        </math>
+    </p>
+
+    <math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mfrac><mn>1</mn><mi>x</mi></mfrac><annotation
+              encoding="TeX">\frac{1}{x}</annotation></semantics></math>
+
+    <p>The convergence is quite slow, so in the implementation code (see the <code>zeta_calc.py</code> attachment I sent earlier), I actually used the Euler-Maclaurin formula to speed up the approximation.</p>
+
+    <p>Could you verify if the $\pi$ symbol and the infinity sign ($\infty$) are rendering correctly on your end? If it looks good, I'll proceed with the merge request.</p>
+
+    <p>Best regards,</p>
+
+    <p><strong>The Dev Team</strong><br>
+    <em>Internal Research Dept.</em></p>
+</body>
+</html>

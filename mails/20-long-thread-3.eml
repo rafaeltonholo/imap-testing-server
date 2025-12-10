@@ -1,0 +1,205 @@
+MIME-Version: 1.0
+From: "Dev User 1" <dev@local.test>
+To: "Dev User 2" <dev2@local.test>
+Subject: Re: [10x] Test Thread: Complex Multipart/Alternative Nesting
+Date: Tue, 28 Oct 2025 10:30:01 -0300
+Message-ID: <final.thread.11.20251028103001@local.test>
+In-Reply-To: <final.thread.10.20251028102900@local.test>
+References: <final.thread.1.20251028102000@local.test> <final.thread.10.20251028102900@local.test>
+Content-Type: multipart/alternative;
+	boundary="--==_boundary_complex_thread_001"
+
+----==_boundary_complex_thread_001
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+This is the 10th reply (11th message in the thread).=20
+
+I'm adding this final reply to confirm if the fix we discussed in the pre=
+vious message (the one with the large lorem ipsum block) actually worked.=
+ Please run this through the parsing engine and check the blockquote styl=
+ing.
+
+The main issue seems to be the combination of 'quoted-printable' encodin=
+g, the empty '> =' lines, and the deep nesting.
+
+On Tue, Oct 28, 2025 at 10:29 AM, Dev User 2 <dev2@local.test> wrote:
+>
+> This is the 9th reply. This one contains a LARGE block of text to simu=
+late a log dump or code snippet. This is often where renderers fail, es=
+pecially with 'quoted-printable' encoding and deep nesting.
+> =
+
+> Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmo=
+d tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim v=
+eniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea co=
+mmodo consequat. Duis aute irure dolor in reprehenderit in voluptate vel=
+it esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat =
+cupidatat non proident, sunt in culpa qui officia deserunt mollit anim i=
+d est laborum.
+> =
+
+> Nam nec ante. Sed lacinia, urna non tincidunt mattis, tortor neque ege=
+stas Viverra, nulla ut metus varius laor. Integer euismod lacus luctus =
+magna. Quisque cursus, metus vitae pharetra auctor, sem massa mattis sem=
+, at interdum magna augue eget diam. Vestibulum ante ipsum primis in fau=
+cibus orci luctus et ultrices posuere cubilia Curae; Morbi lacinia molli=
+s nu.
+> =
+
+> On Tue, Oct 28, 2025 at 10:28 AM, Dev User 1 <dev@local.test> wrote:
+> >
+> > This is reply 8. Just a quick check-in. The styling seems to break=
+ around this level.
+> > =
+
+> > On Tue, Oct 28, 2025 at 10:27 AM, Dev User 2 <dev2@local.test> wrot=
+e:
+> > >
+> > > This is reply 7.
+> > > =
+
+> > > On Tue, Oct 28, 2025 at 10:26 AM, Dev User 1 <dev@local.test> wrot=
+e:
+> > > >
+> > > > This is reply 6. Adding a medium block of text here to see if i=
+t affects the parent container's width calculation.
+> > > >
+> > > > Pellentesque habitant morbi tristique senectus et netus et male=
+suada fames ac turpis egestas. Vestibulum tortor quam, feugiat vitae, =
+ultricies eget, tempor sit amet, ante. Donec eu libero sit amet quam e=
+gestas semper.
+> > > > =
+
+> > > > On Tue, Oct 28, 2025 at 10:25 AM, Dev User 2 <dev2@local.test> wrot=
+e:
+> > > > >
+> > > > > This is reply 5.
+> > > > > =
+
+> > > > > On Tue, Oct 28, 2025 at 10:24 AM, Dev User 1 <dev@local.test> wrot=
+e:
+> > > > > >
+> > > > > > This is reply 4.
+> > > > > > =
+
+> > > > > > On Tue, Oct 28, 2025 at 10:23 AM, Dev User 2 <dev2@local.test> wrot=
+e:
+> > > > > > >
+> > > > > > > This is reply 3.
+> > > > > > > =
+
+> > > > > > > On Tue, Oct 28, 2025 at 10:22 AM, Dev User 1 <dev@local.test> wrot=
+e:
+> > > > > > > >
+> > > > > > > > This is reply 2.
+> > > > > > > > =
+
+> > > > > > > > On Tue, Oct 28, 2025 at 10:21 AM, Dev User 2 <dev2@local.test> wrot=
+e:
+> > > > > > > > >
+> > > > > > > > > This is reply 1.
+> > > > > > > > > =
+
+> > > > > > > > > On Tue, Oct 28, 2025 at 10:20 AM, Dev User 1 <dev@local.test> wrot=
+e:
+> > > > > > > > > >
+> > > > > > > > > > This is the original message.
+> > > > > > > > > > =
+
+> > > > > > > > > > This is a large block of text for the *original* m=
+essage to establish a baseline.
+> > > > > > > > > > =
+
+> > > > > > > > > > Lorem ipsum dolor sit amet, consectetur adipiscin=
+g elit. Integer posuere erat a ante. Phasellus porta. Fusce suscipit =
+varius mi. Cum sociis natoque penatibus et magnis dis parturient mont=
+es, nascetur ridiculus mus. Nulla dui. Fusce feugiat malesuada odio. =
+Morbi nunc odio, gravida at, cursus nec, luctus a, lorem.
+> > > > > > > > > > =
+
+
+----==_boundary_complex_thread_001
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+<div dir=3D"auto">
+<p>This is the 10th reply (11th message in the thread).</p>
+<p>I'm adding this final reply to confirm if the fix we discussed in the =
+previous message (the one with the large lorem ipsum block) actually wor=
+ked. Please run this through the parsing engine and check the blockquote=
+ styling.</p>
+<p>The main issue seems to be the combination of 'quoted-printable' enco=
+ding, the empty '&gt; =' lines, and the deep nesting.</p>
+</div>
+<blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px; paddi=
+ng-left: 5px;">
+ <p dir=3D"auto">This is the 9th reply. This one contains a LARGE block =
+of text to simulate a log dump or code snippet. This is often where rend=
+erers fail, especially with 'quoted-printable' encoding and deep nesting=
+.</p>
+ <p dir=3D"auto">Lorem ipsum dolor sit amet, consectetur adipiscing elit=
+. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut =
+enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut =
+aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit =
+in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Except=
+eur sint occaecat cupidatat non proident, sunt in culpa qui officia dese=
+runt mollit anim id est laborum.</p>
+ <p dir=3D"auto">Nam nec ante. Sed lacinia, urna non tincidunt mattis, t=
+ortor neque egestas Viverra, nulla ut metus varius laor. Integer euismo=
+d lacus luctus magna. Quisque cursus, metus vitae pharetra auctor, sem m=
+assa mattis sem, at interdum magna augue eget diam. Vestibulum ante ips=
+um primis in faucibus orci luctus et ultrices posuere cubilia Curae; Mor=
+bi lacinia mollis nu.</p>
+ <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px; pad=
+ding-left: 5px;">
+  <p dir=3D"auto">This is reply 8. Just a quick check-in. The styling s=
+eems to break around this level.</p>
+  <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px; pad=
+ding-left: 5px;">
+   <p dir=3D"auto">This is reply 7.</p>
+   <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px; p=
+adding-left: 5px;">
+    <p dir=3D"auto">This is reply 6. Adding a medium block of text here=
+ to see if it affects the parent container's width calculation.</p>
+    <p dir=3D"auto">Pellentesque habitant morbi tristique senectus et n=
+etus et malesuada fames ac turpis egestas. Vestibulum tortor quam, feug=
+iat vitae, ultricies eget, tempor sit amet, ante. Donec eu libero sit a=
+met quam egestas semper.</p>
+    <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px; =
+padding-left: 5px;">
+     <p dir=3D"auto">This is reply 5.</p>
+     <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5px=
+; padding-left: 5px;">
+      <p dir=3D"auto">This is reply 4.</p>
+      <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5p=
+x; padding-left: 5px;">
+       <p dir=3D"auto">This is reply 3.</p>
+       <blockquote style=3D"border-left: 2px solid #ccc; margin-left: 5=
+px; padding-left: 5px;">
+        <p dir=3D"auto">This is reply 2.</p>
+        <blockquote style=3D"border-left: 2px solid #ccc; margin-left:=
+ 5px; padding-left: 5px;">
+         <p dir=3D"auto">This is reply 1.</p>
+         <blockquote style=3D"border-left: 2px solid #ccc; margin-left=
+: 5px; padding-left: 5px;">
+          <p dir=3D"auto">This is the original message.</p>
+          <p dir=3D"auto">This is a large block of text for the *origi=
+nal* message to establish a baseline.</p>
+          <p dir=3D"auto">Lorem ipsum dolor sit amet, consectetur adipi=
+scing elit. Integer posuere erat a ante. Phasellus porta. Fusce suscip=
+it varius mi. Cum sociis natoque penatibus et magnis dis parturient mo=
+ntes, nascetur ridiculus mus. Nulla dui. Fusce feugiat malesuada odio.=
+ Morbi nunc odio, gravida at, cursus nec, luctus a, lorem.</p>
+         </blockquote>
+        </blockquote>
+       </blockquote>
+      </blockquote>
+     </blockquote>
+    </blockquote>
+   </blockquote>
+  </blockquote>
+ </blockquote>
+</blockquote>
+
+----==_boundary_complex_thread_001--

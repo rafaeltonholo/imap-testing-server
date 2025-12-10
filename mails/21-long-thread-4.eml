@@ -1,0 +1,405 @@
+Delivered-To: dev@local.test
+Received: by 2001:db8:face:feed::1 with SMTP id localcsp0001;
+        Tue, 28 Oct 2025 08:26:00 -0300
+X-Received: by 2001:db8:feed:beef::2 with SMTP id localmr0002;
+        Tue, 28 Oct 2025 08:26:00 -0300
+ARC-Seal: i=1; a=rsa-sha256; t=1759859580; cv=none; d=mail.local.test; s=arc-2025; b=FAKESEAL==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=mail.local.test; s=arc-2025; h=subject:references:in-reply-to:message-id:to:reply-to:from:date; bh=FAKEBH=; b=FAKESIG==;
+ARC-Authentication-Results: i=1; mx.local.test; dkim=pass header.i=@local.test; spf=pass smtp.mailfrom=dev2@local.test; dmarc=pass header.from=local.test
+Return-Path: <dev2@local.test>
+Received: from dev2.local.test (dev2.local.test. [203.0.113.42])
+        by mx.local.test with ESMTPS id localid.2025.10.28.08.26.00
+        for <dev@local.test>
+        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);
+        Tue, 28 Oct 2025 08:26:00 -0300
+Authentication-Results: mx.local.test; dkim=pass header.i=@local.test; spf=pass smtp.mailfrom=dev2@local.test; dmarc=pass header.from=local.test
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=local.test; s=mail2025; t=1759859580; bh=FAKEBH=; h=Date:From:Reply-To:To:In-Reply-To:References:Subject:List-ID: List-Archive:List-Post:List-Unsubscribe:List-Unsubscribe-Post: From; b=FAKEDKIM==
+Date: Tue, 28 Oct 2025 08:26:00 -0300
+From: Dev Two <dev2@local.test>
+Reply-To: alpha/mobile <reply+H123ABC@lists.local.test>
+To: Dev One <dev@local.test>
+Message-ID: <alpha/mobile/cases/4242/6789012345@lists.local.test>
+In-Reply-To: <alpha/mobile/cases/4242@lists.local.test>
+References: <alpha/mobile/cases/4242@lists.local.test>
+Subject: Re: [alpha/mobile] Rendering drift in nested quotes (Case #4242)
+Mime-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="----==_mimepart_53cc4eafb55818f89b0b12";
+ charset=UTF-8
+Content-Transfer-Encoding: 7bit
+Precedence: list
+List-ID: alpha/mobile <alpha.mobile.lists.local.test>
+List-Archive: https://portal.local.test/alpha/mobile/cases/4242
+List-Post: <mailto:alpha/mobile <reply+H123ABC@lists.local.test>>
+List-Unsubscribe: <mailto:unsub+H123ABC@lists.local.test>,
+ <https://portal.local.test/notifications/unsubscribe/one-click/FAKE>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+------==_mimepart_53cc4eafb55818f89b0b12
+Content-Type: text/plain;
+ charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+Dev Two left a comment (alpha/mobile#4242)
+
+Context: Long thread to exercise styling and line-wrapping in the client.
+Below are nested replies with varied lengths, lists, code, and a table-ish =
+block.
+
+> Please test the release candidate 4 (rc4) of the Mobile app. It contains =
+a tentative fix for quote collapsing.
+
+> > Observations on Pixel devices: the beta installs side-by-side with stab=
+le; it doesn't reuse the same local store.
+> > Steps planned:
+> >  1) Build rc5 with the margin fix
+> >  2) Verify collapse/expand with 10+ levels
+> >  3) Check monospace blocks and tables
+> >  4) Confirm soft-wrap at 78 chars
+
+> > > Attempted an APK install; still recognized as a separate application.=
+ The datastore remains isolated.
+
+> > > > Short-term guidance: keep using rc builds until 13.1 ships; once it=
+ does, queued ops should reconcile automatically.
+
+> > > > > Open concern: users with pending actions (deletes/moves) may rema=
+in blocked until stable accepts the patch.
+> > > > > Steps planned:
+> > > > >  1) Build rc5 with the margin fix
+> > > > >  2) Verify collapse/expand with 10+ levels
+> > > > >  3) Check monospace blocks and tables
+> > > > >  4) Confirm soft-wrap at 78 chars
+
+> > > > > > Please test the release candidate 4 (rc4) of the Mobile app. It=
+ contains a tentative fix for quote collapsing.
+
+> > > > > > > Observations on Pixel devices: the beta installs side-by-side=
+ with stable; it doesn't reuse the same local store.
+
+> > > > > > > > Attempted an APK install; still recognized as a separate ap=
+plication. The datastore remains isolated.
+> > > > > > > > Steps planned:
+> > > > > > > >  1) Build rc5 with the margin fix
+> > > > > > > >  2) Verify collapse/expand with 10+ levels
+> > > > > > > >  3) Check monospace blocks and tables
+> > > > > > > >  4) Confirm soft-wrap at 78 chars
+
+> > > > > > > > > Short-term guidance: keep using rc builds until 13.1 ship=
+s; once it does, queued ops should reconcile automatically.
+
+> > > > > > > > > > Open concern: users with pending actions (deletes/moves=
+) may remain blocked until stable accepts the patch.
+
+> > > > > > > > > > > Please test the release candidate 4 (rc4) of the Mobi=
+le app. It contains a tentative fix for quote collapsing.
+> > > > > > > > > > > Steps planned:
+> > > > > > > > > > >  1) Build rc5 with the margin fix
+> > > > > > > > > > >  2) Verify collapse/expand with 10+ levels
+> > > > > > > > > > >  3) Check monospace blocks and tables
+> > > > > > > > > > >  4) Confirm soft-wrap at 78 chars
+
+> > > > > > > > > > > > Observations on Pixel devices: the beta installs si=
+de-by-side with stable; it doesn't reuse the same local store.
+
+> > > > > > > > > > > > > Attempted an APK install; still recognized as a s=
+eparate application. The datastore remains isolated.
+
+> > > > > > > > > > > > > > Short-term guidance: keep using rc builds until=
+ 13.1 ships; once it does, queued ops should reconcile automatically.
+> > > > > > > > > > > > > > Steps planned:
+> > > > > > > > > > > > > >  1) Build rc5 with the margin fix
+> > > > > > > > > > > > > >  2) Verify collapse/expand with 10+ levels
+> > > > > > > > > > > > > >  3) Check monospace blocks and tables
+> > > > > > > > > > > > > >  4) Confirm soft-wrap at 78 chars
+
+Additional details:
+- The next block intentionally creates long lines for soft-wrap tests in qu=
+oted-printable emails. Check that sequences like `--flag=3Dvalue` and paths=
+ like /data/user/0/app/cache/tmp render without breaks.
+- The code and table below should not cause font size resets or margin clip=
+ping.
+
+  for (int i =3D 0; i < 320; i++) {
+      // long-running test loop
+      simulate(i);
+  }
+
+Table-ish list:
+  Row 01: Vestibulum ante ipsum primis in faucibus orci luctus 01.
+  Row 02: Vestibulum ante ipsum primis in faucibus orci luctus 02.
+  Row 03: Vestibulum ante ipsum primis in faucibus orci luctus 03.
+  Row 04: Vestibulum ante ipsum primis in faucibus orci luctus 04.
+  Row 05: Vestibulum ante ipsum primis in faucibus orci luctus 05.
+  Row 06: Vestibulum ante ipsum primis in faucibus orci luctus 06.
+  Row 07: Vestibulum ante ipsum primis in faucibus orci luctus 07.
+  Row 08: Vestibulum ante ipsum primis in faucibus orci luctus 08.
+  Row 09: Vestibulum ante ipsum primis in faucibus orci luctus 09.
+  Row 10: Vestibulum ante ipsum primis in faucibus orci luctus 10.
+  Row 11: Vestibulum ante ipsum primis in faucibus orci luctus 11.
+  Row 12: Vestibulum ante ipsum primis in faucibus orci luctus 12.
+  Row 13: Vestibulum ante ipsum primis in faucibus orci luctus 13.
+  Row 14: Vestibulum ante ipsum primis in faucibus orci luctus 14.
+  Row 15: Vestibulum ante ipsum primis in faucibus orci luctus 15.
+  Row 16: Vestibulum ante ipsum primis in faucibus orci luctus 16.
+  Row 17: Vestibulum ante ipsum primis in faucibus orci luctus 17.
+  Row 18: Vestibulum ante ipsum primis in faucibus orci luctus 18.
+  Row 19: Vestibulum ante ipsum primis in faucibus orci luctus 19.
+  Row 20: Vestibulum ante ipsum primis in faucibus orci luctus 20.
+  Row 21: Vestibulum ante ipsum primis in faucibus orci luctus 21.
+  Row 22: Vestibulum ante ipsum primis in faucibus orci luctus 22.
+  Row 23: Vestibulum ante ipsum primis in faucibus orci luctus 23.
+  Row 24: Vestibulum ante ipsum primis in faucibus orci luctus 24.
+  Row 25: Vestibulum ante ipsum primis in faucibus orci luctus 25.
+  Row 26: Vestibulum ante ipsum primis in faucibus orci luctus 26.
+  Row 27: Vestibulum ante ipsum primis in faucibus orci luctus 27.
+  Row 28: Vestibulum ante ipsum primis in faucibus orci luctus 28.
+  Row 29: Vestibulum ante ipsum primis in faucibus orci luctus 29.
+  Row 30: Vestibulum ante ipsum primis in faucibus orci luctus 30.
+  Row 31: Vestibulum ante ipsum primis in faucibus orci luctus 31.
+  Row 32: Vestibulum ante ipsum primis in faucibus orci luctus 32.
+  Row 33: Vestibulum ante ipsum primis in faucibus orci luctus 33.
+  Row 34: Vestibulum ante ipsum primis in faucibus orci luctus 34.
+  Row 35: Vestibulum ante ipsum primis in faucibus orci luctus 35.
+  Row 36: Vestibulum ante ipsum primis in faucibus orci luctus 36.
+  Row 37: Vestibulum ante ipsum primis in faucibus orci luctus 37.
+  Row 38: Vestibulum ante ipsum primis in faucibus orci luctus 38.
+  Row 39: Vestibulum ante ipsum primis in faucibus orci luctus 39.
+  Row 40: Vestibulum ante ipsum primis in faucibus orci luctus 40.
+
+=E2=80=94
+Reply to this email directly, view it in the case portal, or unsubscribe.
+You=E2=80=99re receiving this because you=E2=80=99re assigned to Case #4242.
+
+Message ID: <alpha/mobile/cases/4242/6789012345@lists.local.test>
+------==_mimepart_53cc4eafb55818f89b0b12
+Content-Type: text/html;
+ charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+<div style=3D"display:flex;flex-wrap:wrap;white-space:pre-wrap;align-items:=
+center;">
+  <img height=3D"20" width=3D"20" style=3D"border-radius:50%;margin-right:4=
+px;" decoding=3D"async" src=3D"https://static.local.test/avatars/dev2.png" =
+/>
+  <strong>Dev Two</strong> left a comment <a href=3D"https://portal.local.t=
+est/alpha/mobile/cases/4242#comment-6789012345">(alpha/mobile#4242)</a>
+</div>
+<blockquote type=3D"cite"><p dir=3D"auto">Short-term guidance: continue wit=
+h rc builds until <code>13.1</code> ships. Assuming no further regressions,=
+ queued operations should reconcile on upgrade.</p><blockquote type=3D"cite=
+"><p dir=3D"auto">An APK install still results in a distinct application; t=
+he datastore remains isolated. We cannot guarantee cross-app migration in t=
+hat route.</p><blockquote type=3D"cite"><p dir=3D"auto">On certain devices =
+the beta installs alongside stable and does not reuse the same local store.=
+ This is expected but surprises people during testing.</p><blockquote type=
+=3D"cite"><p dir=3D"auto">Please test the <strong>rc4</strong> build. It in=
+cludes a tentative fix for the quote collapsing issue observed in long thre=
+ads.</p><blockquote type=3D"cite"><p dir=3D"auto">Open concern: users with =
+pending actions (deletes/moves) may stay blocked until the patch lands in s=
+table. We will monitor and document a fallback.</p><blockquote type=3D"cite=
+"><p dir=3D"auto">Short-term guidance: continue with rc builds until <code>=
+13.1</code> ships. Assuming no further regressions, queued operations shoul=
+d reconcile on upgrade.</p><blockquote type=3D"cite"><p dir=3D"auto">An APK=
+ install still results in a distinct application; the datastore remains iso=
+lated. We cannot guarantee cross-app migration in that route.</p><blockquot=
+e type=3D"cite"><p dir=3D"auto">On certain devices the beta installs alongs=
+ide stable and does not reuse the same local store. This is expected but su=
+rprises people during testing.</p><blockquote type=3D"cite"><p dir=3D"auto"=
+>Please test the <strong>rc4</strong> build. It includes a tentative fix fo=
+r the quote collapsing issue observed in long threads.</p><blockquote type=
+=3D"cite"><p dir=3D"auto">Open concern: users with pending actions (deletes=
+/moves) may stay blocked until the patch lands in stable. We will monitor a=
+nd document a fallback.</p><blockquote type=3D"cite"><p dir=3D"auto">Short-=
+term guidance: continue with rc builds until <code>13.1</code> ships. Assum=
+ing no further regressions, queued operations should reconcile on upgrade.<=
+/p><blockquote type=3D"cite"><p dir=3D"auto">An APK install still results i=
+n a distinct application; the datastore remains isolated. We cannot guarant=
+ee cross-app migration in that route.</p><blockquote type=3D"cite"><p dir=
+=3D"auto">On certain devices the beta installs alongside stable and does no=
+t reuse the same local store. This is expected but surprises people during =
+testing.</p><blockquote type=3D"cite"><p dir=3D"auto">Please test the <stro=
+ng>rc4</strong> build. It includes a tentative fix for the quote collapsing=
+ issue observed in long threads.</p></blockquote></blockquote></blockquote>=
+</blockquote></blockquote></blockquote></blockquote></blockquote></blockquo=
+te></blockquote></blockquote></blockquote></blockquote></blockquote>
+<p dir=3D"auto">Below is a large content section mixing paragraphs, code bl=
+ocks, and a table:</p>
+<pre style=3D"padding:8px;border:1px solid #ddd;background:#f7f7f7;overflow=
+:auto;">
+for (int i =3D 0; i &lt; 320; i++) {
+    // long-running test loop
+    simulate(i);
+}
+</pre>
+<table style=3D"border-collapse:collapse;width:100%;margin:12px 0;">
+<thead>
+<tr>
+  <th style=3D"border:1px solid #999;padding:6px;text-align:left;">Key</th>
+  <th style=3D"border:1px solid #999;padding:6px;text-align:left;">Value</t=
+h>
+</tr>
+</thead>
+<tbody>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 01</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 01</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 02</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 02</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 03</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 03</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 04</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 04</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 05</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 05</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 06</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 06</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 07</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 07</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 08</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 08</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 09</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 09</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 10</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 10</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 11</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 11</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 12</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 12</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 13</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 13</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 14</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 14</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 15</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 15</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 16</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 16</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 17</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 17</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 18</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 18</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 19</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 19</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 20</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 20</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 21</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 21</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 22</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 22</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 23</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 23</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 24</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 24</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 25</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 25</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 26</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 26</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 27</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 27</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 28</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 28</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 29</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 29</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 30</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 30</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 31</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 31</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 32</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 32</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 33</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 33</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 34</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 34</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 35</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 35</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 36</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 36</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 37</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 37</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 38</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 38</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 39</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 39</td></tr>
+<tr><td style=3D'border:1px solid #999;padding:6px;'>Row 40</td><td style=
+=3D'border:1px solid #999;padding:6px;'>Vestibulum ante ipsum primis in fau=
+cibus orci luctus 40</td></tr>
+</tbody>
+</table>
+
+<p style=3D"font-size:small;-webkit-text-size-adjust:none;color:#666;">&mda=
+sh;<br/>
+Reply to this email directly, <a href=3D"https://portal.local.test/alpha/mo=
+bile/cases/4242#comment-6789012345">view it in the portal</a>, or
+<a href=3D"https://portal.local.test/notifications/unsubscribe/one-click/FA=
+KE">unsubscribe</a>.<br/>
+You are receiving this because you are assigned to Case #4242.
+<img src=3D"https://static.local.test/trk/beacon.gif" height=3D"1" width=3D=
+"1" alt=3D""/>
+<span style=3D"color:transparent;font-size:0;display:none;visibility:hidden=
+;overflow:hidden;opacity:0;width:0;height:0;max-width:0;max-height:0;mso-hi=
+de:all">
+Message ID: <span>&lt;alpha/mobile/cases/4242/6789012345</span><span>@</spa=
+n><span>lists</span><span>.</span><span>local</span><span>.</span><span>tes=
+t&gt;</span>
+</span></p>
+
+<script type=3D"application/ld+json">[
+  {
+    "@context": "http://schema.org",
+    "@type": "EmailMessage",
+    "potentialAction": {
+      "@type": "ViewAction",
+      "target": "https://portal.local.test/alpha/mobile/cases/4242#comment-=
+6789012345",
+      "url": "https://portal.local.test/alpha/mobile/cases/4242#comment-678=
+9012345",
+      "name": "View Case"
+    },
+    "description": "View this Case in the portal",
+    "publisher": {
+      "@type": "Organization",
+      "name": "Alpha Project",
+      "url": "https://portal.local.test"
+    }
+  }
+]</script>
+
+------==_mimepart_53cc4eafb55818f89b0b12--

@@ -1,0 +1,109 @@
+MIME-Version: 1.0
+From: "Dev User 1" <dev@local.test>
+To: "Dev User 2" <dev2@local.test>
+Subject: Re: Bug Report: Styling Issue on Complex Threads
+Date: Tue, 28 Oct 2025 10:15:12 -0300
+Message-ID: <thread.msg11.20251028101512@local.test>
+In-Reply-To: <thread.msg10.20251028101205@local.test>
+References: <thread.msg1.20251028094530@local.test>
+ <thread.msg2.20251028094710@local.test>
+ <thread.msg3.20251028095015@local.test>
+ <thread.msg4.20251028095320@local.test>
+ <thread.msg5.20251028095545@local.test>
+ <thread.msg6.20251028095800@local.test>
+ <thread.msg7.20251028100030@local.test>
+ <thread.msg8.20251028100400@local.test>
+ <thread.msg9.20251028100815@local.test>
+ <thread.msg10.20251028101205@local.test>
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Okay, implementing the override now. This should fix the immediate styling break. I'll push it to the 'staging-fix' branch for you to review before we merge to main.
+
+Thanks for the quick diagnosis!
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam varius, turpis et commodo pharetra, est eros bibendum elit, nec luctus magna felis sollicitudin mauris. Integer in mauris eu nibh euismod gravida. Duis ac tellus et risus vulputate vehicula. Donec lobortis risus a elit. Etiam tempor. Ut ullamcorper, ligula eu tempor congue, eros est euismod turpis, ac tincidunt nunc posuere ut, libero.
+
+On Tue, Oct 28, 2025 at 10:12 AM, Dev User 2 <dev2@local.test> wrote:
+>
+> Yeah, let's add a specific override just for that context. Something like:
+>
+> `blockquote.legacy-reply-quote { margin-block-start: 1em !important; }`
+>
+> It's ugly, but it'll work for now. We can schedule a proper refactor for the next sprint to remove the reliance on !important and clean up the cascade.
+>
+> On Tue, Oct 28, 2025 at 10:08 AM, Dev User 1 <dev@local.test> wrote:
+> >
+> > Confirmed. Disabling the new cascade layer fixes it entirely. So, it's definitely an interaction issue.
+> >
+> > What's the recommended fix? Should we add an override with a higher specificity for the blockquote margins, or revert the cascade layer merge for now?
+> >
+> > On Tue, Oct 28, 2025 at 10:04 AM, Dev User 2 <dev2@local.test> wrote:
+> > >
+> > > Just ran a test on my end, and I think I see it. The cascade layer seems to be interacting poorly with the legacy quote block styling. Specifically, the `blockquote` margins are collapsing when nested more than 3 levels deep, but only when the parent container has a specific flex property.
+> > >
+> > > Here is a large block of text to simulate a code snippet or log file being pasted, which often causes layout shifts in email clients. This variation in content size is crucial for testing responsive and dynamic layouts.
+> > >
+> > > Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Vestibulum tortor quam, feugiat vitae, ultricies eget, tempor sit amet, ante. Donec eu libero sit amet quam egestas semper. Aenean ultricies mi vitae est. Mauris placerat eleifend leo. Quisque sit amet est et sapien ullamcorper pharetra. Vestibulum erat wisi, condimentum sed, commodo vitae, ornare sit amet, wisi. Aenean fermentum, elit eget tincidunt condimentum, eros ipsum rutrum orci, sagittis tempus lacus enim ac dui. Donec non enim in turpis pulvinar facilisis. Ut felis. Praesent dapibus, neque id cursus faucibus, tortor neque egestas auguae, eu vulputate magna eros eu erat. Aliquam erat volutpat. Nam dui mi, tincidunt quis, accumsan porttitor, facilisis luctus, metus.
+> > >
+> > > Phasellus ultrices nulla quis nibh. Quisque a lectus. Donec consectetuer ligula vulputate sem tristique cursus. Nam nulla quam, gravida non, commodo a, sodales sit amet, nisi. Pellentesque fermentum dolor. Aliquam quam lectus, facilisis auctor, ultrices ut, elementum vulputate, nunc.
+> > >
+> > > Can you try disabling the `@layer` directive in `main.css` locally and see if the issue persists?
+> > >
+> > > On Tue, Oct 28, 2025 at 10:00 AM, Dev User 1 <dev@local.test> wrote:
+> > > >
+> > > > Ah, that could be it. We did just merge the new CSS cascade layer feature branch yesterday. Let me try disabling that and see if it resolves the issue.
+> > > >
+> > > > It's just so strange that it only affects threads with more than ~5 replies. Maybe a specificity or inheritance issue that only manifests at deeper nesting levels?
+> > > >
+> > > > On Tue, Oct 28, 2025 at 9:58 AM, Dev User 2 <dev2@local.test> wrote:
+> > > > >
+> > > > > Okay, I think I see it in the logs. It's not throwing an error, but it looks like the styling engine is failing to apply the `nested-quote-style` class.
+> > > > >
+> > > > > This usually happens if there's a CSS conflict. Did we ship any new styling changes in the last build? Specifically anything related to global styles or resets?
+> > > > >
+> > > > > On Tue, Oct 28, 2025 at 9:55 AM, Dev User 1 <dev@local.test> wrote:
+> > > > > >
+> > > > > > No, it's happening on desktop (both the native app and web) as well.
+> > > > > >
+> > > > > > It's hard to describe, but the indentation gets progressively worse, and after about the 6th or 7th reply, the text starts to overflow its container, and the left-border (the quote indicator) disappears.
+> > > > > >
+> > > > > > On Tue, Oct 28, 2025 at 9:53 AM, Dev User 2 <dev2@local.test> wrote:
+> > > > > > >
+> > > > > > > Thanks. Nothing obvious in these logs, it all looks standard.
+> > > > > > >
+> > > > > > > Is this issue happening only on mobile, or desktop as well? Trying to narrow down if it's a media query problem.
+> > > > > > >
+> > > > > > > On Tue, Oct 28, 2025 at 9:50 AM, Dev User 1 <dev@local.test> wrote:
+> > > > > > > >
+> > > > > > > > Here are the logs. I've attached a large block of text.
+> > > > > > > >
+> > > > > > > > [START LOG DUMP]
+> > > > > > > > Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer posuere erat a ante. Phasellus porta. Fusce suscipit varius mi. Cum sociis natoque penatibus et magnis dis parturient montes, nascetur ridiculus mus. Nulla dui. Fusce feugiat malesuada odio. Morbi nunc odio, gravida at, cursus nec, luctus a, lorem. Maecenas tristique orci ac sem. Duis ultricies pharetra magna. Donec accumsan malesuada orci. Donec sit amet eros.
+> > > > > > > >
+> > > > > > > > Vestibulum litora torquent per conubia nostra, per inceptos himenaeos. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Vestibulum tortor quam, feugiat vitae, ultricies eget, tempor sit amet, ante. Donec eu libero sit amet quam egestas semper. Aenean ultricies mi vitae est. Mauris placerat eleifend leo. Quisque sit amet est et sapien ullamcorper pharetra. Vestibulum erat wisi, condimentum sed, commodo vitae, ornare sit amet, wisi.
+> > > > > > > >
+> > > > > > > > Aenean fermentum, elit eget tincidunt condimentum, eros ipsum rutrum orci, sagittis tempus lacus enim ac dui. Donec non enim in turpis pulvinar facilisis. Ut felis. Praesent dapibus, neque id cursus faucibus, tortor neque egestas auguae, eu vulputate magna eros eu erat. Aliquam erat volutpat. Nam dui mi, tincidunt quis, accumsan porttitor, facilisis luctus, metus.
+> > > > > > > > [END LOG DUMP]
+> > > > > > > >
+> > > > > > > > Let me know if you see anything.
+> > > > > > > >
+> > > > > > > > On Tue, Oct 28, 2025 at 9:47 AM, Dev User 2 <dev2@local.test> wrote:
+> > > > > > > > >
+> > > > > > > > > That's odd. I'm not seeing it on my end, but my test threads are usually just 2-3 replies deep.
+> > > > > > > > >
+> > > > > > > > > Can you clear your cache and send me the console logs from when you open the thread?
+> > > > > > > > >
+> > > > > > > > > On Tue, Oct 28, 2025 at 9:45 AM, Dev User 1 <dev@local.test> wrote:
+> > > > > > > > > >
+> > > > > > > > > > Hey Dev2,
+> > > > > > > > > >
+> > > > > > > > > > I'm seeing a weird styling bug on the new beta build. When a user is viewing an email thread with a high number of replies (e.g., 10+), the CSS for the nested blockquotes seems to break.
+> > > > > > > > > >
+> > > > > > > > > > The indentation and borders get all messed up.
+> > > > > > > > > >
+> > > > > > > > > > Can you look into this?
+> > > > > > > > > >
+> > > > > > > > > > - Dev1
