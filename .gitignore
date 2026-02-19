@@ -1,6 +1,7 @@
 vmail/*
 ssl/*
 mails/temp/*
+config/*.bak-*
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,windows,macos,linux,androidstudio
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,windows,macos,linux,androidstudio
