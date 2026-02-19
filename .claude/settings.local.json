@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(chmod:*)",
+      "Bash(git -C /Users/rafael/dev/pocs/dovecot-docker status)",
+      "Bash(bash -n:*)"
+    ]
+  }
+}
