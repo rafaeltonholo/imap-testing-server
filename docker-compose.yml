@@ -11,6 +11,12 @@ services:
       - ./ssl:/etc/dovecot/ssl:ro
       - ./vmail:/srv/vmail
       - ./logs:/var/log/dovecot
+    healthcheck:
+      test: ["CMD", "doveadm", "who"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   mailhog:
     image: mailhog/mailhog:latest
