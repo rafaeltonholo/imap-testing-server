@@ -1,0 +1,29 @@
+myhostname = mail.local.test
+mydomain = local.test
+myorigin = $mydomain
+
+# Accept mail for this domain and deliver via LMTP to Dovecot
+mydestination = local.test, $myhostname, localhost.$mydomain, localhost
+mailbox_transport = lmtp:inet:dovecot:24
+
+# Open relay for Docker networks (no auth required from these sources)
+mynetworks = 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+
+# SASL auth via Dovecot (for testing authenticated flows)
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = inet:dovecot:12345
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_security_options = noanonymous
+
+# Relay restrictions: allow mynetworks, SASL-authenticated clients, reject everything else
+smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+
+# No TLS requirement for local dev simplicity
+smtpd_tls_security_level = none
+smtp_tls_security_level = none
+
+# Disable IPv6 to avoid binding issues in Docker
+inet_protocols = ipv4
+
+# Logging to stdout (Docker)
+maillog_file = /dev/stdout

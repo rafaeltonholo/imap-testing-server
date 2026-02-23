@@ -18,10 +18,13 @@ services:
       retries: 5
       start_period: 15s
 
-  mailhog:
-    image: mailhog/mailhog:latest
-    container_name: mailhog-dev
+  postfix:
+    build: ./postfix
+    container_name: postfix-dev
     restart: unless-stopped
     ports:
-      - "1025:1025"   # SMTP
-      - "8025:8025"   # Web UI
+      - "1025:25"     # SMTP (maps host:1025 → container:25)
+      - "587:587"     # SMTP Submission
+    depends_on:
+      dovecot:
+        condition: service_healthy

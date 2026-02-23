@@ -1,5 +1,7 @@
-dev@local.test:{PLAIN}secret3
-dev1@local.test:{PLAIN}secret3
-dev2@local.test:{PLAIN}secret3
-dev3@local.test:{PLAIN}secret3
-dev4@local.test:{PLAIN}secret3
+dev@local.test:{PLAIN}secret
+dev1@local.test:{PLAIN}secret
+dev2@local.test:{PLAIN}secret
+dev3@local.test:{PLAIN}secret
+dev4@local.test:{PLAIN}secret
+dev5@local.test:{PLAIN}secret
+a_very_long-email_for_testing@local.test:{PLAIN}secret
