@@ -45,6 +45,24 @@ docker compose logs -f dovecot   # follow
 ./scripts/generate_random_emails.sh                           # 100 emails to dev@local.test
 ```
 
+**Generate a random email thread (saved to mails/threads/<name>/):**
+```sh
+python3 scripts/generate_thread.py --name onboarding --count 8 \
+  --from "Alice <alice@local.test>" --from "Bob <bob@local.test>" \
+  --to carol@local.test --cc dave@local.test
+
+python3 scripts/generate_thread.py --name deploy-issue --count 12 \
+  --from alice@local.test --from bob@local.test --from carol@local.test \
+  --to dev-team@local.test --subject "Deployment rollback discussion"
+```
+
+**Send a pre-built thread into a mailbox:**
+```sh
+./scripts/send_thread.sh --thread api-v2-migration --email dev@local.test
+./scripts/send_thread.sh --thread api-v2-migration --email dev@local.test --date now --delay 1
+./scripts/send_thread.sh --thread onboarding --email dev@local.test --date "2026-03-01 10:00:00"
+```
+
 **Create a mailbox folder:**
 ```sh
 ./scripts/create_folder.sh --email dev@local.test --folder INBOX.Archive
