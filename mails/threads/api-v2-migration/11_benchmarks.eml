@@ -1,0 +1,68 @@
+MIME-Version: 1.0
+Date: Wed, 05 Mar 2026 11:45:00 -0300
+From: bob@local.test
+To: alice@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-11@local.test>
+In-Reply-To: <project-thread-10@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test> <project-thread-8@local.test> <project-thread-9@local.test> <project-thread-10@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_11"
+
+------=_Part_11
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Alice, Carol,
+
+I finished the benchmark results for the new endpoints. Summary:
+
+  Endpoint              | p50   | p95   | p99
+  ----------------------|-------|-------|------
+  POST /v2/users        | 12ms  | 45ms  | 120ms
+  GET  /v2/users/:id    | 3ms   | 8ms   | 22ms
+  PUT  /v2/users/:id    | 15ms  | 52ms  | 145ms
+  DELETE /v2/users/:id  | 5ms   | 12ms  | 35ms
+  POST /v2/users/bulk   | 85ms  | 340ms | 890ms
+  GET  /v2/search       | 22ms  | 95ms  | 250ms
+
+The bulk endpoint is about 30% faster than v1 thanks to the batched
+writes. Search is slightly slower due to the new faceting logic but
+still well within SLA.
+
+I also ran a 10-minute stress test at 5x normal traffic. No errors,
+memory stayed flat, CPU peaked at 62%. Looks solid.
+
+- Bob
+
+------=_Part_11
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Alice, Carol,</p>
+  <p>I finished the benchmark results for the new endpoints. Summary:</p>
+  <table style="border-collapse:collapse;margin:8px 0;">
+    <thead>
+      <tr>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:left;background:#f5f5f5;">Endpoint</th>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:right;background:#f5f5f5;">p50</th>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:right;background:#f5f5f5;">p95</th>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:right;background:#f5f5f5;">p99</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>POST /v2/users</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">12ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">45ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">120ms</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>GET /v2/users/:id</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">3ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">8ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">22ms</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>PUT /v2/users/:id</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">15ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">52ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">145ms</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>DELETE /v2/users/:id</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">5ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">12ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">35ms</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>POST /v2/users/bulk</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">85ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">340ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">890ms</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;"><code>GET /v2/search</code></td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">22ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">95ms</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">250ms</td></tr>
+    </tbody>
+  </table>
+  <p>The bulk endpoint is about 30% faster than v1 thanks to the batched writes. Search is slightly slower due to the new faceting logic but still well within SLA.</p>
+  <p>I also ran a 10-minute stress test at 5x normal traffic. No errors, memory stayed flat, CPU peaked at 62%. Looks solid.</p>
+  <p>- Bob</p>
+</div>
+------=_Part_11--

@@ -1,0 +1,48 @@
+MIME-Version: 1.0
+Date: Mon, 03 Mar 2026 10:15:00 -0300
+From: bob@local.test
+To: alice@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-7@local.test>
+In-Reply-To: <project-thread-6@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_07"
+
+------=_Part_07
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Morning everyone,
+
+Found an issue during weekend testing. The v2 search endpoint was
+returning stale results when the read replica lag exceeded 500ms.
+Root cause: we were using eventual consistency reads for the search
+index but the freshness requirement is stricter than expected.
+
+Fix: I added a consistency token that forces a primary read when
+the client's last-known write is newer than the replica state.
+Performance impact is minimal (adds ~3ms per request on cache miss).
+
+Patch is in PR #4518. Carol, can you review?
+
+Also flagging: the Node.js SDK v3.2.0 has a bug in the retry logic
+that can cause duplicate POST requests. I filed an issue upstream
+and added a workaround in our API gateway (idempotency key check).
+
+- Bob
+
+------=_Part_07
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Morning everyone,</p>
+  <p>Found an issue during weekend testing. The v2 search endpoint was returning stale results when the read replica lag exceeded 500ms. Root cause: we were using eventual consistency reads for the search index but the freshness requirement is stricter than expected.</p>
+  <p>Fix: I added a consistency token that forces a primary read when the client's last-known write is newer than the replica state. Performance impact is minimal (adds ~3ms per request on cache miss).</p>
+  <p>Patch is in PR #4518. Carol, can you review?</p>
+  <p>Also flagging: the Node.js SDK v3.2.0 has a bug in the retry logic that can cause duplicate POST requests. I filed an issue upstream and added a workaround in our API gateway (idempotency key check).</p>
+  <p>- Bob</p>
+</div>
+------=_Part_07--

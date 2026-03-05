@@ -1,0 +1,56 @@
+MIME-Version: 1.0
+Date: Wed, 26 Feb 2026 14:30:00 -0300
+From: bob@local.test
+To: alice@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-3@local.test>
+In-Reply-To: <project-thread-2@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_03"
+
+------=_Part_03
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Quick heads up -- I just merged the connection pooling fix (PR #4502).
+
+Before the fix, each v2 request was opening a new DB connection because
+the pool wasn't being reused across the middleware chain. Under load
+this caused connection exhaustion after ~800 concurrent requests.
+
+After the fix, we're reusing connections properly and I tested up to
+3,000 concurrent requests without issues. Pool size is set to 50
+connections per instance (configurable via DB_POOL_SIZE env var).
+
+This was the last P0 blocker for the migration. All P0s are now resolved.
+
+Remaining P1 items:
+ - Pagination cursor encryption (to prevent parameter tampering)
+ - Request body size limit per endpoint (currently global 10MB)
+ - GraphQL-style field selection for GET endpoints
+
+P1s can be done post-cutover.
+
+- Bob
+
+------=_Part_03
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Quick heads up -- I just merged the connection pooling fix (PR #4502).</p>
+  <p>Before the fix, each v2 request was opening a new DB connection because the pool wasn't being reused across the middleware chain. Under load this caused connection exhaustion after ~800 concurrent requests.</p>
+  <p>After the fix, we're reusing connections properly and I tested up to 3,000 concurrent requests without issues. Pool size is set to 50 connections per instance (configurable via <code>DB_POOL_SIZE</code> env var).</p>
+  <p>This was the <strong>last P0 blocker</strong> for the migration. All P0s are now resolved.</p>
+  <p>Remaining P1 items:</p>
+  <ul>
+    <li>Pagination cursor encryption (to prevent parameter tampering)</li>
+    <li>Request body size limit per endpoint (currently global 10MB)</li>
+    <li>GraphQL-style field selection for GET endpoints</li>
+  </ul>
+  <p>P1s can be done post-cutover.</p>
+  <p>- Bob</p>
+</div>
+------=_Part_03--

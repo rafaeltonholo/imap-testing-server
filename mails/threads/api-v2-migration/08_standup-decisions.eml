@@ -1,0 +1,58 @@
+MIME-Version: 1.0
+Date: Mon, 03 Mar 2026 16:30:00 -0300
+From: alice@local.test
+To: bob@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-8@local.test>
+In-Reply-To: <project-thread-7@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_08"
+
+------=_Part_08
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+All,
+
+Thanks for the updates. A few decisions from today's standup:
+
+1. We're going with the phased rollout: 10% -> 50% -> 100% over 3 hours
+2. Bob will be primary on-call during cutover, Carol as backup
+3. We'll keep the v1 endpoints running in read-only mode for 30 days
+4. The deprecation notice goes out to external API consumers tomorrow
+
+For the database migration, I confirmed with the DBA team:
+  - The new indexes will be built concurrently (no table locks)
+  - Estimated time for index creation: ~45 minutes on prod
+  - We should start the migration 2 hours before the traffic cutover
+
+Also, I noticed we don't have synthetic monitoring set up for v2 yet.
+Bob, can you add the health check endpoints to our Datadog monitors?
+
+- Alice
+
+------=_Part_08
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>All,</p>
+  <p>Thanks for the updates. A few decisions from today's standup:</p>
+  <ol>
+    <li>We're going with the phased rollout: 10% &#8594; 50% &#8594; 100% over 3 hours</li>
+    <li>Bob will be primary on-call during cutover, Carol as backup</li>
+    <li>We'll keep the v1 endpoints running in read-only mode for 30 days</li>
+    <li>The deprecation notice goes out to external API consumers tomorrow</li>
+  </ol>
+  <p>For the database migration, I confirmed with the DBA team:</p>
+  <ul>
+    <li>New indexes will be built concurrently (no table locks)</li>
+    <li>Estimated time for index creation: ~45 minutes on prod</li>
+    <li>We should start the migration 2 hours before the traffic cutover</li>
+  </ul>
+  <p>Also, I noticed we don't have synthetic monitoring set up for v2 yet. Bob, can you add the health check endpoints to our Datadog monitors?</p>
+  <p>- Alice</p>
+</div>
+------=_Part_08--

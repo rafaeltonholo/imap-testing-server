@@ -1,0 +1,57 @@
+MIME-Version: 1.0
+Date: Wed, 05 Mar 2026 14:30:00 -0300
+From: alice@local.test
+To: bob@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan - final review before cutover
+Message-ID: <project-thread-12@local.test>
+In-Reply-To: <project-thread-11@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test> <project-thread-8@local.test> <project-thread-9@local.test> <project-thread-10@local.test> <project-thread-11@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_12"
+
+------=_Part_12
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hey team,
+
+Just got off a call with the SRE team. They confirmed that the load balancer
+rules are in place and traffic shaping is ready. We can do the cutover on
+Friday at 22:00 UTC as planned.
+
+One thing they flagged: the /v1/users/bulk endpoint is still getting ~2k RPM
+from the mobile app. We need to make sure the v1 compatibility shim stays up
+for at least 2 more weeks. I've added it to the runbook.
+
+Checklist before cutover:
+ - [x] Database migration scripts tested on staging
+ - [x] Rate limiting configured on API gateway
+ - [x] Monitoring dashboards updated
+ - [ ] Rollback procedure documented (Dave, can you finish this today?)
+ - [ ] Mobile team notified about deprecation timeline
+
+Let me know if anything else is missing.
+
+- Alice
+
+------=_Part_12
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Hey team,</p>
+  <p>Just got off a call with the SRE team. They confirmed that the load balancer rules are in place and traffic shaping is ready. We can do the cutover on Friday at 22:00 UTC as planned.</p>
+  <p>One thing they flagged: the <code>/v1/users/bulk</code> endpoint is still getting ~2k RPM from the mobile app. We need to make sure the v1 compatibility shim stays up for at least 2 more weeks. I've added it to the runbook.</p>
+  <p><strong>Checklist before cutover:</strong></p>
+  <ul>
+    <li><s>Database migration scripts tested on staging</s></li>
+    <li><s>Rate limiting configured on API gateway</s></li>
+    <li><s>Monitoring dashboards updated</s></li>
+    <li>Rollback procedure documented (Dave, can you finish this today?)</li>
+    <li>Mobile team notified about deprecation timeline</li>
+  </ul>
+  <p>Let me know if anything else is missing.</p>
+  <p>- Alice</p>
+</div>
+------=_Part_12--

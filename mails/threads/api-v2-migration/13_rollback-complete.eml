@@ -1,0 +1,91 @@
+MIME-Version: 1.0
+Date: Wed, 05 Mar 2026 18:45:00 -0300
+From: dave@local.test
+To: alice@local.test, bob@local.test, carol@local.test
+Subject: Re: [Backend] API v2 migration plan - final review before cutover
+Message-ID: <project-thread-13@local.test>
+In-Reply-To: <project-thread-12@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test> <project-thread-8@local.test> <project-thread-9@local.test> <project-thread-10@local.test> <project-thread-11@local.test> <project-thread-12@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_13"
+
+------=_Part_13
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Alice, all,
+
+Good news -- rollback procedure is now fully documented, including Scenario 4.
+
+Scenario 4: Auth service dependency failure
+  - v2 auth middleware falls back to cached JWT validation (15-min TTL)
+  - If cache is cold, route affected endpoints to v1 (session-based auth)
+  - Alert on-call auth team via PagerDuty
+  - Estimated impact: degraded experience for ~2% of requests during failover
+
+I also added a "decision tree" flowchart to the runbook so whoever is on-call
+can quickly determine which scenario we're in and follow the right steps.
+
+Here's the final runbook summary:
+
+  Step | Action                              | Owner  | ETA
+  -----|-------------------------------------|--------|--------
+  1    | Start DB migration (indexes)        | Alice  | T-2h
+  2    | Verify index creation completed     | Alice  | T-1h15m
+  3    | Enable v2 shadow traffic (10%)      | Dave   | T-30m
+  4    | Monitor error rates for 15 min      | Bob    | T-15m
+  5    | Shift to 50% traffic                | Dave   | T+0
+  6    | Monitor for 30 min                  | Bob    | T+30m
+  7    | Shift to 100% traffic               | Dave   | T+1h
+  8    | Monitor for 1 hour                  | Carol  | T+2h
+  9    | Disable v1 write endpoints          | Alice  | T+3h
+  10   | Send completion notice to team      | Alice  | T+3h
+
+Everything on my end is ready. Green light from me for Friday.
+
+- Dave
+
+------=_Part_13
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Alice, all,</p>
+  <p>Good news -- rollback procedure is now fully documented, including Scenario 4.</p>
+  <div style="background:#f9f9f9;border:1px solid #e0e0e0;border-radius:6px;padding:12px 16px;margin:12px 0;">
+    <p style="margin:0 0 8px 0;"><strong>Scenario 4: Auth service dependency failure</strong></p>
+    <ul style="margin:0;">
+      <li>v2 auth middleware falls back to cached JWT validation (15-min TTL)</li>
+      <li>If cache is cold, route affected endpoints to v1 (session-based auth)</li>
+      <li>Alert on-call auth team via PagerDuty</li>
+      <li>Estimated impact: degraded experience for ~2% of requests during failover</li>
+    </ul>
+  </div>
+  <p><strong>Final runbook summary:</strong></p>
+  <table style="border-collapse:collapse;margin:8px 0;width:100%;">
+    <thead>
+      <tr>
+        <th style="border:1px solid #ccc;padding:6px 10px;text-align:center;background:#f5f5f5;">Step</th>
+        <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;background:#f5f5f5;">Action</th>
+        <th style="border:1px solid #ccc;padding:6px 10px;text-align:center;background:#f5f5f5;">Owner</th>
+        <th style="border:1px solid #ccc;padding:6px 10px;text-align:center;background:#f5f5f5;">ETA</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">1</td><td style="border:1px solid #ccc;padding:4px 10px;">Start DB migration (indexes)</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Alice</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T-2h</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">2</td><td style="border:1px solid #ccc;padding:4px 10px;">Verify index creation completed</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Alice</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T-1h15m</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">3</td><td style="border:1px solid #ccc;padding:4px 10px;">Enable v2 shadow traffic (10%)</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Dave</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T-30m</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">4</td><td style="border:1px solid #ccc;padding:4px 10px;">Monitor error rates for 15 min</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Bob</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T-15m</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">5</td><td style="border:1px solid #ccc;padding:4px 10px;">Shift to 50% traffic</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Dave</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+0</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">6</td><td style="border:1px solid #ccc;padding:4px 10px;">Monitor for 30 min</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Bob</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+30m</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">7</td><td style="border:1px solid #ccc;padding:4px 10px;">Shift to 100% traffic</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Dave</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+1h</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">8</td><td style="border:1px solid #ccc;padding:4px 10px;">Monitor for 1 hour</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Carol</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+2h</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">9</td><td style="border:1px solid #ccc;padding:4px 10px;">Disable v1 write endpoints</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Alice</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+3h</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">10</td><td style="border:1px solid #ccc;padding:4px 10px;">Send completion notice to team</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">Alice</td><td style="border:1px solid #ccc;padding:4px 10px;text-align:center;">T+3h</td></tr>
+    </tbody>
+  </table>
+  <p>Everything on my end is ready. <span style="color:#2E8B57;font-weight:bold;">Green light from me for Friday.</span></p>
+  <p>- Dave</p>
+</div>
+------=_Part_13--

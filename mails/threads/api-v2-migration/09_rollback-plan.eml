@@ -1,0 +1,66 @@
+MIME-Version: 1.0
+Date: Tue, 04 Mar 2026 14:00:00 -0300
+From: dave@local.test
+To: alice@local.test, bob@local.test, carol@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-9@local.test>
+In-Reply-To: <project-thread-8@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test> <project-thread-8@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_09"
+
+------=_Part_09
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Quick update on the rollback plan:
+
+I've been working through failure scenarios. Here's what I have so far:
+
+Scenario 1: Data corruption in new schema
+  - Stop v2 traffic at load balancer
+  - Run reverse migration script (tested on staging, takes ~4 min)
+  - Redirect traffic back to v1
+  - Estimated downtime: 6-8 minutes
+
+Scenario 2: Performance degradation (>500ms p99)
+  - Shift 100% traffic to v1 via feature flag (no downtime)
+  - Investigate with v2 receiving shadow traffic only
+
+Scenario 3: Partial failure (subset of endpoints)
+  - Use per-endpoint routing rules to mix v1/v2
+  - Already tested this config on staging
+
+Still need to document Scenario 4 (auth service dependency failure).
+Will have it done by tomorrow EOD.
+
+- Dave
+
+------=_Part_09
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Quick update on the rollback plan:</p>
+  <p><strong>Scenario 1: Data corruption in new schema</strong></p>
+  <ol>
+    <li>Stop v2 traffic at load balancer</li>
+    <li>Run reverse migration script (tested on staging, takes ~4 min)</li>
+    <li>Redirect traffic back to v1</li>
+    <li>Estimated downtime: 6-8 minutes</li>
+  </ol>
+  <p><strong>Scenario 2: Performance degradation (&gt;500ms p99)</strong></p>
+  <ol>
+    <li>Shift 100% traffic to v1 via feature flag (no downtime)</li>
+    <li>Investigate with v2 receiving shadow traffic only</li>
+  </ol>
+  <p><strong>Scenario 3: Partial failure (subset of endpoints)</strong></p>
+  <ol>
+    <li>Use per-endpoint routing rules to mix v1/v2</li>
+    <li>Already tested this config on staging</li>
+  </ol>
+  <p>Still need to document Scenario 4 (auth service dependency failure). Will have it done by tomorrow EOD.</p>
+  <p>- Dave</p>
+</div>
+------=_Part_09--

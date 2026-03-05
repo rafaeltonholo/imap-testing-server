@@ -1,0 +1,74 @@
+MIME-Version: 1.0
+Date: Fri, 28 Feb 2026 15:45:00 -0300
+From: carol@local.test
+To: alice@local.test, bob@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-6@local.test>
+In-Reply-To: <project-thread-5@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_06"
+
+------=_Part_06
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hi all,
+
+The integration tests for the v2 endpoints are all green now.
+Here's the coverage summary:
+
+  Module                  | Coverage | Tests
+  ------------------------|----------|------
+  users.controller        | 94%      | 47
+  users.service           | 91%      | 38
+  search.controller       | 88%      | 31
+  search.service          | 85%      | 29
+  bulk.processor          | 92%      | 22
+  auth.middleware          | 96%      | 15
+  rate-limiter            | 89%      | 12
+  error-handler           | 93%      | 18
+  Total                   | 91%      | 212
+
+I also added contract tests against the OpenAPI spec. Any drift between
+the implementation and the spec will fail the CI pipeline.
+
+One concern: the bulk processor tests are flaky when run in parallel
+because they share a database. I'm going to switch them to use
+isolated transactions. Should be fixed by Monday.
+
+- Carol
+
+------=_Part_06
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Hi all,</p>
+  <p>The integration tests for the v2 endpoints are all green now. Here's the coverage summary:</p>
+  <table style="border-collapse:collapse;margin:8px 0;">
+    <thead>
+      <tr>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:left;background:#f5f5f5;">Module</th>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:right;background:#f5f5f5;">Coverage</th>
+        <th style="border:1px solid #ccc;padding:4px 8px;text-align:right;background:#f5f5f5;">Tests</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">users.controller</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">94%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">47</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">users.service</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">91%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">38</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">search.controller</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">88%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">31</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">search.service</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">85%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">29</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">bulk.processor</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">92%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">22</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">auth.middleware</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">96%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">15</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">rate-limiter</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">89%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">12</td></tr>
+      <tr><td style="border:1px solid #ccc;padding:4px 8px;">error-handler</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">93%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">18</td></tr>
+      <tr style="font-weight:bold;"><td style="border:1px solid #ccc;padding:4px 8px;">Total</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">91%</td><td style="border:1px solid #ccc;padding:4px 8px;text-align:right;">212</td></tr>
+    </tbody>
+  </table>
+  <p>I also added contract tests against the OpenAPI spec. Any drift between the implementation and the spec will fail the CI pipeline.</p>
+  <p>One concern: the bulk processor tests are flaky when run in parallel because they share a database. I'm going to switch them to use isolated transactions. Should be fixed by Monday.</p>
+  <p>- Carol</p>
+</div>
+------=_Part_06--

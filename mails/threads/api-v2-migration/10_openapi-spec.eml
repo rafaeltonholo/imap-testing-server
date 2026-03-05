@@ -1,0 +1,73 @@
+MIME-Version: 1.0
+Date: Tue, 04 Mar 2026 17:20:00 -0300
+From: carol@local.test
+To: alice@local.test, bob@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-10@local.test>
+In-Reply-To: <project-thread-9@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test> <project-thread-5@local.test> <project-thread-6@local.test> <project-thread-7@local.test> <project-thread-8@local.test> <project-thread-9@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_10"
+
+------=_Part_10
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Team,
+
+I pushed the updated OpenAPI spec to the docs repo. Changes include:
+
+ * New pagination model using cursor-based pagination instead of offset
+ * Added `X-Request-Id` header to all responses for tracing
+ * Deprecated fields marked with `x-deprecated-since: 2026-01-15`
+ * New error response schema with structured error codes:
+
+   {
+     "error": {
+       "code": "VALIDATION_FAILED",
+       "message": "Invalid email format",
+       "details": [
+         {"field": "email", "constraint": "must be a valid email address"}
+       ],
+       "request_id": "req_abc123"
+     }
+   }
+
+I also added migration guides for each breaking change. The biggest one
+is the pagination change -- clients need to switch from ?page=N&limit=M
+to ?cursor=<token>&limit=M. I wrote a helper library for the mobile team
+that handles the translation.
+
+PR link: #4521 (already approved by Bob)
+
+- Carol
+
+------=_Part_10
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Team,</p>
+  <p>I pushed the updated OpenAPI spec to the docs repo. Changes include:</p>
+  <ul>
+    <li>New pagination model using cursor-based pagination instead of offset</li>
+    <li>Added <code>X-Request-Id</code> header to all responses for tracing</li>
+    <li>Deprecated fields marked with <code>x-deprecated-since: 2026-01-15</code></li>
+    <li>New error response schema with structured error codes</li>
+  </ul>
+  <pre style="padding:10px;border:1px solid #ddd;background:#f7f7f7;border-radius:4px;overflow:auto;font-size:12px;">{
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "Invalid email format",
+    "details": [
+      {"field": "email", "constraint": "must be a valid email address"}
+    ],
+    "request_id": "req_abc123"
+  }
+}</pre>
+  <p>I also added migration guides for each breaking change. The biggest one is the pagination change. I wrote a helper library for the mobile team that handles the translation.</p>
+  <p>PR link: #4521 (already approved by Bob)</p>
+  <p>- Carol</p>
+</div>
+------=_Part_10--

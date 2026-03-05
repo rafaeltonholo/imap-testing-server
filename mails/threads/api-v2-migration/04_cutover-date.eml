@@ -1,0 +1,62 @@
+MIME-Version: 1.0
+Date: Thu, 27 Feb 2026 16:00:00 -0300
+From: alice@local.test
+To: bob@local.test, carol@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-4@local.test>
+In-Reply-To: <project-thread-3@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_04"
+
+------=_Part_04
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Team,
+
+Product just confirmed the cutover date: Friday, March 6th.
+That gives us exactly one week to finalize everything.
+
+Priority items:
+ 1. Bob: Complete benchmark suite and stress tests
+ 2. Carol: Finalize OpenAPI spec and migration guides
+ 3. Dave: Infrastructure provisioning and rollback plan
+ 4. Alice (me): Coordinate with SRE, DBA, and mobile teams
+
+Meeting schedule:
+ - Daily standups at 10:00 UTC until cutover
+ - Final go/no-go review: Thursday March 5th at 18:00 UTC
+ - Cutover war room: Friday March 6th at 21:00 UTC
+
+Shared doc with the full timeline: https://docs.internal/api-v2-cutover
+
+Let's make this smooth. We've been planning for 3 months.
+
+- Alice
+
+------=_Part_04
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Team,</p>
+  <p>Product just confirmed the cutover date: <strong>Friday, March 6th</strong>. That gives us exactly one week to finalize everything.</p>
+  <p>Priority items:</p>
+  <ol>
+    <li>Bob: Complete benchmark suite and stress tests</li>
+    <li>Carol: Finalize OpenAPI spec and migration guides</li>
+    <li>Dave: Infrastructure provisioning and rollback plan</li>
+    <li>Alice (me): Coordinate with SRE, DBA, and mobile teams</li>
+  </ol>
+  <p>Meeting schedule:</p>
+  <ul>
+    <li>Daily standups at 10:00 UTC until cutover</li>
+    <li>Final go/no-go review: Thursday March 5th at 18:00 UTC</li>
+    <li>Cutover war room: Friday March 6th at 21:00 UTC</li>
+  </ul>
+  <p>Let's make this smooth. We've been planning for 3 months.</p>
+  <p>- Alice</p>
+</div>
+------=_Part_04--

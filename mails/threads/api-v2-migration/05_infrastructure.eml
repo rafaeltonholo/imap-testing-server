@@ -1,0 +1,57 @@
+MIME-Version: 1.0
+Date: Fri, 28 Feb 2026 11:00:00 -0300
+From: dave@local.test
+To: alice@local.test, bob@local.test, carol@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-5@local.test>
+In-Reply-To: <project-thread-4@local.test>
+References: <project-thread-1@local.test> <project-thread-2@local.test> <project-thread-3@local.test> <project-thread-4@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_05"
+
+------=_Part_05
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hey team,
+
+Infrastructure update:
+
+ - Provisioned 3 additional API server instances for cutover headroom
+ - Redis cluster upgraded to 7.2 (needed for the new caching layer)
+ - Set up a dedicated Kafka topic for v2 event streaming
+ - Created separate CloudWatch alarms for v2 endpoints:
+   * 5xx rate > 0.1% -> PagerDuty alert
+   * p99 latency > 500ms -> Slack warning
+   * Request rate drop > 30% -> Slack warning
+
+The staging environment is now a 1:1 replica of prod in terms of
+infrastructure. I ran a chaos test (killed 1 of 3 API nodes) and
+failover happened in <2 seconds with zero dropped requests.
+
+- Dave
+
+------=_Part_05
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Hey team,</p>
+  <p>Infrastructure update:</p>
+  <ul>
+    <li>Provisioned 3 additional API server instances for cutover headroom</li>
+    <li>Redis cluster upgraded to 7.2 (needed for the new caching layer)</li>
+    <li>Set up a dedicated Kafka topic for v2 event streaming</li>
+    <li>Created separate CloudWatch alarms for v2 endpoints:
+      <ul>
+        <li>5xx rate &gt; 0.1% &#8594; PagerDuty alert</li>
+        <li>p99 latency &gt; 500ms &#8594; Slack warning</li>
+        <li>Request rate drop &gt; 30% &#8594; Slack warning</li>
+      </ul>
+    </li>
+  </ul>
+  <p>The staging environment is now a 1:1 replica of prod. I ran a chaos test (killed 1 of 3 API nodes) and failover happened in &lt;2 seconds with zero dropped requests.</p>
+  <p>- Dave</p>
+</div>
+------=_Part_05--

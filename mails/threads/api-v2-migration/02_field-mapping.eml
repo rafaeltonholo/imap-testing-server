@@ -1,0 +1,57 @@
+MIME-Version: 1.0
+Date: Tue, 25 Feb 2026 10:00:00 -0300
+From: carol@local.test
+To: alice@local.test, bob@local.test, dave@local.test
+Subject: Re: [Backend] API v2 migration plan
+Message-ID: <project-thread-2@local.test>
+In-Reply-To: <project-thread-1@local.test>
+References: <project-thread-1@local.test>
+Content-Language: en-US
+X-Mailer: Thunderbird 128.0
+Content-Type: multipart/alternative; boundary="----=_Part_02"
+
+------=_Part_02
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Morning,
+
+I've been reviewing the v1 -> v2 field mapping and found a few things
+we need to handle:
+
+ 1. `user.name` (string) is now split into `user.first_name` and
+    `user.last_name`. The v1 compat shim needs to concatenate these.
+
+ 2. `user.created` (Unix timestamp) is now `user.created_at` (ISO 8601).
+    Both formats should be returned during the transition period.
+
+ 3. `user.role` was an integer enum (0=admin, 1=user, 2=viewer).
+    In v2 it's a string enum ("admin", "user", "viewer").
+    The compat shim maps both directions.
+
+ 4. `user.metadata` was a flat key-value map. In v2 it's a nested
+    object with typed fields. This is the trickiest mapping -- I wrote
+    a recursive transformer that handles 95% of cases. The remaining 5%
+    are edge cases with deeply nested arrays that no current client uses.
+
+I've added all of these to the migration guide with code examples.
+
+- Carol
+
+------=_Part_02
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Morning,</p>
+  <p>I've been reviewing the v1 &#8594; v2 field mapping and found a few things we need to handle:</p>
+  <ol>
+    <li><code>user.name</code> (string) is now split into <code>user.first_name</code> and <code>user.last_name</code>. The v1 compat shim needs to concatenate these.</li>
+    <li><code>user.created</code> (Unix timestamp) is now <code>user.created_at</code> (ISO 8601). Both formats should be returned during the transition period.</li>
+    <li><code>user.role</code> was an integer enum (0=admin, 1=user, 2=viewer). In v2 it's a string enum. The compat shim maps both directions.</li>
+    <li><code>user.metadata</code> was a flat key-value map. In v2 it's a nested object with typed fields. I wrote a recursive transformer for this.</li>
+  </ol>
+  <p>I've added all of these to the migration guide with code examples.</p>
+  <p>- Carol</p>
+</div>
+------=_Part_02--
