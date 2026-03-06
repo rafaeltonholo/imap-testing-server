@@ -4,14 +4,12 @@
 import argparse
 import html
 import random
-import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from email.utils import formatdate, parseaddr
-from pathlib import Path
+from email.utils import formatdate
 
-THREADS_DIR = Path(__file__).resolve().parent.parent / "mails" / "threads"
+from lib import THREADS_DIR, display_name, make_slug
 
 # ---------------------------------------------------------------------------
 # Data pools for random content generation
@@ -66,21 +64,6 @@ SIGNOFFS = [
     "Let me know what you think.",
     "Looking forward to your thoughts.",
 ]
-
-
-def display_name(addr: str) -> str:
-    """Extract the display name from an address, falling back to the local part."""
-    name, email = parseaddr(addr)
-    if name:
-        return name
-    # "alice@local.test" -> "alice"
-    return email.split("@")[0].capitalize()
-
-
-def make_slug(text: str, max_len: int = 30) -> str:
-    """Turn the first few words of text into a filename-safe slug."""
-    words = re.sub(r"[^a-z0-9 ]", "", text.lower()).split()[:4]
-    return "-".join(words)[:max_len]
 
 
 def random_body() -> str:
@@ -260,7 +243,7 @@ examples:
     print(f"Done! Generated {args.count} emails in: {thread_dir}")
     print()
     print("Send the thread with:")
-    print(f"  ./scripts/send_thread.sh --thread {args.name} --email <TARGET_EMAIL>")
+    print(f"  python3 scripts/send_thread.py --thread {args.name} --email <TARGET_EMAIL>")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,10 @@
       "Bash(bash -n:*)",
       "Bash(docker exec:*)",
       "Bash(docker compose:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(./scripts/generate_thread.sh:*)",
+      "Bash(python3:*)",
+      "Bash(chmod +x:*)"
     ]
   }
 }
