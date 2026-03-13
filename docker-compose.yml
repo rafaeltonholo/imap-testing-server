@@ -11,6 +11,9 @@ services:
       - ./ssl:/etc/dovecot/ssl:ro
       - ./vmail:/srv/vmail
       - ./logs:/var/log/dovecot
+    depends_on:
+      oauth2-mock:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "doveadm", "who"]
       interval: 10s
@@ -28,3 +31,16 @@ services:
     depends_on:
       dovecot:
         condition: service_healthy
+
+  oauth2-mock:
+    build: ./oauth2-mock
+    container_name: oauth2-mock
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # OAuth2 introspection endpoint
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
