@@ -1,5 +1,6 @@
 vmail/*
 ssl/*
+stalwart-data/*
 mails/temp/*
 config/*.bak-*
 

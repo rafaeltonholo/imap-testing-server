@@ -21,6 +21,7 @@ THREADS_DIR = MAILS_DIR / "threads"
 VMAIL_DIR = ROOT_DIR / "vmail"
 SSL_DIR = ROOT_DIR / "ssl"
 USERS_FILE = CONFIG_DIR / "users"
+STALWART_DATA_DIR = ROOT_DIR / "stalwart-data"
 
 # ---------------------------------------------------------------------------
 # Docker / Dovecot

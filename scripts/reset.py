@@ -4,12 +4,13 @@
 import shutil
 import subprocess
 import sys
-from lib import ROOT_DIR, VMAIL_DIR, USERS_FILE
+from lib import ROOT_DIR, VMAIL_DIR, STALWART_DATA_DIR, USERS_FILE
 
 
 def main():
     print("This will:")
     print("  - Delete all mail under vmail/")
+    print("  - Delete Stalwart data under stalwart-data/")
     print("  - Restore config/users to its last committed state (git checkout)")
     print()
 
@@ -21,6 +22,16 @@ def main():
     # Clear vmail contents but keep the directory and .gitkeep
     if VMAIL_DIR.exists():
         for child in VMAIL_DIR.iterdir():
+            if child.name == ".gitkeep":
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+    # Clear stalwart-data contents
+    if STALWART_DATA_DIR.exists():
+        for child in STALWART_DATA_DIR.iterdir():
             if child.name == ".gitkeep":
                 continue
             if child.is_dir():
@@ -40,6 +51,7 @@ def main():
 
     print("Reset complete.")
     print("Run 'docker compose restart dovecot' to apply the restored users file.")
+    print("Run 'python3 scripts/sync_stalwart_users.py' to re-provision Stalwart users.")
 
 
 if __name__ == "__main__":
