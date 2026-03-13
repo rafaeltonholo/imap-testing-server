@@ -102,6 +102,15 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
 - **mailhog** (`mailhog/mailhog:latest`, container: `mailhog-dev`) — SMTP capture
   - SMTP: `localhost:1025`
   - Web UI: `http://localhost:8025`
+- **oauth2-mock** (built from `./oauth2-mock/`, container: `oauth2-mock`) — Mock OAuth2 authorization server
+  - Discovery: `http://localhost:8080/.well-known/oauth-authorization-server`
+  - Authorize: `http://localhost:8080/authorize` (shows consent page)
+  - Token: `http://localhost:8080/token` (auth code exchange + refresh)
+  - Introspect: `http://localhost:8080/introspect` (RFC 7662)
+  - Health: `http://localhost:8080/health`
+  - Any `client_id`/`client_secret` accepted; user picks email on consent page
+  - Direct token conventions: `valid-<user>` (success), `expired-<user>` (expired), `scope-<user>` (insufficient scope), anything else (invalid)
+  - Query params on any endpoint: `?delay=<seconds>` (latency), `?status=<code>` (forced HTTP error)
 
 ### User Management
 
@@ -125,7 +134,7 @@ The default injection delay (2.5s) between successive injections prevents Doveco
 
 ### Dovecot Configuration (`config/`)
 
-- `10-auth.conf` — passwd-file auth using `config/users`; cleartext allowed for local dev
+- `10-auth.conf` — passwd-file + OAuth2 auth; cleartext allowed for local dev; OAuth2 introspection pointed at `oauth2-mock`
 - `10-mail.conf` — Maildir storage under `/srv/vmail/%{user}/Maildir`
 - `10-ssl.conf` — TLS using certs from `./ssl/`
 - `10-logging.conf` — verbose logging to stdout (visible via `docker compose logs`)
