@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stalwart"
+  short_description: "Stalwart JMAP server configuration and provisioning"
+  default_prompt: "Use $stalwart to configure JMAP settings, provision users, or manage the Stalwart admin API."
