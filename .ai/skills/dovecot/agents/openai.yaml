@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dovecot"
+  short_description: "Dovecot IMAP server configuration and administration"
+  default_prompt: "Use $dovecot to configure authentication, mail storage, namespaces, or troubleshoot IMAP issues."
