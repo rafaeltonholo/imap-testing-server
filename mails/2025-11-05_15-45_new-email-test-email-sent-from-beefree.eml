@@ -1,0 +1,1685 @@
+Delivered-To: rtonholo@thunderbird.net
+Received: by 2002:a05:7301:580a:b0:29a:b437:84ae with SMTP id jq10csp2977455dyc;
+        Wed, 5 Nov 2025 07:45:13 -0800 (PST)
+X-Google-Smtp-Source: AGHT+IEvkMcnFl+pVzIjqk/X56F/R/Oc0QojNrhVBUGe7mXSFRohfMnGJTkPrlwT6KEY02jo2dIU
+X-Received: by 2002:a05:6000:210c:b0:429:dde3:659d with SMTP id ffacd0b85a97d-429e3309ae3mr2309623f8f.47.1762357513052;
+        Wed, 05 Nov 2025 07:45:13 -0800 (PST)
+ARC-Seal: i=1; a=rsa-sha256; t=1762357513; cv=none;
+        d=google.com; s=arc-20240605;
+        b=ZzTwp0r2XQKb6/IxAaV0HlgUumBaFkVlP+mbLy2AXwea8HHxFzFsrRt0aXn2qE64nG
+         C9vq5KqDCPJjnyOdQz5WVOCKTL9JbSgKpqraPxAKo0rcM+UWGASBkkuHURZ0EjR4lobo
+         qrbCZH6SbUgsZRDTKOTnpG1bRCAnwv6jE2OnNIB8XQX3PYcc3zLFFkdYe84tcnXrfOGD
+         ZoVJ5kFMyZCbsFa6gAhX1Skw9x3FFXDEm/iYo06E6zgBFsyCtWtMUV1yUHX+JU7udO+x
+         QHTVUHNc8n9JPeNHLULqHpX3mh7WKZLZpjFHCI6+XlpeWbrBr2uYlFi/GAa0h5jf+N/c
+         Vwxw==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;
+        h=feedback-id:date:message-id:content-transfer-encoding:mime-version
+         :subject:to:reply-to:from:dkim-signature:dkim-signature;
+        bh=mE16UUuikolkXU+IK4ej6tD43VEsKCPxTvDOrBxvDfs=;
+        fh=U8tSlY7/LikhW7bWihHKn9boUAR/PhCYJPJvQ7NoSlE=;
+        b=CAOO66ao8Kp4+rKjwjigFX+sTV63kfb88OOtjnP7aVFID1LenahT6eOVZFDWroqRIw
+         HDus/kpyT7cQQeINtUfpgPmLfK9plR1cClvLoKUmqmos/PoNg+fXzwZVaz5IYcSe+xWI
+         RVs8YeH1KGs4nwwhwAPI2Ffo2UYUvC7B4GoEX6ZKVeX9u+MbBe2zrP1DKYqP2rgpS6lX
+         bM5h8X6ap+IZFi0bKdjm25WZIXw5VQq9g2U0jVBnzdQAH8W5Eo0x3/P1zZko2QRrVLI4
+         BLyqsfVaj3fkx9jpXuTAGnZiuwrcYtX6BGSNaISMtY6oLgdtO+2wb6yznXvdw4EY4tgL
+         +7MA==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@pro.beesend.io header.s=ott6sm72wohosw6rib2p2z66qyih3xg4 header.b=ycT5o8Jy;
+       dkim=pass header.i=@amazonses.com header.s=ihchhvubuqgjsxyuhssfvqohv7z3u4hn header.b=Xfc0jmRy;
+       spf=pass (google.com: domain of 0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io designates 54.240.7.28 as permitted sender) smtp.mailfrom=0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io;
+       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=pro.beesend.io
+Return-Path: <0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io>
+Received: from a7-28.smtp-out.eu-west-1.amazonses.com (a7-28.smtp-out.eu-west-1.amazonses.com. [54.240.7.28])
+        by mx.google.com with ESMTPS id ffacd0b85a97d-429c1146450si9867190f8f.395.2025.11.05.07.45.12
+        for <rtonholo@thunderbird.net>
+        (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
+        Wed, 05 Nov 2025 07:45:13 -0800 (PST)
+Received-SPF: pass (google.com: domain of 0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io designates 54.240.7.28 as permitted sender) client-ip=54.240.7.28;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@pro.beesend.io header.s=ott6sm72wohosw6rib2p2z66qyih3xg4 header.b=ycT5o8Jy;
+       dkim=pass header.i=@amazonses.com header.s=ihchhvubuqgjsxyuhssfvqohv7z3u4hn header.b=Xfc0jmRy;
+       spf=pass (google.com: domain of 0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io designates 54.240.7.28 as permitted sender) smtp.mailfrom=0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@mail-eu1.pro.beesend.io;
+       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=pro.beesend.io
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=ott6sm72wohosw6rib2p2z66qyih3xg4; d=pro.beesend.io; t=1762357512;
+	h=From:Reply-To:To:Subject:MIME-Version:Content-Type:Content-Transfer-Encoding:Message-ID:Date;
+	bh=zZ0QNZOUf4bm4C5QszUD21ae2YeYg4qmVN0/BYe2Y3w=;
+	b=ycT5o8Jyv5oqnHSlqhfraJD6UdTYT7P+BPeEJ7hP1ZfWGh6hKJk4WA7dwdTFCEl1
+	/no4mXfHCkqrni1d014ENVk3lRrwj/qAf+dpdDuOyIi7s4xCD2umoabQxb3vhoTEvrT
+	MtfMihAIonpCtyvYsLgDCSYu1Y5WI5Jph1HcTbe0=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=ihchhvubuqgjsxyuhssfvqohv7z3u4hn; d=amazonses.com; t=1762357512;
+	h=From:Reply-To:To:Subject:MIME-Version:Content-Type:Content-Transfer-Encoding:Message-ID:Date:Feedback-ID;
+	bh=zZ0QNZOUf4bm4C5QszUD21ae2YeYg4qmVN0/BYe2Y3w=;
+	b=Xfc0jmRyyL6u55HRtA5w1nK4wQrPglAg9IAd+szJRjr5ElxwiIOutobkBbnATAn1
+	5t5Lka0PaNvWNM7qz/N44Nrg4Zefq5ed8BUoGLO6aSr+kt6duYry7URSu3bJZVDkiZw
+	C39B1lDw3seow2L30yGMgGKoxDlqZOnOIeSgo+LI=
+From: support@pro.beesend.io
+Reply-To: rtonholo@thunderbird.net
+To: rtonholo@thunderbird.net
+Subject: New email | Test email sent from Beefree
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Message-ID: <0102019a54b18829-cd2a5675-63d9-430b-b179-128d0a21361d-000000@eu-west-1.amazonses.com>
+Date: Wed, 5 Nov 2025 15:45:12 +0000
+Feedback-ID: ::1.eu-west-1.kpbPion9/+yWOjZ4AsA7YFoDnsxuMQ29qcdnbm+6I3g=:AmazonSES
+X-SES-Outgoing: 2025.11.05-54.240.7.28
+
+<!DOCTYPE html>
+<html xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:o=3D"urn:schemas-micr=
+osoft-com:office:office" lang=3D"en">
+
+<head>
+=09<title></title>
+=09<meta http-equiv=3D"Content-Type" content=3D"text/html; charset=3Dutf-8"=
+>
+=09<meta name=3D"viewport" content=3D"width=3Ddevice-width, initial-scale=
+=3D1.0"><!--[if mso]>
+<xml><w:WordDocument xmlns:w=3D"urn:schemas-microsoft-com:office:word"><w:D=
+ontUseAdvancedTypographyReadingMail/></w:WordDocument>
+<o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch><o:AllowPNG/=
+></o:OfficeDocumentSettings></xml>
+<![endif]--><!--[if !mso]><!-->
+=09<link href=3D"https://fonts.googleapis.com/css?family=3DMontserrat" rel=
+=3D"stylesheet" type=3D"text/css"><!--<![endif]-->
+=09<style>
+=09=09* {
+=09=09=09box-sizing: border-box;
+=09=09}
+
+=09=09body {
+=09=09=09margin: 0;
+=09=09=09padding: 0;
+=09=09}
+
+=09=09a[x-apple-data-detectors] {
+=09=09=09color: inherit !important;
+=09=09=09text-decoration: inherit !important;
+=09=09}
+
+=09=09#MessageViewBody a {
+=09=09=09color: inherit;
+=09=09=09text-decoration: none;
+=09=09}
+
+=09=09p {
+=09=09=09line-height: inherit
+=09=09}
+
+=09=09.desktop_hide,
+=09=09.desktop_hide table {
+=09=09=09mso-hide: all;
+=09=09=09display: none;
+=09=09=09max-height: 0px;
+=09=09=09overflow: hidden;
+=09=09}
+
+=09=09.image_block img+div {
+=09=09=09display: none;
+=09=09}
+
+=09=09sup,
+=09=09sub {
+=09=09=09font-size: 75%;
+=09=09=09line-height: 0;
+=09=09}
+
+=09=09.menu_block.desktop_hide .menu-links span {
+=09=09=09mso-hide: all;
+=09=09}
+
+=09=09@media (max-width:695px) {
+
+=09=09=09.desktop_hide table.icons-inner,
+=09=09=09.social_block.desktop_hide .social-table {
+=09=09=09=09display: inline-block !important;
+=09=09=09}
+
+=09=09=09.icons-inner {
+=09=09=09=09text-align: center;
+=09=09=09}
+
+=09=09=09.icons-inner td {
+=09=09=09=09margin: 0 auto;
+=09=09=09}
+
+=09=09=09.image_block div.fullWidth {
+=09=09=09=09max-width: 100% !important;
+=09=09=09}
+
+=09=09=09.menu-checkbox[type=3Dcheckbox]~.menu-links {
+=09=09=09=09display: none !important;
+=09=09=09=09padding: 5px 0;
+=09=09=09}
+
+=09=09=09.menu-checkbox[type=3Dcheckbox]:checked~.menu-trigger .menu-open {
+=09=09=09=09display: none !important;
+=09=09=09}
+
+=09=09=09.menu-checkbox[type=3Dcheckbox]:checked~.menu-links,
+=09=09=09.menu-checkbox[type=3Dcheckbox]~.menu-trigger {
+=09=09=09=09display: block !important;
+=09=09=09=09max-width: none !important;
+=09=09=09=09max-height: none !important;
+=09=09=09=09font-size: inherit !important;
+=09=09=09}
+
+=09=09=09.menu-checkbox[type=3Dcheckbox]~.menu-links>a,
+=09=09=09.menu-checkbox[type=3Dcheckbox]~.menu-links>span.label {
+=09=09=09=09display: block !important;
+=09=09=09=09text-align: center;
+=09=09=09}
+
+=09=09=09.menu-checkbox[type=3Dcheckbox]:checked~.menu-trigger .menu-close =
+{
+=09=09=09=09display: block !important;
+=09=09=09}
+
+=09=09=09.mobile_hide {
+=09=09=09=09display: none;
+=09=09=09}
+
+=09=09=09.row-content {
+=09=09=09=09width: 100% !important;
+=09=09=09}
+
+=09=09=09.stack .column {
+=09=09=09=09width: 100%;
+=09=09=09=09display: block;
+=09=09=09}
+
+=09=09=09.mobile_hide {
+=09=09=09=09min-height: 0;
+=09=09=09=09max-height: 0;
+=09=09=09=09max-width: 0;
+=09=09=09=09overflow: hidden;
+=09=09=09=09font-size: 0px;
+=09=09=09}
+
+=09=09=09.desktop_hide,
+=09=09=09.desktop_hide table {
+=09=09=09=09display: table !important;
+=09=09=09=09max-height: none !important;
+=09=09=09}
+=09=09}
+
+=09=09#menu-r0c0m4:checked~.menu-links {
+=09=09=09background-color: #e27c3a !important;
+=09=09}
+
+=09=09#menu-r0c0m4:checked~.menu-links a,
+=09=09#menu-r0c0m4:checked~.menu-links span {
+=09=09=09color: #ffffff !important;
+=09=09}
+=09</style><!--[if mso ]><style>sup, sub { font-size: 100% !important; } su=
+p { mso-text-raise:10% } sub { mso-text-raise:-10% }</style> <![endif]-->
+</head>
+
+<body class=3D"body" style=3D"background-color: #fff5eb; margin: 0; padding=
+: 0; -webkit-text-size-adjust: none; text-size-adjust: none;">
+=09<table class=3D"nl-container" width=3D"100%" border=3D"0" cellpadding=3D=
+"0" cellspacing=3D"0" role=3D"presentation" style=3D"mso-table-lspace: 0pt;=
+ mso-table-rspace: 0pt; background-color: #fff5eb;">
+=09=09<tbody>
+=09=09=09<tr>
+=09=09=09=09<td>
+=09=09=09=09=09<table class=3D"row row-1" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 675px;"><a href=3D"www.example.com" target=3D"_blank"><img src=3D"https://=
+d1oco4z2z1fhwp.cloudfront.net/templates/default/4856/top-header.png" style=
+=3D"display: block; height: auto; border: 0; width: 100%;" width=3D"675" al=
+t=3D"topheader" title=3D"topheader" height=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-2" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-3"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-left:20px;width:100%;padding-right:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 118.125px;"><a href=3D"http://www.example.com" target=3D"_blank"><img src=
+=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/4856/travel-log=
+o.png" style=3D"display: block; height: auto; border: 0; width: 100%;" widt=
+h=3D"118.125" alt=3D"your-ogo" title=3D"your-ogo" height=3D"auto"></a></div=
+>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-4" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"menu_block block-5" =
+width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pre=
+sentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"col=
+or:#1a1a1a;font-family:'Montserrat', 'Trebuchet MS', 'Lucida Grande', 'Luci=
+da Sans Unicode', 'Lucida Sans', Tahoma, sans-serif;font-size:13px;letter-s=
+pacing:1px;text-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<table width=3D"100%" cellp=
+adding=3D"0" cellspacing=3D"0" border=3D"0" role=3D"presentation" style=3D"=
+mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"alignmen=
+t" style=3D"text-align:center;font-size:0px;"><!--[if !mso]><!--><input cla=
+ss=3D"menu-checkbox" id=3D"menu-r0c0m4" type=3D"checkbox" style=3D"display:=
+none !important;max-height:0;visibility:hidden;"><!--<![endif]-->
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"menu=
+-trigger" style=3D"display:none;max-height:0px;max-width:0px;font-size:0px;=
+overflow:hidden;"><label class=3D"menu-label" for=3D"menu-r0c0m4" style=3D"=
+height: 36px; width: 36px; display: inline-block; cursor: pointer; mso-hide=
+: all; user-select: none; align: center; text-align: center; color: #ffffff=
+; text-decoration: none; background-color: #e27c3a; border-radius: 50%;"><s=
+pan class=3D"menu-open" style=3D"word-break: break-word; mso-hide: all; fon=
+t-size: 26px; line-height: 31.5px;">=E2=98=B0</span><span class=3D"menu-clo=
+se" style=3D"word-break: break-word; display: none; mso-hide: all; font-siz=
+e: 26px; line-height: 36px;">=E2=9C=95</span></label></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"menu=
+-links"><!--[if mso]><table role=3D"presentation" border=3D"0" cellpadding=
+=3D"0" cellspacing=3D"0" align=3D"center" style=3D""><tr style=3D"text-alig=
+n:center;"><![endif]--><!--[if mso]><td style=3D"padding-top:10px;padding-r=
+ight:5px;padding-bottom:10px;padding-left:5px"><![endif]--><a href=3D"http:=
+//www.example.com" target=3D"_self" style=3D"mso-hide:false;padding-top:10p=
+x;padding-bottom:10px;padding-left:5px;padding-right:5px;display:inline-blo=
+ck;color:#1a1a1a;font-family:'Montserrat', 'Trebuchet MS', 'Lucida Grande',=
+ 'Lucida Sans Unicode', 'Lucida Sans', Tahoma, sans-serif;font-size:13px;te=
+xt-decoration:none;letter-spacing:1px;">CONTACT</a><!--[if mso]></td><![end=
+if]--><!--[if mso]><td style=3D"padding-top:10px;padding-right:5px;padding-=
+bottom:10px;padding-left:5px"><![endif]--><a href=3D"http://www.example.com=
+" target=3D"_self" style=3D"mso-hide:false;padding-top:10px;padding-bottom:=
+10px;padding-left:5px;padding-right:5px;display:inline-block;color:#1a1a1a;=
+font-family:'Montserrat', 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Uni=
+code', 'Lucida Sans', Tahoma, sans-serif;font-size:13px;text-decoration:non=
+e;letter-spacing:1px;">DESTINATIONS</a><!--[if mso]></td><![endif]--><!--[i=
+f mso]><td style=3D"padding-top:10px;padding-right:5px;padding-bottom:10px;=
+padding-left:5px"><![endif]--><a href=3D"http://www.example.com" target=3D"=
+_self" style=3D"mso-hide:false;padding-top:10px;padding-bottom:10px;padding=
+-left:5px;padding-right:5px;display:inline-block;color:#1a1a1a;font-family:=
+'Montserrat', 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Unicode', 'Luci=
+da Sans', Tahoma, sans-serif;font-size:13px;text-decoration:none;letter-spa=
+cing:1px;">SAFE TRAVEL</a><!--[if mso]></td><![endif]--><!--[if mso]></tr><=
+/table><![endif]--></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-2" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:30px;line-height:30px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"heading_block block-=
+2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"=
+presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"tex=
+t-align:center;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<h1 style=3D"margin: 0; col=
+or: #e27c3a; direction: ltr; font-family: Georgia, Times, 'Times New Roman'=
+, serif; font-size: 38px; font-weight: normal; letter-spacing: 1px; line-he=
+ight: 1.2; text-align: center; margin-top: 0; margin-bottom: 0; mso-line-he=
+ight-alt: 46px;"><em><strong>Thanksgiving</strong></em></h1>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-3" =
+style=3D"height:15px;line-height:15px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"heading_block block-=
+4" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"=
+presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"tex=
+t-align:center;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<h1 style=3D"margin: 0; col=
+or: #1a1a1a; direction: ltr; font-family: 'Montserrat', 'Trebuchet MS', 'Lu=
+cida Grande', 'Lucida Sans Unicode', 'Lucida Sans', Tahoma, sans-serif; fon=
+t-size: 23px; font-weight: normal; letter-spacing: 2px; line-height: 1.2; t=
+ext-align: center; margin-top: 0; margin-bottom: 0; mso-line-height-alt: 28=
+px;">- IS COMING -</h1>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-3" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-left:10px;padding-right:10px;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 655px;"><a href=3D"http://www.example.com" target=3D"_=
+blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/=
+4856/top.png" style=3D"display: block; height: auto; border: 0; width: 100%=
+;" width=3D"655" alt=3D"Thanksgiving-image" title=3D"Thanksgiving-image" he=
+ight=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-2" =
+style=3D"height:15px;line-height:15px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"heading_block block-=
+3" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"=
+presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"tex=
+t-align:center;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<h1 style=3D"margin: 0; col=
+or: #e27c3a; direction: ltr; font-family: Georgia, Times, 'Times New Roman'=
+, serif; font-size: 27px; font-weight: normal; letter-spacing: 1px; line-he=
+ight: 1.2; text-align: center; margin-top: 0; margin-bottom: 0; mso-line-he=
+ight-alt: 32px;"><em>For everything you are <strong>grateful</strong> for</=
+em></h1>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-4" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:18px;letter-spacing:0px;line-heig=
+ht:1.5;text-align:center;mso-line-height-alt:27px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><em><span style=3D"word-break: break-word;">Plannin=
+g, preparing and hosting.</span></em></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;"><strong>Tha=
+nksgiving</strong> will be different this year,</span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">and we=E2=
+=80=99ve got the plan to make it easier.</span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"button_block block-5=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:15px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center"><a href=3D"http://www.example.com" target=3D"_blank" style=
+=3D"color:#ffffff;text-decoration:none;"><!--[if mso]>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"  href=3D"http://www.example.com"  style=3D"he=
+ight:42px;width:234px;v-text-anchor:middle;" arcsize=3D"10%" fillcolor=3D"#=
+e27c3a">
+<v:stroke dashstyle=3D"Solid" weight=3D"0px" color=3D"#e27c3a"/>
+<w:anchorlock/>
+<v:textbox inset=3D"5px,0px,0px,0px">
+<center dir=3D"false" style=3D"color:#ffffff;font-family:sans-serif;font-si=
+ze:16px">
+<![endif]--><span class=3D"button" style=3D"background-color: #e27c3a; mso-=
+shading: transparent; border-bottom: 0px solid transparent; border-left: 0p=
+x solid transparent; border-radius: 4px; border-right: 0px solid transparen=
+t; border-top: 0px solid transparent; color: #ffffff; display: inline-block=
+; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif; font-size: 16px; font-weight: undefined;=
+ mso-border-alt: none; padding-bottom: 5px; padding-top: 5px; padding-left:=
+ 50px; padding-right: 45px; text-align: center; width: auto; word-break: ke=
+ep-all; letter-spacing: normal;"><span style=3D"word-break: break-word; lin=
+e-height: 32px;"><strong>DESTINATIONS</strong></span></span><!--[if mso]></=
+center></v:textbox></v:roundrect><![endif]--></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-6"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:10px;padding-top:5px;width:=
+100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 135px;"><a href=3D"http://www.example.com" target=3D"_=
+blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/=
+4856/FLIGHT.png" style=3D"display: block; height: auto; border: 0; width: 1=
+00%;" width=3D"135" alt=3D"Flight-image" title=3D"Flight-image" height=3D"a=
+uto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-7" =
+style=3D"height:10px;line-height:10px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-4" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-5" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"heading_block block-=
+1" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"=
+presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"tex=
+t-align:center;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<h1 style=3D"margin: 0; col=
+or: #e27c3a; direction: ltr; font-family: Georgia, Times, 'Times New Roman'=
+, serif; font-size: 27px; font-weight: normal; letter-spacing: 1px; line-he=
+ight: 1.2; text-align: center; margin-top: 0; margin-bottom: 0; mso-line-he=
+ight-alt: 32px;"><em><strong>Get closer</strong> to your family</em><br></h=
+1>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:18px;letter-spacing:0px;line-heig=
+ht:1.5;text-align:center;mso-line-height-alt:27px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;">Discover our destinations and<strong> </strong>get =
+close</p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;">to your family for Thanksgiving.</p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-3" =
+style=3D"height:10px;line-height:10px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-6" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 205px;"><a href=3D"http://www.example.com" target=3D"_=
+blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/=
+4856/roma.png" style=3D"display: block; height: auto; border: 0; width: 100=
+%;" width=3D"205" alt=3D"ITALY" title=3D"ITALY" height=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:20px;line-height:2;text-align:lef=
+t;mso-line-height-alt:40px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Ita=
+ly</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"text_block block-4" =
+width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; word-bre=
+ak: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"font-family: =
+sans-serif">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class style=3D"font=
+-size: 12px; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida S=
+ans Unicode, Lucida Sans, Tahoma, sans-serif; mso-line-height-alt: 21.6px; =
+color: #1a1a1a; line-height: 1.8;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0=
+; font-size: 14px; text-align: left; mso-line-height-alt: 28.8px;"><span st=
+yle=3D"word-break: break-word; font-size: 16px;"><strong><span style=3D"wor=
+d-break: break-word; color: #e27c3a;">$320</span></strong>&nbsp; &nbsp;<spa=
+n style=3D"word-break: break-word; font-size: 14px;">3 days / 2 nights</spa=
+n></span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"button_block block-5=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:15px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center"><a href=3D"http://www.example.com" target=3D"_blank" style=
+=3D"color:#ffffff;text-decoration:none;"><!--[if mso]>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"  href=3D"http://www.example.com"  style=3D"he=
+ight:39px;width:170px;v-text-anchor:middle;" arcsize=3D"11%" fillcolor=3D"#=
+e27c3a">
+<v:stroke dashstyle=3D"Solid" weight=3D"0px" color=3D"#e27c3a"/>
+<w:anchorlock/>
+<v:textbox inset=3D"0px,0px,0px,0px">
+<center dir=3D"false" style=3D"color:#ffffff;font-family:sans-serif;font-si=
+ze:16px">
+<![endif]--><span class=3D"button" style=3D"background-color: #e27c3a; mso-=
+shading: transparent; border-bottom: 0px solid transparent; border-left: 0p=
+x solid transparent; border-radius: 4px; border-right: 0px solid transparen=
+t; border-top: 0px solid transparent; color: #ffffff; display: inline-block=
+; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif; font-size: 16px; font-weight: undefined;=
+ mso-border-alt: none; padding-bottom: 5px; padding-top: 5px; padding-left:=
+ 30px; padding-right: 30px; text-align: center; width: auto; word-break: ke=
+ep-all; letter-spacing: normal;"><span style=3D"word-break: break-word; lin=
+e-height: 28.8px;"><strong>BOOK NOW</strong></span></span><!--[if mso]></ce=
+nter></v:textbox></v:roundrect><![endif]--></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-2" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 205px;"><a href=3D"http://www.example.com" target=3D"_=
+blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/=
+4856/newyork.png" style=3D"display: block; height: auto; border: 0; width: =
+100%;" width=3D"205" alt=3D"NEW-YORK" title=3D"NEW-YORK" height=3D"auto"></=
+a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:20px;line-height:2;text-align:lef=
+t;mso-line-height-alt:40px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Nor=
+th America</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"text_block block-4" =
+width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; word-bre=
+ak: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"font-family: =
+sans-serif">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class style=3D"font=
+-size: 12px; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida S=
+ans Unicode, Lucida Sans, Tahoma, sans-serif; mso-line-height-alt: 21.6px; =
+color: #1a1a1a; line-height: 1.8;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0=
+; font-size: 14px; text-align: left; mso-line-height-alt: 28.8px;"><span st=
+yle=3D"word-break: break-word; font-size: 16px;"><strong><span style=3D"wor=
+d-break: break-word; color: #e27c3a;">$530</span></strong>&nbsp; &nbsp;3<sp=
+an style=3D"word-break: break-word; font-size: 14px;">&nbsp;days / 2 nights=
+</span></span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"button_block block-5=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:15px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center"><a href=3D"http://www.example.com" target=3D"_blank" style=
+=3D"color:#ffffff;text-decoration:none;"><!--[if mso]>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"  href=3D"http://www.example.com"  style=3D"he=
+ight:39px;width:170px;v-text-anchor:middle;" arcsize=3D"11%" fillcolor=3D"#=
+e27c3a">
+<v:stroke dashstyle=3D"Solid" weight=3D"0px" color=3D"#e27c3a"/>
+<w:anchorlock/>
+<v:textbox inset=3D"0px,0px,0px,0px">
+<center dir=3D"false" style=3D"color:#ffffff;font-family:sans-serif;font-si=
+ze:16px">
+<![endif]--><span class=3D"button" style=3D"background-color: #e27c3a; mso-=
+shading: transparent; border-bottom: 0px solid transparent; border-left: 0p=
+x solid transparent; border-radius: 4px; border-right: 0px solid transparen=
+t; border-top: 0px solid transparent; color: #ffffff; display: inline-block=
+; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif; font-size: 16px; font-weight: undefined;=
+ mso-border-alt: none; padding-bottom: 5px; padding-top: 5px; padding-left:=
+ 30px; padding-right: 30px; text-align: center; width: auto; word-break: ke=
+ep-all; letter-spacing: normal;"><span style=3D"word-break: break-word; lin=
+e-height: 28.8px;"><strong>BOOK NOW</strong></span></span><!--[if mso]></ce=
+nter></v:textbox></v:roundrect><![endif]--></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-3" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 205px;"><a href=3D"http://www.example.com" target=3D"_=
+blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/=
+4856/spain.png" style=3D"display: block; height: auto; border: 0; width: 10=
+0%;" width=3D"205" alt=3D"BARCELLONA" title=3D"BARCELLONA" height=3D"auto">=
+</a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:20px;line-height:2;text-align:lef=
+t;mso-line-height-alt:40px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Spa=
+in</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"text_block block-4" =
+width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; word-bre=
+ak: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"font-family: =
+sans-serif">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class style=3D"font=
+-size: 12px; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida S=
+ans Unicode, Lucida Sans, Tahoma, sans-serif; mso-line-height-alt: 21.6px; =
+color: #1a1a1a; line-height: 1.8;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0=
+; font-size: 14px; text-align: left; mso-line-height-alt: 28.8px;"><span st=
+yle=3D"word-break: break-word; font-size: 16px;"><strong><span style=3D"wor=
+d-break: break-word; color: #e27c3a;">$420</span></strong>&nbsp; &nbsp;<spa=
+n style=3D"word-break: break-word; font-size: 14px;">3 days / 2 nights</spa=
+n></span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"button_block block-5=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:15px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center"><a href=3D"http://www.example.com" target=3D"_blank" style=
+=3D"color:#ffffff;text-decoration:none;"><!--[if mso]>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"  href=3D"http://www.example.com"  style=3D"he=
+ight:39px;width:170px;v-text-anchor:middle;" arcsize=3D"11%" fillcolor=3D"#=
+e27c3a">
+<v:stroke dashstyle=3D"Solid" weight=3D"0px" color=3D"#e27c3a"/>
+<w:anchorlock/>
+<v:textbox inset=3D"0px,0px,0px,0px">
+<center dir=3D"false" style=3D"color:#ffffff;font-family:sans-serif;font-si=
+ze:16px">
+<![endif]--><span class=3D"button" style=3D"background-color: #e27c3a; mso-=
+shading: transparent; border-bottom: 0px solid transparent; border-left: 0p=
+x solid transparent; border-radius: 4px; border-right: 0px solid transparen=
+t; border-top: 0px solid transparent; color: #ffffff; display: inline-block=
+; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif; font-size: 16px; font-weight: undefined;=
+ mso-border-alt: none; padding-bottom: 5px; padding-top: 5px; padding-left:=
+ 30px; padding-right: 30px; text-align: center; width: auto; word-break: ke=
+ep-all; letter-spacing: normal;"><span style=3D"word-break: break-word; lin=
+e-height: 28.8px;"><strong>BOOK NOW</strong></span></span><!--[if mso]></ce=
+nter></v:textbox></v:roundrect><![endif]--></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-7" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-2"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:10px;padding-top:5px;width:=
+100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"fullWidth"=
+ style=3D"max-width: 303.75px;"><a href=3D"http://www.example.com" target=
+=3D"_blank"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/def=
+ault/4856/ARROW_1.png" style=3D"display: block; height: auto; border: 0; wi=
+dth: 100%;" width=3D"303.75" alt=3D"Flight-image" title=3D"Flight-image" he=
+ight=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-3" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-8" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+50%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 40=
+0; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align:=
+ top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1 m=
+obile_hide" style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</=
+div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"heading_block block-=
+2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"=
+presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"tex=
+t-align:center;width:100%;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<h1 style=3D"margin: 0; col=
+or: #e27c3a; direction: ltr; font-family: Georgia, Times, 'Times New Roman'=
+, serif; font-size: 41px; font-weight: normal; letter-spacing: 1px; line-he=
+ight: 1.2; text-align: center; margin-top: 0; margin-bottom: 0; mso-line-he=
+ight-alt: 49px;"><em>Safe travel</em><br></h1>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-3 m=
+obile_hide" style=3D"height:10px;line-height:10px;font-size:1px;">&#8202;</=
+div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-4" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:18px;letter-spacing:0px;line-heig=
+ht:1.5;text-align:center;mso-line-height-alt:27px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor incidunt =
+ut labore et dolore magna aliqua.</span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"button_block block-5=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:15px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center"><a href=3D"http://www.example.com" target=3D"_blank" style=
+=3D"color:#ffffff;text-decoration:none;"><!--[if mso]>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"  href=3D"http://www.example.com"  style=3D"he=
+ight:42px;width:282px;v-text-anchor:middle;" arcsize=3D"10%" fillcolor=3D"#=
+e27c3a">
+<v:stroke dashstyle=3D"Solid" weight=3D"0px" color=3D"#e27c3a"/>
+<w:anchorlock/>
+<v:textbox inset=3D"5px,0px,0px,0px">
+<center dir=3D"false" style=3D"color:#ffffff;font-family:sans-serif;font-si=
+ze:16px">
+<![endif]--><span class=3D"button" style=3D"background-color: #e27c3a; mso-=
+shading: transparent; border-bottom: 0px solid transparent; border-left: 0p=
+x solid transparent; border-radius: 4px; border-right: 0px solid transparen=
+t; border-top: 0px solid transparent; color: #ffffff; display: inline-block=
+; font-family: Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif; font-size: 16px; font-weight: undefined;=
+ mso-border-alt: none; padding-bottom: 5px; padding-top: 5px; padding-left:=
+ 50px; padding-right: 45px; text-align: center; width: auto; word-break: ke=
+ep-all; letter-spacing: normal;"><span style=3D"word-break: break-word; lin=
+e-height: 32px;"><strong>OUR DESTINATIONS</strong></span></span><!--[if mso=
+]></center></v:textbox></v:roundrect><![endif]--></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-2" width=3D"=
+50%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 40=
+0; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align:=
+ top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 337.5px;"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/defa=
+ult/4856/SAFETRAVEL.png" style=3D"display: block; height: auto; border: 0; =
+width: 100%;" width=3D"337.5" alt=3D"safetravel" title=3D"safetravel" heigh=
+t=3D"auto"></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-2" =
+style=3D"height:35px;line-height:35px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-9" align=3D"center" width=3D"100%" b=
+order=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" style=
+=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 133.25px;"><a href=3D"http://www.example.com" target=3D"_blank"><img src=
+=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/4856/CHECKIN.pn=
+g" style=3D"display: block; height: auto; border: 0; width: 100%;" width=3D=
+"133.25" alt=3D"CHECKIN" title=3D"CHECKIN" height=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:17px;line-height:2;text-align:cen=
+ter;mso-line-height-alt:34px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Onl=
+ine check in</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-2" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 133.25px;"><a href=3D"http://www.example.com" target=3D"_blank"><img src=
+=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/4856/TEMPERATUR=
+E.png" style=3D"display: block; height: auto; border: 0; width: 100%;" widt=
+h=3D"133.25" alt=3D"CHECKIN" title=3D"CHECKIN" height=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:17px;line-height:2;text-align:cen=
+ter;mso-line-height-alt:34px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Tem=
+perature check</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-3" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 10px; padding-left: 10=
+px; padding-right: 10px; padding-top: 10px; vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 133.25px;"><a href=3D"http://www.example.com" target=3D"_blank"><img src=
+=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/default/4856/TEMPLATE.p=
+ng" style=3D"display: block; height: auto; border: 0; width: 100%;" width=
+=3D"133.25" alt=3D"CHECKIN" title=3D"CHECKIN" height=3D"auto"></a></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:5px;padding-left:10px;padding-right:5px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#e27c3a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:17px;line-height:2;text-align:cen=
+ter;mso-line-height-alt:34px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><strong><span style=3D"word-break: break-word;">Use=
+ mask</span></strong></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"10" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:13px;line-height:1.8;text-align:l=
+eft;mso-line-height-alt:23px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Lorem ipsum=
+ dolor sit amet, consectetur adipisci elit, sed do eiusmod tempor.</span></=
+p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-10" align=3D"center" width=3D"100%" =
+border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" styl=
+e=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-11" align=3D"center" width=3D"100%" =
+border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" styl=
+e=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #fff5e=
+b;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+ff5eb; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+41.666666666666664%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 5px; padding-top: 5px;=
+ vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:35px;line-height:35px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"image_block block-2"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"wid=
+th:100%;padding-right:0px;padding-left:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"max-width:=
+ 112.5px;"><img src=3D"https://d1oco4z2z1fhwp.cloudfront.net/templates/defa=
+ult/4856/travel-logo.png" style=3D"display: block; height: auto; border: 0;=
+ width: 100%;" width=3D"112.5" alt=3D"Your Logo" title=3D"Your Logo" height=
+=3D"auto"></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-3" =
+style=3D"height:20px;line-height:20px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"social_block block-4=
+" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"p=
+resentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:10px;padding-right:10px;padding-top:10px;text=
+-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"alignment" al=
+ign=3D"center">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"social-t=
+able" width=3D"168px" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; di=
+splay: inline-block;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"paddi=
+ng:0 5px 0 5px;"><a href=3D"https://www.facebook.com" target=3D"_blank"><im=
+g src=3D"https://app-rsrc.getbee.io/public/resources/social-networks-icon-s=
+ets/t-outline-circle-dark-gray/facebook@2x.png" width=3D"32" height=3D"auto=
+" alt=3D"Facebook" title=3D"facebook" style=3D"display: block; height: auto=
+; border: 0;"></a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"paddi=
+ng:0 5px 0 5px;"><a href=3D"https://www.twitter.com" target=3D"_blank"><img=
+ src=3D"https://app-rsrc.getbee.io/public/resources/social-networks-icon-se=
+ts/t-outline-circle-dark-gray/twitter@2x.png" width=3D"32" height=3D"auto" =
+alt=3D"Twitter" title=3D"twitter" style=3D"display: block; height: auto; bo=
+rder: 0;"></a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"paddi=
+ng:0 5px 0 5px;"><a href=3D"https://www.linkedin.com" target=3D"_blank"><im=
+g src=3D"https://app-rsrc.getbee.io/public/resources/social-networks-icon-s=
+ets/t-outline-circle-dark-gray/linkedin@2x.png" width=3D"32" height=3D"auto=
+" alt=3D"Linkedin" title=3D"linkedin" style=3D"display: block; height: auto=
+; border: 0;"></a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"paddi=
+ng:0 5px 0 5px;"><a href=3D"https://www.instagram.com" target=3D"_blank"><i=
+mg src=3D"https://app-rsrc.getbee.io/public/resources/social-networks-icon-=
+sets/t-outline-circle-dark-gray/instagram@2x.png" width=3D"32" height=3D"au=
+to" alt=3D"Instagram" title=3D"instagram" style=3D"display: block; height: =
+auto; border: 0;"></a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-2" width=3D"=
+25%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 40=
+0; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align:=
+ top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:35px;line-height:35px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"menu_block block-2" =
+width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pre=
+sentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"col=
+or:#1a1a1a;font-family:inherit;font-size:12px;letter-spacing:2px;padding-bo=
+ttom:10px;padding-right:20px;padding-top:10px;text-align:center;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<table width=3D"100%" cellp=
+adding=3D"0" cellspacing=3D"0" border=3D"0" role=3D"presentation" style=3D"=
+mso-table-lspace: 0pt; mso-table-rspace: 0pt;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"alignmen=
+t" style=3D"text-align:center;font-size:0px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"menu=
+-links"><!--[if mso]><table role=3D"presentation" border=3D"0" cellpadding=
+=3D"0" cellspacing=3D"0" align=3D"center" style=3D""><tr style=3D"text-alig=
+n:center;"><![endif]--><!--[if mso]><td style=3D"padding-top:5px;padding-ri=
+ght:20px;padding-bottom:5px;padding-left:20px"><![endif]--><a href=3D"www.e=
+xample.com" target=3D"_self" style=3D"mso-hide:false;padding-top:5px;paddin=
+g-bottom:5px;padding-left:20px;padding-right:20px;display:block;color:#1a1a=
+1a;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode=
+, Lucida Sans, Tahoma, sans-serif;font-size:12px;text-decoration:none;lette=
+r-spacing:2px;">DESTINATIONS</a><!--[if mso]></tr></td><![endif]--><!--[if =
+mso]></tr><tr style=3D"text-align:center;"><td style=3D"padding-top:5px;pad=
+ding-right:20px;padding-bottom:5px;padding-left:20px"><![endif]--><a href=
+=3D"www.example.com" target=3D"_self" style=3D"mso-hide:false;padding-top:5=
+px;padding-bottom:5px;padding-left:20px;padding-right:20px;display:block;co=
+lor:#1a1a1a;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida San=
+s Unicode, Lucida Sans, Tahoma, sans-serif;font-size:12px;text-decoration:n=
+one;letter-spacing:2px;">CHECK IN</a><!--[if mso]></tr></td><![endif]--><!-=
+-[if mso]></tr><tr style=3D"text-align:center;"><td style=3D"padding-top:5p=
+x;padding-right:20px;padding-bottom:5px;padding-left:20px"><![endif]--><a h=
+ref=3D"www.example.com" target=3D"_self" style=3D"mso-hide:false;padding-to=
+p:5px;padding-bottom:5px;padding-left:20px;padding-right:20px;display:block=
+;color:#1a1a1a;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida =
+Sans Unicode, Lucida Sans, Tahoma, sans-serif;font-size:12px;text-decoratio=
+n:none;letter-spacing:2px;">SAFE TRAVEL</a><!--[if mso]></tr></td><![endif]=
+--><!--[if mso]></tr><tr style=3D"text-align:center;"><td style=3D"padding-=
+top:5px;padding-right:20px;padding-bottom:5px;padding-left:20px"><![endif]-=
+-><a href=3D"www.example.com" target=3D"_self" style=3D"mso-hide:false;padd=
+ing-top:5px;padding-bottom:5px;padding-left:20px;padding-right:20px;display=
+:block;color:#1a1a1a;font-family:Montserrat, Trebuchet MS, Lucida Grande, L=
+ucida Sans Unicode, Lucida Sans, Tahoma, sans-serif;font-size:12px;text-dec=
+oration:none;letter-spacing:2px;">CONTACTS</a><!--[if mso]></tr></td><![end=
+if]--><!--[if mso]></tr><tr style=3D"text-align:center;"><td style=3D"paddi=
+ng-top:5px;padding-right:20px;padding-bottom:5px;padding-left:20px"><![endi=
+f]--><a href=3D"www.example.com" target=3D"_self" style=3D"mso-hide:false;p=
+adding-top:5px;padding-bottom:5px;padding-left:20px;padding-right:20px;disp=
+lay:block;color:#1a1a1a;font-family:Montserrat, Trebuchet MS, Lucida Grande=
+, Lucida Sans Unicode, Lucida Sans, Tahoma, sans-serif;font-size:12px;text-=
+decoration:none;letter-spacing:2px;">FAQ</a><!--[if mso]></tr></td><![endif=
+]--><!--[if mso]></tr></table><![endif]--></div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-3" width=3D"=
+33.333333333333336%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt;=
+ font-weight: 400; text-align: left; padding-bottom: 5px; padding-top: 5px;=
+ vertical-align: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:35px;line-height:35px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-2" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:10px;padding-left:25px;padding-right:10px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:14px;line-height:1.2;text-align:c=
+enter;mso-line-height-alt:17px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;"><strong>Whe=
+re to find us</strong></span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-3" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:10px;padding-left:25px;padding-right:10px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:12px;line-height:1.2;text-align:c=
+enter;mso-line-height-alt:14px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;">Company address here<br>+1 123 123 123</p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-4" =
+style=3D"height:10px;line-height:10px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"paragraph_block bloc=
+k-5" width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; wo=
+rd-break: break-word;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"pad=
+ding-bottom:15px;padding-left:25px;padding-right:10px;padding-top:10px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<div style=3D"color:#1a1a1a=
+;font-family:Montserrat, Trebuchet MS, Lucida Grande, Lucida Sans Unicode, =
+Lucida Sans, Tahoma, sans-serif;font-size:12px;line-height:1.2;text-align:c=
+enter;mso-line-height-alt:14px;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<p style=3D"margin: 0; w=
+ord-break: break-word;"><span style=3D"word-break: break-word;">Changed you=
+r mind? <a style=3D"text-decoration: underline; color: #1a1a1a;" href=3D"ht=
+tp://www.example.com" target=3D"_blank" rel=3D"noopener">Unsubscribe</a> </=
+span></p>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</div>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-12" align=3D"center" width=3D"100%" =
+border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" styl=
+e=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #fffff=
+f;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<div class=3D"spacer_block block-1" =
+style=3D"height:10px;line-height:10px;font-size:1px;">&#8202;</div>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09=09<table class=3D"row row-13" align=3D"center" width=3D"100%" =
+border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" styl=
+e=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #fffff=
+f;">
+=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09<td>
+=09=09=09=09=09=09=09=09=09<table class=3D"row-content stack" align=3D"cent=
+er" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentation" =
+style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; background-color: #f=
+fffff; color: #000000; width: 675px; margin: 0 auto;" width=3D"675">
+=09=09=09=09=09=09=09=09=09=09<tbody>
+=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"column column-1" width=3D"=
+100%" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; font-weight: 4=
+00; text-align: left; padding-bottom: 5px; padding-top: 5px; vertical-align=
+: top;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"icons_block block-1"=
+ width=3D"100%" border=3D"0" cellpadding=3D"0" cellspacing=3D"0" role=3D"pr=
+esentation" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; text-ali=
+gn: center; line-height: 0;">
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td class=3D"pad" style=3D"ver=
+tical-align: middle; color: #1e0e4b; font-family: 'Inter', sans-serif; font=
+-size: 15px; padding-bottom: 5px; padding-top: 5px; text-align: center;"><!=
+--[if vml]><table align=3D"center" cellpadding=3D"0" cellspacing=3D"0" role=
+=3D"presentation" style=3D"display:inline-block;padding-left:0px;padding-ri=
+ght:0px;mso-table-lspace: 0pt;mso-table-rspace: 0pt;"><![endif]-->
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<!--[if !vml]><!-->
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<table class=3D"icons-inner=
+" style=3D"mso-table-lspace: 0pt; mso-table-rspace: 0pt; display: inline-bl=
+ock; padding-left: 0px; padding-right: 0px;" cellpadding=3D"0" cellspacing=
+=3D"0" role=3D"presentation"><!--<![endif]-->
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"vertical=
+-align: middle; text-align: center; padding-top: 5px; padding-bottom: 5px; =
+padding-left: 5px; padding-right: 6px;"><a href=3D"https://designedwithbeef=
+ree.com/" target=3D"_blank" style=3D"text-decoration: none;"><img class=3D"=
+icon" alt=3D"Beefree Logo" src=3D"https://d1oco4z2z1fhwp.cloudfront.net/ass=
+ets/Beefree-logo.png" height=3D"auto" width=3D"34" align=3D"center" style=
+=3D"display: block; height: auto; margin: 0 auto; border: 0;"></a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09<td style=3D"font-fam=
+ily: 'Inter', sans-serif; font-size: 15px; font-weight: undefined; color: #=
+1e0e4b; vertical-align: middle; letter-spacing: undefined; text-align: cent=
+er; line-height: normal;"><a href=3D"https://designedwithbeefree.com/" targ=
+et=3D"_blank" style=3D"color: #1e0e4b; text-decoration: none;">Designed wit=
+h Beefree</a></td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09=09=09=09=09</tbody>
+=09=09=09=09=09=09=09=09=09</table>
+=09=09=09=09=09=09=09=09</td>
+=09=09=09=09=09=09=09</tr>
+=09=09=09=09=09=09</tbody>
+=09=09=09=09=09</table>
+=09=09=09=09</td>
+=09=09=09</tr>
+=09=09</tbody>
+=09</table><!-- End -->
+</body>
+
+</html>

@@ -1,0 +1,73 @@
+From: sender@example.com
+To: recipient@local.test
+Subject: Document delivery with attachments
+Date: Thu, 20 Feb 2026 10:30:00 +0000
+Message-ID: <attachments-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="MIXED-BOUNDARY-001"
+
+--MIXED-BOUNDARY-001
+Content-Type: multipart/alternative; boundary="ALT-BOUNDARY-001"
+
+--ALT-BOUNDARY-001
+Content-Type: text/plain; charset="UTF-8"
+
+Hi,
+
+Please find the requested documents attached.
+
+- report.pdf
+- logo.png
+- data.csv
+
+Best regards,
+Sender
+
+--ALT-BOUNDARY-001
+Content-Type: text/html; charset="UTF-8"
+
+<html>
+<body>
+<p>Hi,</p>
+<p>Please find the requested documents attached.</p>
+<ul>
+  <li>report.pdf</li>
+  <li>logo.png</li>
+  <li>data.csv</li>
+</ul>
+<p>Best regards,<br>Sender</p>
+</body>
+</html>
+
+--ALT-BOUNDARY-001--
+
+--MIXED-BOUNDARY-001
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5k
+b2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4K
+ZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3gg
+WzAgMCA2MTIgNzkyXSA+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAow
+MDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNCAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKMjA2CiUl
+RU9GCg==
+
+--MIXED-BOUNDARY-001
+Content-Type: image/png; name="logo.png"
+Content-Disposition: attachment; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/
+PchI7wAAAABJRU5ErkJggg==
+
+--MIXED-BOUNDARY-001
+Content-Type: text/csv; name="data.csv"
+Content-Disposition: attachment; filename="data.csv"
+Content-Transfer-Encoding: base64
+
+aWQsbmFtZSxlbWFpbCxzdGF0dXMKMSxBbGljZSxhbGljZUBleGFtcGxlLmNvbSxhY3RpdmUK
+MixCb2IsYm9iQGV4YW1wbGUuY29tLGluYWN0aXZlCjMsQ2hhcmxpZSxjaGFybGllQGV4YW1w
+bGUuY29tLGFjdGl2ZQo=
+
+--MIXED-BOUNDARY-001--
