@@ -1,0 +1,4 @@
+interface:
+  display_name: "OAuth2"
+  short_description: "Mock OAuth2 server and token introspection"
+  default_prompt: "Use $oauth2 to configure token introspection, authorization flows, or test OAuth2 authentication."
