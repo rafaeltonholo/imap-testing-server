@@ -1,0 +1,44 @@
+# Stalwart JMAP Server — local development configuration
+#
+# Serves JMAP over HTTP only (no IMAP/SMTP — handled by Dovecot/Postfix).
+# Users are provisioned via the admin API (see scripts/sync_stalwart_users.py).
+#
+# Authentication:
+#   - Basic auth: validated against the internal directory (same passwords as Dovecot)
+#   - OAuth2 Bearer: tokens issued by Stalwart's built-in OAuth2 server
+#     (authorization_code and device_code grants, backed by internal directory)
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+[server]
+hostname = "localhost"
+
+[server.listener."http"]
+bind = ["[::]:8080"]
+protocol = "http"
+
+# ── Storage (RocksDB, embedded) ───────────────────────────────────────────────
+
+[store."rocksdb"]
+type = "rocksdb"
+path = "/opt/stalwart/data"
+compression = "lz4"
+
+[storage]
+data = "rocksdb"
+fts = "rocksdb"
+blob = "rocksdb"
+lookup = "rocksdb"
+directory = "internal"
+
+# ── Internal Directory (password-based auth + OAuth2 user lookup) ─────────────
+
+[directory."internal"]
+type = "internal"
+store = "rocksdb"
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+[authentication.fallback-admin]
+user = "admin"
+secret = "%{env:ADMIN_SECRET}%"
