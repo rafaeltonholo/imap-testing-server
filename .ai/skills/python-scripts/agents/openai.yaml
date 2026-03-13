@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python Scripts"
+  short_description: "Python automation for user and mail management"
+  default_prompt: "Use $python-scripts to write or modify automation scripts using the shared lib.py utilities."
