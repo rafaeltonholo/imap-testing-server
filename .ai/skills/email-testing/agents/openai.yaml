@@ -1,0 +1,4 @@
+interface:
+  display_name: "Email Testing"
+  short_description: "Email injection and test data workflows"
+  default_prompt: "Use $email-testing to create test emails, generate threads, or seed mailboxes with test data."
