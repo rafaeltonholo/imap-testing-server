@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A local IMAP test environment using Dovecot and MailHog via Docker Compose. Intended only for development and testing — not production use.
+A local IMAP/JMAP test environment using Dovecot, Stalwart, and Postfix via Docker Compose. Intended only for development and testing — not production use.
 
 ## Common Commands
 
@@ -77,10 +77,16 @@ python3 scripts/send_thread.py --thread onboarding --email dev@local.test --date
 python3 scripts/create_folder.py --email dev@local.test --folder INBOX.Archive
 ```
 
+**Sync users into Stalwart (after first start or adding new users):**
+
+```sh
+python3 scripts/sync_stalwart_users.py
+```
+
 **Reset the environment to a clean state:**
 
 ```sh
-python3 scripts/reset.py   # wipes vmail/ and restores default config/users
+python3 scripts/reset.py   # wipes vmail/, stalwart-data/, and restores default config/users
 ```
 
 **Inspect mail inside the container:**
@@ -102,6 +108,18 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
 - **mailhog** (`mailhog/mailhog:latest`, container: `mailhog-dev`) — SMTP capture
   - SMTP: `localhost:1025`
   - Web UI: `http://localhost:8025`
+- **stalwart** (`stalwartlabs/stalwart:latest`, container: `stalwart-dev`) — JMAP server
+  - JMAP HTTP: `http://localhost:8443`
+  - JMAP Session: `http://localhost:8443/.well-known/jmap`
+  - Web Admin: `http://localhost:8443/` (login: `admin` / `secret`)
+  - OAuth2 Discovery: `http://localhost:8443/.well-known/oauth-authorization-server`
+  - OAuth2 Authorize: `http://localhost:8443/authorize/code` (browser-based)
+  - OAuth2 Device Flow: `POST http://localhost:8443/auth/device` with `client_id=<any>`
+  - Data stored in `./stalwart-data/` (mounted at `/opt/stalwart/data`)
+  - Config from `./stalwart/config.toml` (mounted read-only)
+  - Users provisioned via admin API (`python3 scripts/sync_stalwart_users.py`)
+  - Supports Basic auth (password) and OAuth2 Bearer tokens (via built-in OAuth2 server)
+  - Healthcheck via TCP check on port 8080
 - **oauth2-mock** (built from `./oauth2-mock/`, container: `oauth2-mock`) — Mock OAuth2 authorization server
   - Discovery: `http://localhost:8080/.well-known/oauth-authorization-server`
   - Authorize: `http://localhost:8080/authorize` (shows consent page)
