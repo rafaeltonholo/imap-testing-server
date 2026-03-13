@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docker Compose"
+  short_description: "Service orchestration and container configuration"
+  default_prompt: "Use $docker-compose to manage service definitions, ports, volumes, and healthchecks."
