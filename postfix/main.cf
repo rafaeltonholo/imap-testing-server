@@ -4,6 +4,8 @@ myorigin = $mydomain
 
 # Accept mail for this domain and deliver via LMTP to Dovecot
 mydestination = local.test, $myhostname, localhost.$mydomain, localhost
+local_recipient_maps =
+smtpd_reject_unlisted_recipient = no
 mailbox_transport = lmtp:inet:dovecot:24
 
 # Open relay for Docker networks (no auth required from these sources)
