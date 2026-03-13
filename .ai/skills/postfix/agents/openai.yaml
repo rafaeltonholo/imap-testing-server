@@ -1,0 +1,4 @@
+interface:
+  display_name: "Postfix"
+  short_description: "Postfix SMTP configuration and mail routing"
+  default_prompt: "Use $postfix to configure SMTP submission, LMTP delivery, or troubleshoot mail routing."
