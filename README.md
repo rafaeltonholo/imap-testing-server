@@ -1,7 +1,7 @@
-# Dovecot Docker IMAP Test Environment
+# Dovecot Docker IMAP/JMAP Test Environment
 
-This project provides a ready-to-use local IMAP and SMTP test environment using [Dovecot](https://www.dovecot.org/)
-and [Postfix](https://www.postfix.org/) via Docker Compose. It is designed for testing email
+This project provides a ready-to-use local IMAP, JMAP, and SMTP test environment using [Dovecot](https://www.dovecot.org/),
+[Stalwart](https://stalw.art/), and [Postfix](https://www.postfix.org/) via Docker Compose. It is designed for testing email
 clients, automation, and development workflows.
 
 > [!IMPORTANT]
@@ -10,6 +10,7 @@ clients, automation, and development workflows.
 ## Features
 
 - **Dovecot IMAP server** (with STARTTLS and IMAPS)
+- **Stalwart JMAP server** with built-in OAuth2 and web admin
 - **Postfix SMTP server** with SASL authentication via Dovecot
 - **OAuth2 mock server** with full authorization code flow, token refresh, and error simulation
 - Supports **PLAIN**, **LOGIN**, **OAUTHBEARER**, and **XOAUTH2** authentication on both IMAP and SMTP
@@ -19,13 +20,15 @@ clients, automation, and development workflows.
 
 ## Project Structure
 
-- `docker-compose.yml` — Docker Compose setup for Dovecot, Postfix, and OAuth2 mock
+- `docker-compose.yml` — Docker Compose setup for all services
 - `config/` — Dovecot configuration files and user database
 - `postfix/` — Postfix configuration and Dockerfile
+- `stalwart/` — Stalwart JMAP server configuration
 - `oauth2-mock/` — Mock OAuth2 authorization server
 - `mails/` — Sample `.eml` messages for injection
 - `scripts/` — Helper scripts for user/mail management
-- `vmail/` — Mail storage (mounted into the container)
+- `vmail/` — Dovecot mail storage (mounted into the container)
+- `stalwart-data/` — Stalwart data (gitignored, created on first run)
 - `ssl/` — SSL certificates for IMAPS (gitignored, generated via `scripts/setup.py`)
 - `logs/` — Dovecot logs
 
@@ -45,13 +48,14 @@ python3 scripts/setup.py
 docker-compose up -d
 ```
 
-This starts three services:
+This starts four services:
 
-| Service     | Container     | Purpose                     |
-| ----------- | ------------- | --------------------------- |
-| Dovecot     | `dovecot-dev` | IMAP server                 |
-| Postfix     | `postfix-dev` | SMTP server                 |
-| OAuth2 Mock | `oauth2-mock` | OAuth2 authorization server |
+| Service     | Container      | Purpose                              |
+| ----------- | -------------- | ------------------------------------ |
+| Dovecot     | `dovecot-dev`  | IMAP server                          |
+| Postfix     | `postfix-dev`  | SMTP server                          |
+| Stalwart    | `stalwart-dev` | JMAP server (with built-in OAuth2)   |
+| OAuth2 Mock | `oauth2-mock`  | OAuth2 server (for IMAP/SMTP OAuth2) |
 
 ### 3. Connection Details
 
@@ -61,6 +65,7 @@ This starts three services:
 | IMAPS (TLS)     | `localhost` | `993`  | Direct TLS connection                             |
 | SMTP            | `localhost` | `1025` | No auth required from local networks              |
 | SMTP Submission | `localhost` | `587`  | Authenticated sending (SASL)                      |
+| JMAP HTTP       | `localhost` | `8443` | JMAP protocol + web admin                         |
 | OAuth2 Server   | `localhost` | `8080` | Authorization, token, and introspection endpoints |
 
 ### 4. Test Accounts
@@ -419,6 +424,136 @@ curl -X POST "http://localhost:8080/token?delay=3" \
 # Unknown grant type → {"error": "unsupported_grant_type"}
 ```
 
+## JMAP (Stalwart)
+
+[Stalwart](https://stalw.art/) provides a [JMAP](https://jmap.io/) server alongside the Dovecot IMAP setup. JMAP is a modern, JSON-based API for email access — an alternative to IMAP designed for web and mobile clients.
+
+### Endpoints
+
+| Endpoint           | URL                                                            |
+| ------------------ | -------------------------------------------------------------- |
+| JMAP Session       | `http://localhost:8443/.well-known/jmap`                       |
+| JMAP API           | `http://localhost:8443/jmap`                                   |
+| Web Admin          | `http://localhost:8443/` (login: `admin` / `secret`)           |
+| OAuth2 Discovery   | `http://localhost:8443/.well-known/oauth-authorization-server` |
+| OAuth2 Authorize   | `http://localhost:8443/authorize/code`                         |
+| OAuth2 Device Flow | `POST http://localhost:8443/auth/device`                       |
+
+### User Provisioning
+
+Stalwart uses its own internal directory — users from `config/users` must be synced into it separately:
+
+```sh
+python3 scripts/sync_stalwart_users.py
+```
+
+Run this after the first `docker-compose up -d` or whenever you add new users to `config/users`. After syncing, Stalwart users share the same email/password credentials as Dovecot.
+
+### Authentication
+
+Stalwart supports two authentication methods:
+
+**Basic auth** (same credentials as Dovecot):
+
+```sh
+# JMAP session resource
+curl -u dev@local.test:secret http://localhost:8443/.well-known/jmap
+```
+
+**OAuth2 Bearer tokens** (via Stalwart's built-in OAuth2 server):
+
+```sh
+# 1. Start a device authorization flow
+curl -X POST http://localhost:8443/auth/device -d "client_id=myapp"
+# → returns verification_uri and device_code
+
+# 2. Open verification_uri in browser, enter the user_code, approve access
+
+# 3. Poll for the token
+curl -X POST http://localhost:8443/auth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+  -d "client_id=myapp" \
+  -d "device_code=DEVICE_CODE_FROM_STEP_1"
+# → returns access_token
+
+# 4. Use the token
+curl -H "Authorization: Bearer ACCESS_TOKEN" http://localhost:8443/jmap
+```
+
+> Stalwart's OAuth2 server is separate from the `oauth2-mock` service. The mock is used by Dovecot/Postfix for IMAP/SMTP OAuth2 authentication. Stalwart has its own built-in OAuth2 server backed by its internal user directory.
+
+### JMAP Usage (Python)
+
+```python
+import json
+import urllib.request
+
+JMAP_URL = "http://localhost:8443/jmap"
+CREDENTIALS = "dev@local.test:secret"
+
+# Helper to make JMAP requests with Basic auth
+import base64
+auth = base64.b64encode(CREDENTIALS.encode()).decode()
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Basic {auth}",
+}
+
+# Get the JMAP session to find account ID
+session_req = urllib.request.Request(
+    "http://localhost:8443/.well-known/jmap", headers=headers
+)
+with urllib.request.urlopen(session_req) as resp:
+    session = json.loads(resp.read())
+account_id = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
+
+# Query mailboxes
+body = json.dumps({
+    "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+    "methodCalls": [
+        ["Mailbox/get", {"accountId": account_id}, "0"]
+    ],
+}).encode()
+
+req = urllib.request.Request(JMAP_URL, data=body, headers=headers)
+with urllib.request.urlopen(req) as resp:
+    result = json.loads(resp.read())
+    for mailbox in result["methodResponses"][0][1]["list"]:
+        print(f"{mailbox['name']}: {mailbox.get('totalEmails', 0)} emails")
+```
+
+### JMAP Usage (curl)
+
+```sh
+# Get session (discover account ID)
+curl -s -u dev@local.test:secret http://localhost:8443/.well-known/jmap | python3 -m json.tool
+
+# Query mailboxes (replace ACCOUNT_ID with the value from the session)
+curl -s -u dev@local.test:secret http://localhost:8443/jmap \
+  -H "Content-Type: application/json" \
+  -d '{
+    "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+    "methodCalls": [
+      ["Mailbox/get", {"accountId": "ACCOUNT_ID"}, "0"]
+    ]
+  }' | python3 -m json.tool
+
+# Search emails
+curl -s -u dev@local.test:secret http://localhost:8443/jmap \
+  -H "Content-Type: application/json" \
+  -d '{
+    "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+    "methodCalls": [
+      ["Email/query", {"accountId": "ACCOUNT_ID", "limit": 10}, "0"],
+      ["Email/get", {
+        "accountId": "ACCOUNT_ID",
+        "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
+        "properties": ["subject", "from", "receivedAt"]
+      }, "1"]
+    ]
+  }' | python3 -m json.tool
+```
+
 ## Mail Management
 
 ### Create a User and Seed Their Inbox
@@ -463,10 +598,16 @@ python3 scripts/send_thread.py --thread onboarding --email dev@local.test --date
 python3 scripts/create_folder.py --email dev@local.test --folder INBOX.Archive
 ```
 
+### Sync Users into Stalwart
+
+```sh
+python3 scripts/sync_stalwart_users.py
+```
+
 ### Reset the Environment
 
 ```sh
-python3 scripts/reset.py   # wipes vmail/ and restores default config/users
+python3 scripts/reset.py   # wipes vmail/, stalwart-data/, and restores default config/users
 ```
 
 ### Inspect Mail Inside the Container
@@ -480,6 +621,7 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
 ```sh
 docker compose logs dovecot       # Dovecot logs
 docker compose logs postfix       # Postfix logs
+docker compose logs stalwart      # Stalwart JMAP logs
 docker compose logs oauth2-mock   # OAuth2 mock logs
 docker compose logs -f dovecot    # Follow logs
 ```
@@ -492,6 +634,7 @@ Dovecot has verbose auth logging enabled (`auth_verbose = yes`, `mail_debug = ye
 - Place additional `.eml` files in [`mails/`](mails/) for injection
 - Adjust Dovecot settings in [`config/`](config/)
 - Adjust Postfix settings in [`postfix/main.cf`](postfix/main.cf)
+- Adjust Stalwart settings in [`stalwart/config.toml`](stalwart/config.toml)
 - Modify OAuth2 mock behavior in [`oauth2-mock/server.py`](oauth2-mock/server.py)
 
 ## License
