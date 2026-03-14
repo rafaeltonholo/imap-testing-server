@@ -14,7 +14,7 @@
 hostname = "localhost"
 
 [server.listener."http"]
-bind = ["[::]:8080"]
+bind = ["[::]:8443"]
 protocol = "http"
 
 # ── Storage (RocksDB, embedded) ───────────────────────────────────────────────

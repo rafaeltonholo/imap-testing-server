@@ -50,14 +50,14 @@ services:
     container_name: stalwart-dev
     restart: unless-stopped
     ports:
-      - "8443:8080"   # JMAP HTTP → localhost:8443
+      - "8443:8443"   # JMAP HTTP
     volumes:
       - ./stalwart/config.toml:/opt/stalwart/etc/config.toml:ro
       - ./stalwart-data:/opt/stalwart/data
     environment:
       - ADMIN_SECRET=secret
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8080"]
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8443"]
       interval: 10s
       timeout: 5s
       retries: 5
