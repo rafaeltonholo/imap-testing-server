@@ -1,12 +1,18 @@
 # Stalwart JMAP Server — local development configuration
 #
 # Serves JMAP over HTTP only (no IMAP/SMTP — handled by Dovecot/Postfix).
-# Users are provisioned via the admin API (see scripts/sync_stalwart_users.py).
 #
 # Authentication:
-#   - Basic auth: validated against the internal directory (same passwords as Dovecot)
-#   - OAuth2 Bearer: tokens issued by Stalwart's built-in OAuth2 server
-#     (authorization_code and device_code grants, backed by internal directory)
+#   - OAuth2 Bearer: validated via oauth2-mock introspection (OIDC directory)
+#     Use tokens from oauth2-mock (e.g. "valid-dev@local.test") or the full
+#     OAuth2 authorization code flow at http://localhost:8080
+#   - Stalwart's built-in OAuth2: device code flow and authorization code flow
+#     still work at http://localhost:8443/auth/device
+#   - Admin: Basic auth via authentication.fallback-admin (admin/secret)
+#
+# Note: Basic auth for regular users is NOT available when using an OIDC
+# directory. Users must authenticate with Bearer tokens. Admin access uses
+# the fallback-admin setting which bypasses the directory.
 
 # ── Server ────────────────────────────────────────────────────────────────────
 
@@ -29,13 +35,18 @@ data = "rocksdb"
 fts = "rocksdb"
 blob = "rocksdb"
 lookup = "rocksdb"
-directory = "internal"
+directory = "oauth2-mock"
 
-# ── Internal Directory (password-based auth + OAuth2 user lookup) ─────────────
+# ── OIDC Directory (validates Bearer tokens via oauth2-mock introspection) ────
 
-[directory."internal"]
-type = "internal"
-store = "rocksdb"
+[directory."oauth2-mock"]
+type = "oidc"
+timeout = "5s"
+endpoint.url = "http://oauth2-mock:8080/introspect"
+endpoint.method = "introspect"
+auth.method = "none"
+fields.email = "email"
+fields.username = "username"
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 

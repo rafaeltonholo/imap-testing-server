@@ -439,28 +439,30 @@ curl -X POST "http://localhost:8080/token?delay=3" \
 | OAuth2 Authorize   | `http://localhost:8443/authorize/code`                         |
 | OAuth2 Device Flow | `POST http://localhost:8443/auth/device`                       |
 
-### User Provisioning
-
-Stalwart uses its own internal directory — users from `config/users` must be synced into it separately:
-
-```sh
-python3 scripts/sync_stalwart_users.py
-```
-
-Run this after the first `docker-compose up -d` or whenever you add new users to `config/users`. After syncing, Stalwart users share the same email/password credentials as Dovecot.
-
 ### Authentication
 
-Stalwart supports two authentication methods:
+Stalwart authenticates users via the `oauth2-mock` service (OIDC token introspection). Regular users authenticate with **Bearer tokens** — the same tokens used for IMAP/SMTP OAuth2. Basic auth is not available for regular users, only for the admin account.
 
-**Basic auth** (same credentials as Dovecot):
+| Method | Users | How |
+|---|---|---|
+| Bearer token (oauth2-mock) | All users | `Authorization: Bearer valid-dev@local.test` |
+| Bearer token (Stalwart built-in) | All users | Via device code or authorization code flow at `:8443` |
+| Basic auth | Admin only | `admin` / `secret` |
+
+**Using oauth2-mock tokens:**
 
 ```sh
-# JMAP session resource
-curl -u dev@local.test:secret http://localhost:8443/.well-known/jmap
+# Direct token convention
+curl -H "Authorization: Bearer valid-dev@local.test" http://localhost:8443/jmap/session
+
+# Or get a token via the full OAuth2 flow first (see OAuth2 Authentication section)
+curl -X POST http://localhost:8080/token \
+  -d "grant_type=authorization_code&code=YOUR_CODE&redirect_uri=...&client_id=myapp"
+# Then use the returned access_token
+curl -H "Authorization: Bearer valid-dev@local.test" http://localhost:8443/jmap
 ```
 
-**OAuth2 Bearer tokens** (via Stalwart's built-in OAuth2 server):
+**Using Stalwart's built-in OAuth2:**
 
 ```sh
 # 1. Start a device authorization flow
@@ -480,7 +482,13 @@ curl -X POST http://localhost:8443/auth/token \
 curl -H "Authorization: Bearer ACCESS_TOKEN" http://localhost:8443/jmap
 ```
 
-> Stalwart's OAuth2 server is separate from the `oauth2-mock` service. The mock is used by Dovecot/Postfix for IMAP/SMTP OAuth2 authentication. Stalwart has its own built-in OAuth2 server backed by its internal user directory.
+> Stalwart also has its own built-in OAuth2 server (at `:8443`). Tokens issued by either Stalwart's OAuth2 or the `oauth2-mock` (at `:8080`) are accepted.
+
+**Admin access:**
+
+```sh
+curl -u admin:secret http://localhost:8443/jmap/session
+```
 
 ### JMAP Usage (Python)
 
@@ -489,14 +497,11 @@ import json
 import urllib.request
 
 JMAP_URL = "http://localhost:8443/jmap"
-CREDENTIALS = "dev@local.test:secret"
+TOKEN = "valid-dev@local.test"  # from oauth2-mock or full OAuth2 flow
 
-# Helper to make JMAP requests with Basic auth
-import base64
-auth = base64.b64encode(CREDENTIALS.encode()).decode()
 headers = {
     "Content-Type": "application/json",
-    "Authorization": f"Basic {auth}",
+    "Authorization": f"Bearer {TOKEN}",
 }
 
 # Get the JMAP session to find account ID
@@ -526,10 +531,12 @@ with urllib.request.urlopen(req) as resp:
 
 ```sh
 # Get session (discover account ID)
-curl -s -u dev@local.test:secret http://localhost:8443/.well-known/jmap | python3 -m json.tool
+curl -s -H "Authorization: Bearer valid-dev@local.test" \
+  http://localhost:8443/.well-known/jmap | python3 -m json.tool
 
 # Query mailboxes (replace ACCOUNT_ID with the value from the session)
-curl -s -u dev@local.test:secret http://localhost:8443/jmap \
+curl -s -H "Authorization: Bearer valid-dev@local.test" \
+  http://localhost:8443/jmap \
   -H "Content-Type: application/json" \
   -d '{
     "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -539,7 +546,8 @@ curl -s -u dev@local.test:secret http://localhost:8443/jmap \
   }' | python3 -m json.tool
 
 # Search emails
-curl -s -u dev@local.test:secret http://localhost:8443/jmap \
+curl -s -H "Authorization: Bearer valid-dev@local.test" \
+  http://localhost:8443/jmap \
   -H "Content-Type: application/json" \
   -d '{
     "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -596,12 +604,6 @@ python3 scripts/send_thread.py --thread onboarding --email dev@local.test --date
 
 ```sh
 python3 scripts/create_folder.py --email dev@local.test --folder INBOX.Archive
-```
-
-### Sync Users into Stalwart
-
-```sh
-python3 scripts/sync_stalwart_users.py
 ```
 
 ### Reset the Environment

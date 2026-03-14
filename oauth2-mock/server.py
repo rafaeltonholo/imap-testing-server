@@ -365,6 +365,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
             _json_response(self, {
                 "active": True,
                 "username": entry["username"],
+                "email": entry["username"],
                 "scope": entry["scope"],
                 "token_type": "bearer",
                 "exp": entry["exp"],
@@ -380,6 +381,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
             return {
                 "active": True,
                 "username": username,
+                "email": username,
                 "scope": "imap smtp",
                 "token_type": "bearer",
                 "exp": int(time.time()) + ACCESS_TOKEN_TTL,

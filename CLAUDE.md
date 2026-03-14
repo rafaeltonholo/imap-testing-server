@@ -117,9 +117,11 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
   - OAuth2 Device Flow: `POST http://localhost:8443/auth/device` with `client_id=<any>`
   - Data stored in `./stalwart-data/` (mounted at `/opt/stalwart/data`)
   - Config from `./stalwart/config.toml` (mounted read-only)
-  - Users provisioned via admin API (`python3 scripts/sync_stalwart_users.py`)
-  - Supports Basic auth (password) and OAuth2 Bearer tokens (via built-in OAuth2 server)
-  - Healthcheck via TCP check on port 8080
+  - Auth via OIDC directory: Bearer tokens validated against `oauth2-mock` introspection
+  - Also accepts tokens from Stalwart's built-in OAuth2 server (device code / auth code flows)
+  - Admin access via Basic auth (`admin` / `secret`) using `authentication.fallback-admin`
+  - No Basic auth for regular users (OIDC directory limitation)
+  - Healthcheck via TCP check on port 8443
 - **oauth2-mock** (built from `./oauth2-mock/`, container: `oauth2-mock`) — Mock OAuth2 authorization server
   - Discovery: `http://localhost:8080/.well-known/oauth-authorization-server`
   - Authorize: `http://localhost:8080/authorize` (shows consent page)
