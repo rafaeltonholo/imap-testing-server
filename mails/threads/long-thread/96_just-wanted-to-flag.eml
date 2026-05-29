@@ -1,0 +1,34 @@
+MIME-Version: 1.0
+Date: Tue, 31 Mar 2026 08:23:25 -0300
+From: qa@local.test
+To: dev@local.test
+Subject: Re: Required changes
+Message-ID: <gen-1774358365-1400-96@local.test>
+In-Reply-To: <gen-1774358365-1400-95@local.test>
+References: <gen-1774358365-1400-1@local.test> <gen-1774358365-1400-2@local.test> <gen-1774358365-1400-3@local.test> <gen-1774358365-1400-4@local.test> <gen-1774358365-1400-5@local.test> <gen-1774358365-1400-6@local.test> <gen-1774358365-1400-7@local.test> <gen-1774358365-1400-8@local.test> <gen-1774358365-1400-9@local.test> <gen-1774358365-1400-10@local.test> <gen-1774358365-1400-11@local.test> <gen-1774358365-1400-12@local.test> <gen-1774358365-1400-13@local.test> <gen-1774358365-1400-14@local.test> <gen-1774358365-1400-15@local.test> <gen-1774358365-1400-16@local.test> <gen-1774358365-1400-17@local.test> <gen-1774358365-1400-18@local.test> <gen-1774358365-1400-19@local.test> <gen-1774358365-1400-20@local.test> <gen-1774358365-1400-21@local.test> <gen-1774358365-1400-22@local.test> <gen-1774358365-1400-23@local.test> <gen-1774358365-1400-24@local.test> <gen-1774358365-1400-25@local.test> <gen-1774358365-1400-26@local.test> <gen-1774358365-1400-27@local.test> <gen-1774358365-1400-28@local.test> <gen-1774358365-1400-29@local.test> <gen-1774358365-1400-30@local.test> <gen-1774358365-1400-31@local.test> <gen-1774358365-1400-32@local.test> <gen-1774358365-1400-33@local.test> <gen-1774358365-1400-34@local.test> <gen-1774358365-1400-35@local.test> <gen-1774358365-1400-36@local.test> <gen-1774358365-1400-37@local.test> <gen-1774358365-1400-38@local.test> <gen-1774358365-1400-39@local.test> <gen-1774358365-1400-40@local.test> <gen-1774358365-1400-41@local.test> <gen-1774358365-1400-42@local.test> <gen-1774358365-1400-43@local.test> <gen-1774358365-1400-44@local.test> <gen-1774358365-1400-45@local.test> <gen-1774358365-1400-46@local.test> <gen-1774358365-1400-47@local.test> <gen-1774358365-1400-48@local.test> <gen-1774358365-1400-49@local.test> <gen-1774358365-1400-50@local.test> <gen-1774358365-1400-51@local.test> <gen-1774358365-1400-52@local.test> <gen-1774358365-1400-53@local.test> <gen-1774358365-1400-54@local.test> <gen-1774358365-1400-55@local.test> <gen-1774358365-1400-56@local.test> <gen-1774358365-1400-57@local.test> <gen-1774358365-1400-58@local.test> <gen-1774358365-1400-59@local.test> <gen-1774358365-1400-60@local.test> <gen-1774358365-1400-61@local.test> <gen-1774358365-1400-62@local.test> <gen-1774358365-1400-63@local.test> <gen-1774358365-1400-64@local.test> <gen-1774358365-1400-65@local.test> <gen-1774358365-1400-66@local.test> <gen-1774358365-1400-67@local.test> <gen-1774358365-1400-68@local.test> <gen-1774358365-1400-69@local.test> <gen-1774358365-1400-70@local.test> <gen-1774358365-1400-71@local.test> <gen-1774358365-1400-72@local.test> <gen-1774358365-1400-73@local.test> <gen-1774358365-1400-74@local.test> <gen-1774358365-1400-75@local.test> <gen-1774358365-1400-76@local.test> <gen-1774358365-1400-77@local.test> <gen-1774358365-1400-78@local.test> <gen-1774358365-1400-79@local.test> <gen-1774358365-1400-80@local.test> <gen-1774358365-1400-81@local.test> <gen-1774358365-1400-82@local.test> <gen-1774358365-1400-83@local.test> <gen-1774358365-1400-84@local.test> <gen-1774358365-1400-85@local.test> <gen-1774358365-1400-86@local.test> <gen-1774358365-1400-87@local.test> <gen-1774358365-1400-88@local.test> <gen-1774358365-1400-89@local.test> <gen-1774358365-1400-90@local.test> <gen-1774358365-1400-91@local.test> <gen-1774358365-1400-92@local.test> <gen-1774358365-1400-93@local.test> <gen-1774358365-1400-94@local.test> <gen-1774358365-1400-95@local.test>
+Content-Language: en-US
+X-Mailer: Thread Generator
+Content-Type: multipart/alternative; boundary="----=_GenThread_859939"
+
+------=_GenThread_859939
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Just wanted to flag that I noticed some inconsistencies in the latest data export. It might be related to the timezone handling changes we merged last week. I'll dig into it more tomorrow.
+
+Worth noting that the API change we're discussing would be a breaking change for at least two downstream consumers. We should coordinate with those teams before shipping.
+
+Looking forward to your thoughts.
+Qa
+
+------=_GenThread_859939
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Just wanted to flag that I noticed some inconsistencies in the latest data export. It might be related to the timezone handling changes we merged last week. I&#x27;ll dig into it more tomorrow.</p>
+  <p>Worth noting that the API change we&#x27;re discussing would be a breaking change for at least two downstream consumers. We should coordinate with those teams before shipping.</p>
+  <p>Looking forward to your thoughts.<br>Qa</p>
+</div>
+
+------=_GenThread_859939--

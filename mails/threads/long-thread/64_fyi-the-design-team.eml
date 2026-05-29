@@ -1,0 +1,31 @@
+MIME-Version: 1.0
+Date: Sat, 28 Mar 2026 23:48:25 -0300
+From: qa@local.test
+To: dev@local.test
+Subject: Re: Required changes
+Message-ID: <gen-1774358365-1400-64@local.test>
+In-Reply-To: <gen-1774358365-1400-63@local.test>
+References: <gen-1774358365-1400-1@local.test> <gen-1774358365-1400-2@local.test> <gen-1774358365-1400-3@local.test> <gen-1774358365-1400-4@local.test> <gen-1774358365-1400-5@local.test> <gen-1774358365-1400-6@local.test> <gen-1774358365-1400-7@local.test> <gen-1774358365-1400-8@local.test> <gen-1774358365-1400-9@local.test> <gen-1774358365-1400-10@local.test> <gen-1774358365-1400-11@local.test> <gen-1774358365-1400-12@local.test> <gen-1774358365-1400-13@local.test> <gen-1774358365-1400-14@local.test> <gen-1774358365-1400-15@local.test> <gen-1774358365-1400-16@local.test> <gen-1774358365-1400-17@local.test> <gen-1774358365-1400-18@local.test> <gen-1774358365-1400-19@local.test> <gen-1774358365-1400-20@local.test> <gen-1774358365-1400-21@local.test> <gen-1774358365-1400-22@local.test> <gen-1774358365-1400-23@local.test> <gen-1774358365-1400-24@local.test> <gen-1774358365-1400-25@local.test> <gen-1774358365-1400-26@local.test> <gen-1774358365-1400-27@local.test> <gen-1774358365-1400-28@local.test> <gen-1774358365-1400-29@local.test> <gen-1774358365-1400-30@local.test> <gen-1774358365-1400-31@local.test> <gen-1774358365-1400-32@local.test> <gen-1774358365-1400-33@local.test> <gen-1774358365-1400-34@local.test> <gen-1774358365-1400-35@local.test> <gen-1774358365-1400-36@local.test> <gen-1774358365-1400-37@local.test> <gen-1774358365-1400-38@local.test> <gen-1774358365-1400-39@local.test> <gen-1774358365-1400-40@local.test> <gen-1774358365-1400-41@local.test> <gen-1774358365-1400-42@local.test> <gen-1774358365-1400-43@local.test> <gen-1774358365-1400-44@local.test> <gen-1774358365-1400-45@local.test> <gen-1774358365-1400-46@local.test> <gen-1774358365-1400-47@local.test> <gen-1774358365-1400-48@local.test> <gen-1774358365-1400-49@local.test> <gen-1774358365-1400-50@local.test> <gen-1774358365-1400-51@local.test> <gen-1774358365-1400-52@local.test> <gen-1774358365-1400-53@local.test> <gen-1774358365-1400-54@local.test> <gen-1774358365-1400-55@local.test> <gen-1774358365-1400-56@local.test> <gen-1774358365-1400-57@local.test> <gen-1774358365-1400-58@local.test> <gen-1774358365-1400-59@local.test> <gen-1774358365-1400-60@local.test> <gen-1774358365-1400-61@local.test> <gen-1774358365-1400-62@local.test> <gen-1774358365-1400-63@local.test>
+Content-Language: en-US
+X-Mailer: Thread Generator
+Content-Type: multipart/alternative; boundary="----=_GenThread_884255"
+
+------=_GenThread_884255
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+FYI - the design team shared updated mocks in Figma. The new flow looks much cleaner. I left some comments on the edge cases we discussed.
+
+Cheers,
+Qa
+
+------=_GenThread_884255
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>FYI - the design team shared updated mocks in Figma. The new flow looks much cleaner. I left some comments on the edge cases we discussed.</p>
+  <p>Cheers,<br>Qa</p>
+</div>
+
+------=_GenThread_884255--

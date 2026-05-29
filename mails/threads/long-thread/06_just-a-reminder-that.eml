@@ -1,0 +1,34 @@
+MIME-Version: 1.0
+Date: Tue, 24 Mar 2026 17:29:25 -0300
+From: qa@local.test
+To: dev@local.test
+Subject: Re: Required changes
+Message-ID: <gen-1774358365-1400-6@local.test>
+In-Reply-To: <gen-1774358365-1400-5@local.test>
+References: <gen-1774358365-1400-1@local.test> <gen-1774358365-1400-2@local.test> <gen-1774358365-1400-3@local.test> <gen-1774358365-1400-4@local.test> <gen-1774358365-1400-5@local.test>
+Content-Language: en-US
+X-Mailer: Thread Generator
+Content-Type: multipart/alternative; boundary="----=_GenThread_864155"
+
+------=_GenThread_864155
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Just a reminder that the deadline for feedback on the RFC is this Friday. If you haven't had a chance to review it yet, please try to do so before then.
+
+I spoke with the team on the other side and they're aligned with the proposed approach. They asked if we could share a brief summary doc so they can loop in their stakeholders.
+
+Cheers,
+Qa
+
+------=_GenThread_864155
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Just a reminder that the deadline for feedback on the RFC is this Friday. If you haven&#x27;t had a chance to review it yet, please try to do so before then.</p>
+  <p>I spoke with the team on the other side and they&#x27;re aligned with the proposed approach. They asked if we could share a brief summary doc so they can loop in their stakeholders.</p>
+  <p>Cheers,<br>Qa</p>
+</div>
+
+------=_GenThread_864155--

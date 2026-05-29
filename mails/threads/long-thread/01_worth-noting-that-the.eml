@@ -1,0 +1,29 @@
+MIME-Version: 1.0
+Date: Tue, 24 Mar 2026 10:19:25 -0300
+From: dev@local.test
+To: dev@local.test
+Subject: Required changes
+Message-ID: <gen-1774358365-1400-1@local.test>
+Content-Language: en-US
+X-Mailer: Thread Generator
+Content-Type: multipart/alternative; boundary="----=_GenThread_854595"
+
+------=_GenThread_854595
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Worth noting that the API change we're discussing would be a breaking change for at least two downstream consumers. We should coordinate with those teams before shipping.
+
+Regards,
+Dev
+
+------=_GenThread_854595
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Worth noting that the API change we&#x27;re discussing would be a breaking change for at least two downstream consumers. We should coordinate with those teams before shipping.</p>
+  <p>Regards,<br>Dev</p>
+</div>
+
+------=_GenThread_854595--

@@ -1,0 +1,37 @@
+MIME-Version: 1.0
+Date: Tue, 24 Mar 2026 10:50:25 -0300
+From: qa@local.test
+To: dev@local.test
+Subject: Re: Required changes
+Message-ID: <gen-1774358365-1400-2@local.test>
+In-Reply-To: <gen-1774358365-1400-1@local.test>
+References: <gen-1774358365-1400-1@local.test>
+Content-Language: en-US
+X-Mailer: Thread Generator
+Content-Type: multipart/alternative; boundary="----=_GenThread_223501"
+
+------=_GenThread_223501
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Can someone take a look at the staging environment? I'm seeing some weird behavior with the cache layer - responses are stale even after invalidation. Might be a TTL misconfiguration.
+
+One thing to consider - we should probably run this by legal before making it public. I don't think there's an issue, but better to check early than scramble later.
+
+The staging deployment went smoothly. I've been poking around for the last hour and haven't found any regressions. I think we're good to ship this to production.
+
+Talk soon,
+Qa
+
+------=_GenThread_223501
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222;">
+  <p>Can someone take a look at the staging environment? I&#x27;m seeing some weird behavior with the cache layer - responses are stale even after invalidation. Might be a TTL misconfiguration.</p>
+  <p>One thing to consider - we should probably run this by legal before making it public. I don&#x27;t think there&#x27;s an issue, but better to check early than scramble later.</p>
+  <p>The staging deployment went smoothly. I&#x27;ve been poking around for the last hour and haven&#x27;t found any regressions. I think we&#x27;re good to ship this to production.</p>
+  <p>Talk soon,<br>Qa</p>
+</div>
+
+------=_GenThread_223501--
