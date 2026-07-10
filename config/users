@@ -5,3 +5,5 @@ dev3@local.test:{PLAIN}secret
 dev4@local.test:{PLAIN}secret
 dev5@local.test:{PLAIN}secret
 a_very_long-email_for_testing@local.test:{PLAIN}secret
+inline_img@local.test:{PLAIN}secret
+inline_msg@local.test:{PLAIN}secret
