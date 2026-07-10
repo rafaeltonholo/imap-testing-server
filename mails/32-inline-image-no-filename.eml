@@ -1,0 +1,31 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:25:00 -0300
+Subject: #10889 F - inline image without name or filename
+Message-ID: <inline-regression-f@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-inline-image-no-filename
+Content-Type: multipart/mixed; boundary="IR-F-MIXED"
+
+--IR-F-MIXED
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+This is a contrast case for attachment classification.
+
+The next MIME part is image/png with Content-Disposition: inline but no
+name parameter and no filename parameter. If this displays inline while
+the named versions do not, the regression is likely tied to filename/name
+classification rather than the image content itself.
+
+--IR-F-MIXED
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Disposition: inline
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-F-MIXED--

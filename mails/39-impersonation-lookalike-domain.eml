@@ -1,0 +1,57 @@
+From: "PayPal" <service@paypa1.example>
+Reply-To: "PayPal" <service@paypa1.example>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Confirm your recent payment
+Date: Mon, 06 Jul 2026 11:25:00 +0000
+Message-ID: <impersonation-lookalike-39@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-impersonation-lookalike-domain
+X-Spam-Flag: YES
+Content-Type: multipart/alternative; boundary="IMP_39"
+
+--IMP_39
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+Impersonation technique: LOOK-ALIKE / HOMOGRAPH DOMAIN. The sending domain is
+paypa1.example - the letter "l" replaced with the digit "1" - a confusable
+look-alike of the real brand domain. A related homograph trick uses non-Latin
+characters that render identically (e.g. a Cyrillic "a"). Both aim to pass a
+quick visual scan of the address.
+
+Dear customer,
+
+Please confirm your recent payment of $499.00 to complete the transaction.
+
+--IMP_39
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:18px;">
+    <div style="max-width:600px;margin:0 auto;border:1px solid #ddd;padding:18px;">
+      <h2 style="color:#003087;margin:0 0 10px 0;">Confirm your recent payment</h2>
+      <p>Dear customer,</p>
+      <p>We are processing a payment of <strong>$499.00</strong> from your account.
+         If you did not authorize this, cancel it now.</p>
+      <p style="text-align:center;margin:18px 0;">
+        <a href="http://paypa1.example/dispute?u=dev%40local.test"
+           style="display:inline-block;padding:12px 20px;background:#0070ba;color:#fff;text-decoration:none;border-radius:20px;font-weight:bold;">
+          Cancel this payment
+        </a>
+      </p>
+      <p style="font-size:12px;color:#555;">
+        Sender: service@paypa1.example
+        (look-alike of the real brand domain - note the digit "1").
+      </p>
+      <p style="font-size:11px;color:#888;margin-top:12px;">
+        Thunderbird for Android security-UI test fixture. The domain is a deliberate
+        look-alike on a reserved demo TLD. Nothing here is real.
+      </p>
+    </div>
+  </body>
+</html>
+
+--IMP_39--

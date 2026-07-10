@@ -1,0 +1,35 @@
+From: "Shipping Notifications" <tracking@parcel-updates.example.com>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Delivery documents attached
+Date: Mon, 06 Jul 2026 10:50:00 +0000
+Message-ID: <dangerous-zip-37@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-dangerous-attachment-zip
+Content-Type: multipart/mixed; boundary="ZIP_37"
+
+--ZIP_37
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+The attached "documents.zip" is a real ZIP archive that BUNDLES an executable
+(Invoice_details.pdf.exe) to smuggle it past attachment-type checks. Both the
+archive and the file inside are harmless stubs.
+
+Extract the attached archive to view your delivery documents.
+
+--ZIP_37
+Content-Type: application/zip; name="documents.zip"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="documents.zip"
+
+UEsDBBQAAAAIABJs5lxMxHcQRQAAAH4AAAAXAAAASW52b2ljZV9kZXRhaWxzLnBkZi5leGXzjZrA
+AIHkAg/HIF8f1+BghRDX4BCF4JBQJ4XMvOLMlFSFxKLkjMyyVAVdhbz8EoVEhaLUxByF1IrU5NKS
+xKScVD1eLgBQSwMEFAAAAAgAEmzmXB77TeRJAAAASwAAAAsAAABSRUFEX01FLnR4dA3JsQ2AMAwE
+wFV+AdiBkoaKDBCwIZZCIn0cAdvDtbemXkS5GQVTEVYTNN07zd8hzHBtjsMe79QRS/Vk5URSKqyB
+GjOumO/47wdQSwECFAMUAAAACAASbOZcTMR3EEUAAAB+AAAAFwAAAAAAAAAAAAAAgAEAAAAASW52
+b2ljZV9kZXRhaWxzLnBkZi5leGVQSwECFAMUAAAACAASbOZcHvtN5EkAAABLAAAACwAAAAAAAAAA
+AAAAgAF6AAAAUkVBRF9NRS50eHRQSwUGAAAAAAIAAgB+AAAA7AAAAAAA
+
+--ZIP_37--

@@ -1,0 +1,44 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:10:00 -0300
+Subject: #10889 C - cid image sibling outside multipart/related
+Message-ID: <inline-regression-c@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-cid-image-outside-related
+Content-Type: multipart/mixed; boundary="IR-C-MIXED"
+
+--IR-C-MIXED
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<!doctype html>
+<html>
+  <body style="font-family: sans-serif; color: #222;">
+    <h2>CID image outside multipart/related</h2>
+    <p>
+      This is intentionally a common-but-imperfect MIME tree: the HTML
+      references a <code>cid:</code> image, but the image is a sibling in
+      <code>multipart/mixed</code> instead of being inside
+      <code>multipart/related</code>.
+    </p>
+    <p>
+      Expected tolerant behavior: the color bars render here:
+    </p>
+    <p>
+      <img src="cid:inline-c@local.test" alt="Inline C color bars" width="192" height="96">
+    </p>
+  </body>
+</html>
+
+--IR-C-MIXED
+Content-Type: image/png; name="inline-c-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-ID: <inline-c@local.test>
+Content-Disposition: inline; filename="inline-c-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-C-MIXED--

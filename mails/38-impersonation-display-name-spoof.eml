@@ -1,0 +1,54 @@
+From: "PayPal Support" <billing@secure-paypa1-alerts.example.com>
+Reply-To: "PayPal Support" <recover@mailbox-verify.example.net>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Your PayPal account has been limited
+Date: Mon, 06 Jul 2026 11:10:00 +0000
+Message-ID: <impersonation-displayname-38@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-impersonation-display-name-spoof
+X-Priority: 1 (Highest)
+X-Spam-Flag: YES
+Content-Type: multipart/alternative; boundary="IMP_38"
+
+--IMP_38
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+Impersonation technique: DISPLAY-NAME SPOOF. The friendly name says
+"PayPal Support", but the actual address is billing@secure-paypa1-alerts.example.com
+(not paypal.com), and Reply-To diverges to yet another domain. Thunderbird for
+Android should surface the real sending address so the mismatch is visible.
+
+Dear customer,
+
+Your PayPal account has been limited due to unusual activity. Confirm your
+information within 24 hours to restore access.
+
+--IMP_38
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:18px;">
+    <div style="max-width:600px;margin:0 auto;border:1px solid #ddd;padding:18px;">
+      <h2 style="color:#003087;margin:0 0 10px 0;">Your account has been limited</h2>
+      <p>Dear customer,</p>
+      <p>We detected unusual activity on your PayPal account and have temporarily
+         limited it. Confirm your information within 24 hours to restore access.</p>
+      <p style="text-align:center;margin:18px 0;">
+        <a href="http://account-restore.example.com/paypal?u=dev%40local.test"
+           style="display:inline-block;padding:12px 20px;background:#0070ba;color:#fff;text-decoration:none;border-radius:20px;font-weight:bold;">
+          Restore my account
+        </a>
+      </p>
+      <p style="font-size:11px;color:#888;margin-top:18px;">
+        Thunderbird for Android security-UI test fixture. The sender name imitates
+        a trusted brand; the real address does not match. Nothing here is real.
+      </p>
+    </div>
+  </body>
+</html>
+
+--IMP_38--

@@ -1,0 +1,11 @@
+Date: Wed, 10 Jun 2026 09:46:51 -0300
+From: Quotes Daily <hello@quotes.example>
+To: dev1@local.test
+Subject: [REPRO-10256 3] HTML entities (named & numeric) should be decoded
+Message-ID: <178109561151.29261.7211248482191882955@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>Tom&nbsp;&amp;&nbsp;Jerry said &ldquo;hello&rdquo; &mdash; it&rsquo;s 5&nbsp;&gt;&nbsp;3 &amp; 2&nbsp;&lt;&nbsp;4. Caf&eacute; &copy; 2026 &hellip; price&nbsp;&pound;9 / &euro;10 / &#36;11. Quote: &#8220;&#x263A;&#8221;</p></body></html>

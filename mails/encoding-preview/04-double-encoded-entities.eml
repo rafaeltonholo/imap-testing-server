@@ -1,0 +1,11 @@
+Date: Wed, 10 Jun 2026 09:46:51 -0300
+From: Billing <billing@payments.example>
+To: dev1@local.test
+Subject: [REPRO-10256 4] Double-encoded HTML entities (&amp;nbsp; &amp;lt;)
+Message-ID: <178109561192.29261.14038910336899481142@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>Total&amp;nbsp;due: &amp;pound;42. Use code &amp;lt;SAVE10&amp;gt; &amp;amp; save. Terms &amp;copy; Acme.</p></body></html>

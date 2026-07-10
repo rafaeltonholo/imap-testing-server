@@ -1,0 +1,13 @@
+Date: Wed, 10 Jun 2026 09:46:53 -0300
+From: Receipts <receipt@billing.example>
+To: dev1@local.test
+Subject: [REPRO-10256 8] base64 text/html with entities
+Message-ID: <178109561357.29261.4596670011048639664@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PGh0bWw+PGJvZHk+PHA+UmVjZWlwdCZuYnNwOyMxMDAmbWRhc2g7VG9tJm5ic3A7JmFtcDsmbmJz
+cDtKZXJyeS4gQW1vdW50OiAmcG91bmQ7OS45OSAmbHQ7cGFpZCZndDsuIFRoYW5rcyAmIzEyODUx
+Mjs8L3A+PC9ib2R5PjwvaHRtbD4=

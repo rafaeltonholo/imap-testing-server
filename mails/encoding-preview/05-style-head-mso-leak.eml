@@ -1,0 +1,11 @@
+Date: Wed, 10 Jun 2026 09:46:52 -0300
+From: Big Brand <noreply@bigbrand.example>
+To: dev1@local.test
+Subject: [REPRO-10256 5] <style>/<head>/MSO-comment leak into preview
+Message-ID: <178109561233.29261.15539568746316523360@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><head><!--[if mso]><style>td{font-family:Arial}</style><![endif]--><style type="text/css">body{margin:0;padding:0}.btn{background:#ff6600;color:#fff}@media screen and (max-width:600px){.col{width:100%!important}}/* preheader hack */ .preheader{display:none!important}</style></head><body><div class="preheader" style="display:none;max-height:0;overflow:hidden">Don&rsquo;t miss our biggest sale &mdash; ends tonight!</div><table><tr><td><h1>Summer Sale</h1><p>Up to 50% off everything.</p></td></tr></table></body></html>

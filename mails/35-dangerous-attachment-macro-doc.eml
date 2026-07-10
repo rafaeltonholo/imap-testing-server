@@ -1,0 +1,45 @@
+From: "Accounts Payable" <ap@vendor-portal.example.com>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Remittance advice - enable content to view
+Date: Mon, 06 Jul 2026 10:20:00 +0000
+Message-ID: <dangerous-docm-35@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-dangerous-attachment-macro-doc
+Content-Type: multipart/mixed; boundary="DOCM_35"
+
+--DOCM_35
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+The attached "Invoice_2026.docm" is a MACRO-ENABLED Word document
+(application/vnd.ms-word.document.macroEnabled.12) - the classic macro-malware
+lure that asks the user to "enable content". The document is a minimal, valid
+OOXML skeleton with an empty vbaProject placeholder and contains NO real macro.
+
+Please open the document and enable content to view the remittance advice.
+
+--DOCM_35
+Content-Type: application/vnd.ms-word.document.macroEnabled.12; name="Invoice_2026.docm"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="Invoice_2026.docm"
+
+UEsDBBQAAAAIABJs5lzhiyJ7/AAAAPEBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbIWRwU4DIRCG
+X4VwNQurB2PM7vag9ag91AeYhdlddBkI0LV9e6FtNDGmPcI/33x/oFnt7cwWDNE4avmtqDlDUk4b
+Glv+vn2pHjiLCUjD7AhbfsDIV12zPXiMLLMUWz6l5B+ljGpCC1E4j5STwQULKR/DKD2oTxhR3tX1
+vVSOElKqUtnBu+YZB9jNia33+frUI+OcPZ3miqrl4P1sFKQcy5LKf7mAc7wALqT/tKvOzUQmjzNx
+Mj7enA1v+WGC0cg2ENIr2LxOfrmgpXZqZ7NCXC5afDZWBRE/iAUV3JqgnzGnYOiqbelhE9wHqiR6
+Q9d9bhiMQvGLle3y+GXdN1BLAwQUAAAACAASbOZcKd4EKNYAAAAfAQAAEQAAAHdvcmQvZG9jdW1l
+bnQueG1sRY/BSsQwEIZfZch9m+pBpLRdVumioJdtV7xmk3FbSGZCEq379iYr6OUbhh++mb/dfjsL
+XxjiwtSJm6oWgKTZLHTuxHHab+4FxKTIKMuEnbhgFNu+XRvD+tMhJcgCis3aiTkl30gZ9YxOxYo9
+Us4+ODiV8hrOcuVgfGCNMWa/s/K2ru+kUwuJojyxuZTpC0JB6p92h9eXYRxhGsYJ9s/v0/EwwAac
+0oE3SOpk0cDfM94qjTNbg6GCR6aU3RGIIaCy8Pawg9wNq1YWd2G40l/5e1/+d+t/AFBLAwQUAAAA
+CAASbOZc0uat+TMAAAAxAAAAEwAAAHdvcmQvdmJhUHJvamVjdC5iaW7zcAzy9XENDlYIcQ0OUQgO
+CXVS0FXIy1dIrUhNLi1JTMpJVchNTC7KV0jOzytJzSvRAwBQSwECFAMUAAAACAASbOZc4Ysie/wA
+AADxAQAAEwAAAAAAAAAAAAAAgAEAAAAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLAQIUAxQAAAAIABJs
+5lwp3gQo1gAAAB8BAAARAAAAAAAAAAAAAACAAS0BAAB3b3JkL2RvY3VtZW50LnhtbFBLAQIUAxQA
+AAAIABJs5lzS5q35MwAAADEAAAATAAAAAAAAAAAAAACAATICAAB3b3JkL3ZiYVByb2plY3QuYmlu
+UEsFBgAAAAADAAMAwQAAAJYCAAAAAA==
+
+--DOCM_35--

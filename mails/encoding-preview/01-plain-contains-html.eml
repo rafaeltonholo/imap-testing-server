@@ -1,0 +1,20 @@
+Date: Wed, 10 Jun 2026 09:46:50 -0300
+From: Acme Newsletter <news@acme-mail.example>
+To: dev1@local.test
+Subject: [REPRO-10256 1] text/plain part literally contains HTML markup
+Message-ID: <178109561068.29261.8427088620450607587@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: multipart/alternative; boundary="BND_01_plainhtml"
+
+--BND_01_plainhtml
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html><html><body><p>Hello&nbsp;<b>dev1</b>, your invoice &amp; receipt are ready.</p><a href="https://acme.example/pay?id=42&amp;tok=abc">Click&nbsp;here</a> to pay &mdash; it&rsquo;s due today.</body></html>
+--BND_01_plainhtml
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>Hello <b>dev1</b>, your invoice &amp; receipt are ready.</p><p><a href="https://acme.example/pay">Pay now</a></p></body></html>
+--BND_01_plainhtml--

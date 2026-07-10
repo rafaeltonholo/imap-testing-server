@@ -1,0 +1,11 @@
+Date: Wed, 10 Jun 2026 09:46:51 -0300
+From: Updates <updates@store.example>
+To: dev1@local.test
+Subject: [REPRO-10256 2] HTML-only message, no text/plain alternative
+Message-ID: <178109561110.29261.414064389498102386@example.com>
+MIME-Version: 1.0
+X-Repro: REPRO-10256
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><head><title>Order shipped</title></head><body><div style="font-family:Arial"><h1>Your order shipped!</h1><p>Tracking: <a href="https://t.example/9Z9Z">9Z9Z</a>. Questions? <span>reply&nbsp;anytime</span>.</p></div></body></html>

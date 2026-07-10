@@ -1,0 +1,55 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:05:00 -0300
+Subject: #10889 B - inline image sibling after multipart/alternative
+Message-ID: <inline-regression-b@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-inline-image-html-alternative-sibling
+Content-Type: multipart/mixed; boundary="IR-B-MIXED"
+
+--IR-B-MIXED
+Content-Type: multipart/alternative; boundary="IR-B-ALT"
+
+--IR-B-ALT
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+This message has a multipart/alternative body followed by an inline image
+sibling. The HTML body deliberately does not reference the image by cid:.
+
+Expected older behavior: the colored image is previewed inline after the
+message body. Affected behavior: it is surfaced only as an attachment.
+
+--IR-B-ALT
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<!doctype html>
+<html>
+  <body style="font-family: sans-serif; color: #222;">
+    <h2>Inline image sibling after HTML body</h2>
+    <p>
+      This message body is a <code>multipart/alternative</code> part.
+      The following sibling MIME part is <code>image/png</code> with
+      <code>Content-Disposition: inline</code>.
+    </p>
+    <p>
+      If the image preview path is working, a small red, blue, and green
+      color-bar image should appear below this HTML body.
+    </p>
+  </body>
+</html>
+
+--IR-B-ALT--
+
+--IR-B-MIXED
+Content-Type: image/png; name="inline-b-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="inline-b-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-B-MIXED--

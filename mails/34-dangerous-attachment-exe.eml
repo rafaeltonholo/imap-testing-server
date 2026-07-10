@@ -1,0 +1,32 @@
+From: "Billing Department" <billing@invoices-online.example.com>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Your invoice is attached
+Date: Mon, 06 Jul 2026 10:05:00 +0000
+Message-ID: <dangerous-exe-34@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-dangerous-attachment-exe
+Content-Type: multipart/mixed; boundary="EXE_34"
+
+--EXE_34
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+The attached file "Invoice.pdf.exe" uses a DOUBLE EXTENSION to look like a
+PDF while being declared as a Windows executable (application/x-msdownload).
+The payload is a harmless stub with only an MZ header - it is not runnable.
+
+Please review the attached invoice.
+
+--EXE_34
+Content-Type: application/x-msdownload; name="Invoice.pdf.exe"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="Invoice.pdf.exe"
+
+TVqQAJAAkACQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1vZGUuDQpIQVJNTEVT
+UyBURVNUIFNUVUIgLSBOT1QgQSBSRUFMIEVYRUNVVEFCTEUgLSBUaHVuZGVyYmlyZCBBbmRyb2lk
+IHNlY3VyaXR5IFVJIGZpeHR1cmUuDQo=
+
+--EXE_34--

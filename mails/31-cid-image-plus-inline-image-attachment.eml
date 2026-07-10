@@ -1,0 +1,59 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:20:00 -0300
+Subject: #10889 E - proper cid image plus inline image attachment
+Message-ID: <inline-regression-e@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-cid-plus-inline-attachment
+Content-Type: multipart/mixed; boundary="IR-E-MIXED"
+
+--IR-E-MIXED
+Content-Type: multipart/related; boundary="IR-E-RELATED"; type="text/html"
+
+--IR-E-RELATED
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<!doctype html>
+<html>
+  <body style="font-family: sans-serif; color: #222;">
+    <h2>Control CID image plus inline image attachment</h2>
+    <p>
+      The first image is a proper <code>multipart/related</code> CID image.
+      It should render in the body when images are shown.
+    </p>
+    <p>
+      <img src="cid:inline-e-cid@local.test" alt="Inline E CID color bars" width="192" height="96">
+    </p>
+    <p>
+      A second image follows outside the related part as
+      <code>Content-Disposition: inline</code>. It should be previewed inline
+      after the body rather than requiring an external viewer.
+    </p>
+  </body>
+</html>
+
+--IR-E-RELATED
+Content-Type: image/png; name="inline-e-cid-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-ID: <inline-e-cid@local.test>
+Content-Disposition: inline; filename="inline-e-cid-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-E-RELATED--
+
+--IR-E-MIXED
+Content-Type: image/png; name="inline-e-preview-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="inline-e-preview-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-E-MIXED--

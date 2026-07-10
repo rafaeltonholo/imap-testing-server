@@ -1,0 +1,43 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:15:00 -0300
+Subject: #10889 D - Content-Location image outside multipart/related
+Message-ID: <inline-regression-d@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-content-location-outside-related
+Content-Type: multipart/mixed; boundary="IR-D-MIXED"
+
+--IR-D-MIXED
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+<!doctype html>
+<html>
+  <body style="font-family: sans-serif; color: #222;">
+    <h2>Content-Location inline image</h2>
+    <p>
+      This HTML references an image by relative URL. The image is a sibling
+      MIME part with <code>Content-Location</code> and
+      <code>Content-Disposition: inline</code>.
+    </p>
+    <p>
+      Expected tolerant behavior: the color bars render here:
+    </p>
+    <p>
+      <img src="inline-d-color-bars.png" alt="Inline D color bars" width="192" height="96">
+    </p>
+  </body>
+</html>
+
+--IR-D-MIXED
+Content-Type: image/png; name="inline-d-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-Location: inline-d-color-bars.png
+Content-Disposition: inline; filename="inline-d-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-D-MIXED--

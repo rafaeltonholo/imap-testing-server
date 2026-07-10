@@ -1,0 +1,56 @@
+From: "Jordan Reyes (CEO)" <jordan.reyes@ceo-office-mail.example>
+Reply-To: "Jordan Reyes" <j.reyes.private@mailbox-secure.example.net>
+To: dev@local.test
+Subject: [SECURITY UI TEST] Quick favor - are you at your desk?
+Date: Mon, 06 Jul 2026 11:40:00 +0000
+Message-ID: <impersonation-internal-40@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-impersonation-internal-colleague-spoof
+X-Priority: 1 (Highest)
+Content-Type: multipart/alternative; boundary="IMP_40"
+
+--IMP_40
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android).
+
+Impersonation technique: INTERNAL-COLLEAGUE / CEO-FRAUD SPOOF. The display name
+imitates a senior colleague ("Jordan Reyes (CEO)"), but the real address is the
+external jordan.reyes@ceo-office-mail.example - NOT the internal local.test
+domain the recipient would expect - and Reply-To points somewhere else again.
+No links or attachments; the pressure is purely social.
+
+Hi,
+
+Are you at your desk? I need you to handle a confidential task before our
+2pm call. I'm heading into a meeting and can't take calls - just reply here.
+
+It's time-sensitive. Let me know as soon as you get this.
+
+Thanks,
+Jordan
+Sent from my phone
+
+--IMP_40
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:18px;">
+    <div style="max-width:600px;margin:0 auto;padding:4px;">
+      <p>Hi,</p>
+      <p>Are you at your desk? I need you to handle a confidential task before our
+         2pm call. I'm heading into a meeting and can't take calls &mdash; just reply here.</p>
+      <p>It's time-sensitive. Let me know as soon as you get this.</p>
+      <p>Thanks,<br>Jordan<br><span style="color:#888;font-size:12px;">Sent from my phone</span></p>
+      <p style="font-size:11px;color:#888;margin-top:18px;">
+        Thunderbird for Android security-UI test fixture. The display name imitates
+        an internal colleague, but the sending address is external and mismatched.
+        Nothing here is real.
+      </p>
+    </div>
+  </body>
+</html>
+
+--IMP_40--

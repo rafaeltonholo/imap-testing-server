@@ -1,0 +1,71 @@
+From: "YourBank Security" <alerts@yourbank-notices.example.com>
+Reply-To: support@yourbank-notices.example.com
+To: dev@local.test
+Subject: [SECURITY UI TEST] Unusual sign-in detected - confirm your details
+Date: Mon, 06 Jul 2026 09:12:00 +0000
+Message-ID: <suspicious-link-33@example.com>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-suspicious-link
+X-Priority: 1 (Highest)
+X-Spam-Flag: YES
+Content-Type: multipart/alternative; boundary="LINKTEST_33"
+
+--LINKTEST_33
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+Security-UI test fixture (Thunderbird for Android). Every link below points
+to a reserved demo host (example.com / 192.0.2.0-24) and goes nowhere real.
+
+We noticed an unusual sign-in to your account. Confirm your details now:
+
+  Displayed: https://www.yourbank.example/verify
+  Real link: http://secure-login.example.com/steal?u=dev%40local.test
+
+Additional suspicious patterns in the HTML version:
+  - a raw IP-address link   (http://192.0.2.13/verify)
+  - a look-alike punycode host
+  - a shortened link that hides its true destination
+
+--LINKTEST_33
+Content-Type: text/html; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;background:#fff;padding:18px;">
+    <div style="max-width:600px;margin:0 auto;border:1px solid #ddd;padding:18px;">
+      <h2 style="color:#b71c1c;margin:0 0 10px 0;">Unusual sign-in detected</h2>
+      <p>We noticed a sign-in to your account from a new device. If this was not you,
+         confirm your details immediately or your account will be limited.</p>
+
+      <!-- 1) Classic link-text vs href mismatch: visible text is a trusted-looking URL,
+              href goes to a different host. This is the primary phishing signal. -->
+      <p style="text-align:center;margin:18px 0;">
+        <a href="http://secure-login.example.com/steal?u=dev%40local.test"
+           style="display:inline-block;padding:12px 20px;background:#1565c0;color:#fff;text-decoration:none;border-radius:4px;font-weight:bold;">
+          https://www.yourbank.example/verify
+        </a>
+      </p>
+
+      <p>Or verify using one of these options:</p>
+      <ul>
+        <!-- 2) Raw IP-address link -->
+        <li><a href="http://192.0.2.13/verify">http://192.0.2.13/verify</a></li>
+
+        <!-- 3) Look-alike / punycode host: visible text says the real brand,
+                href resolves to a confusable xn-- host -->
+        <li><a href="http://www.xn--yourbnk-l1a.example/login">www.yourbank.example</a></li>
+
+        <!-- 4) URL shortener hiding the true destination behind neutral text -->
+        <li><a href="http://tiny.example/9aFq2z">Click here to verify &raquo;</a></li>
+      </ul>
+
+      <p style="font-size:11px;color:#888;margin-top:18px;">
+        Thunderbird for Android security-UI test fixture. All links target reserved
+        demo addresses and lead nowhere real.
+      </p>
+    </div>
+  </body>
+</html>
+
+--LINKTEST_33--

@@ -1,0 +1,31 @@
+From: Image Sender <image-sender@local.test>
+To: recipient@local.test
+Date: Fri, 29 May 2026 12:00:00 -0300
+Subject: #10889 A - inline image sibling after text/plain
+Message-ID: <inline-regression-a@local.test>
+MIME-Version: 1.0
+X-Test-Case: thunderbird-android-10889-inline-image-plain-sibling
+Content-Type: multipart/mixed; boundary="IR-A-MIXED"
+
+--IR-A-MIXED
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+This is the smallest Content-Disposition: inline preview case.
+
+The next MIME part is image/png, has Content-Disposition: inline, and is
+not referenced by cid: from HTML. Older behavior should show the colored
+image directly below this text. Affected behavior shows it only as an
+attachment that must be opened separately.
+
+--IR-A-MIXED
+Content-Type: image/png; name="inline-a-color-bars.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="inline-a-color-bars.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAeElEQVR42u3WMRHAIBBFQWQg5SQg
+A0ERFDmYSA8GQpVjUuybj4FtjlK1raw3IvIW10hdu3veAAECBAgQIECAAAECBAgQIECAAAECBAjQ
+10CPXgIECBAgQP8Hcub9gwABAgQIECBAgAABAgQIECBAgAABAgToFJA2TQKp3ULryxJYAAAAAElF
+TkSuQmCC
+
+--IR-A-MIXED--
