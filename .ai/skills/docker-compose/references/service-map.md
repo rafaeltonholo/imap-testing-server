@@ -7,6 +7,7 @@
 | dovecot     | dovecot-dev     | 143       | 31143          | IMAP STARTTLS |
 | dovecot     | dovecot-dev     | 993       | 31993          | IMAPS (TLS)   |
 | postfix     | postfix-dev     | 1025      | 25             | SMTP          |
+| postfix     | postfix-dev     | 465       | 465            | SMTPS         |
 | postfix     | postfix-dev     | 587       | 587            | SMTP Submission |
 | oauth2-mock | oauth2-mock     | 8080      | 8080           | HTTP          |
 | stalwart    | stalwart-dev    | 8443      | 8080           | HTTP (JMAP)   |

@@ -14,9 +14,11 @@
 - `mydomain`: `local.test`
 - `mydestination`: Accepts mail for `local.test`
 - `mailbox_transport`: LMTP delivery to Dovecot (`lmtp:dovecot-dev:24`)
-- `smtpd_recipient_restrictions`: Permits local network delivery
+- `smtpd_relay_restrictions`: Permits local-domain delivery and rejects external relay
+- `smtpd_tls_security_level`: Advertises STARTTLS with the dev certificate
 
 ## Ports
 
 - Host `1025` → Container `25` (SMTP)
+- Host `465` → Container `465` (SMTPS)
 - Host `587` → Container `587` (Submission)

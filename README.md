@@ -64,7 +64,8 @@ This starts four services:
 | IMAP (STARTTLS) | `localhost` | `143`  | Use STARTTLS for encryption                       |
 | IMAPS (TLS)     | `localhost` | `993`  | Direct TLS connection                             |
 | SMTP            | `localhost` | `1025` | No auth required from local networks              |
-| SMTP Submission | `localhost` | `587`  | Authenticated sending (SASL)                      |
+| SMTPS           | `localhost` | `465`  | Direct TLS connection                             |
+| SMTP Submission | `localhost` | `587`  | STARTTLS + SASL for local-domain sending          |
 | JMAP HTTP       | `localhost` | `8443` | JMAP protocol + web admin                         |
 | OAuth2 Server   | `localhost` | `8080` | Authorization, token, and introspection endpoints |
 

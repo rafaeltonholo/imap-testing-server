@@ -27,7 +27,10 @@ services:
     restart: unless-stopped
     ports:
       - "1025:25"     # SMTP (maps host:1025 → container:25)
+      - "465:465"     # SMTPS (implicit TLS)
       - "587:587"     # SMTP Submission
+    volumes:
+      - ./ssl:/etc/postfix/ssl:ro
     depends_on:
       dovecot:
         condition: service_healthy

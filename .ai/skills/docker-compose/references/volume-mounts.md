@@ -9,6 +9,12 @@
 | `./vmail`   | `/srv/vmail`            | rw   | Maildir storage              |
 | `./logs`    | `/var/log/dovecot`      | rw   | Log files                    |
 
+## Postfix
+
+| Host Path | Container Path       | Mode | Purpose                    |
+|-----------|----------------------|------|----------------------------|
+| `./ssl`   | `/etc/postfix/ssl`   | ro   | SMTP TLS certificates      |
+
 ## Stalwart
 
 | Host Path            | Container Path               | Mode | Purpose              |

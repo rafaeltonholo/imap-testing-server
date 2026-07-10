@@ -12,6 +12,6 @@ COPY main.cf /etc/postfix/main.cf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 25 587
+EXPOSE 25 465 587
 
 ENTRYPOINT ["/entrypoint.sh"]

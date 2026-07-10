@@ -8,7 +8,8 @@ local_recipient_maps =
 smtpd_reject_unlisted_recipient = no
 mailbox_transport = lmtp:inet:dovecot:24
 
-# Open relay for Docker networks (no auth required from these sources)
+# Trusted networks for local Docker/LAN clients. Relay policy below still
+# limits delivery to local destinations.
 mynetworks = 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
 
 # SASL auth via Dovecot (for testing authenticated flows)
@@ -17,11 +18,14 @@ smtpd_sasl_path = inet:dovecot:12345
 smtpd_sasl_auth_enable = yes
 smtpd_sasl_security_options = noanonymous
 
-# Relay restrictions: allow mynetworks, SASL-authenticated clients, reject everything else
-smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+# Relay restrictions: accept local.test destinations, but do not relay externally
+smtpd_relay_restrictions = reject_unauth_destination
 
-# No TLS requirement for local dev simplicity
-smtpd_tls_security_level = none
+# Advertise STARTTLS for local clients. The dev certificate is mounted by
+# docker-compose from ./ssl.
+smtpd_tls_cert_file = /etc/postfix/ssl/tls.crt
+smtpd_tls_key_file = /etc/postfix/ssl/tls.key
+smtpd_tls_security_level = may
 smtp_tls_security_level = none
 
 # Disable IPv6 to avoid binding issues in Docker
