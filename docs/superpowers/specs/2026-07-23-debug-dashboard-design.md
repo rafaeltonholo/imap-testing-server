@@ -131,9 +131,11 @@ The Ktor service runs on the host and binds only to `127.0.0.1`. Host placement 
 - serves the compiled Wasm assets and versioned JSON API;
 - invokes a fixed allowlist of `docker compose` and `doveadm` operations;
 - reads Docker Compose stdout without mounting the Docker socket into another container;
-- atomically updates the host-side Dovecot user file;
+- atomically updates the gitignored Dovecot runtime eligibility file;
 - connects to the exposed IMAP, SMTP, and JMAP endpoints;
 - maintains a local, gitignored operation database and short-lived upload spool.
+
+All host-published sandbox ports used by the dashboard are bound to loopback during the provider-baseline gates; the current unqualified Compose bindings are not an acceptable local-only boundary.
 
 The service discovers the repository root from validated configuration. Requests cannot supply arbitrary command names, service names, working directories, or filesystem paths.
 
@@ -146,7 +148,7 @@ The service discovers the repository root from validated configuration. Requests
 | HTTP/API layer | Same-origin API, CSRF/session checks, SSE, content headers, request validation | application services |
 | Account registry | Live projection of provider accounts into logical addresses | account admin adapters |
 | Operation orchestrator | Locks, idempotency, progress, cancellation, partial outcomes, reconciliation | ledger and provider adapters |
-| Dovecot admin adapter | User-file parsing and atomic mutation, auth-cache flush, session kick, auth verification | host filesystem and allowlisted `doveadm` |
+| Dovecot admin adapter | Eligibility-file parsing and atomic mutation, password hashing, auth-cache flush, session kick, auth-path verification | gitignored runtime filesystem and allowlisted `doveadm` |
 | Dovecot mail adapter | IMAP folder/message reads and mutations with UID semantics | IMAP endpoint |
 | Postfix submission adapter | Real SMTP envelope submission and queue receipt capture | SMTP endpoint |
 | Stalwart admin adapter | Domain/account query, create, credential update, destroy | v0.16 JMAP management |
@@ -164,6 +166,8 @@ A logical account is keyed by a canonical full email address. It contains zero o
 
 - `dovecot-imap`;
 - `stalwart-jmap`.
+
+The first release accepts a bare addr-spec only—no display name, comment, or quoted local part—for a discovered sandbox domain. The domain is normalized to lowercase ASCII. The local part must already be lowercase, is preserved byte-for-byte after validation, and must match the provider-returned canonical address. The dashboard does not guess that differently cased local parts identify the same account.
 
 The registry is a projection of live provider state, not a second authoritative account database. On startup and explicit refresh, the server:
 
@@ -202,23 +206,38 @@ The shared contract may wrap these in sealed provider-specific types. It must no
 
 ### Browser session
 
-The local browser receives only a same-origin dashboard session. It never receives mail-server administration credentials, operator credentials, recovery secrets, or Docker access.
+The first release serves the dashboard over loopback HTTP. On each Ktor start, the server generates a 256-bit, single-use bootstrap secret that expires after 60 seconds and prints a URL whose secret is in the fragment. The fragment is not sent in the HTTP request or referrer. The SPA exchanges it once through an exact-origin bootstrap request, immediately removes it with `history.replaceState`, and receives:
+
+- a host-only, `HttpOnly`, `SameSite=Strict` session cookie scoped to `/`;
+- a session-bound CSRF value returned in the response body and held only in memory.
+
+The session rotates at bootstrap, ends with the server process, and has an eight-hour absolute maximum. Expiry requires a new locally printed bootstrap URL. No API, SSE stream, or mutation accepts a session or bearer value in its query string.
+
+The session protects the privileged loopback API from unrelated browser origins, DNS rebinding, and LAN callers. A process already running as the same operating-system user is outside this boundary because it can read the repository configuration and control the same Docker sandbox.
+
+The browser never receives mail-server administration credentials, operator credentials, recovery secrets, or Docker access.
 
 ### Provider administration
 
-- Dovecot administration uses the host user file and allowlisted `doveadm`.
-- Stalwart administration uses a protected, server-side v0.16 management identity.
+- Dovecot administration uses the gitignored runtime eligibility file and allowlisted `doveadm`.
+- Stalwart administration uses a protected, server-side v0.16 management Account with an API-key credential in permission `Replace` mode. Its allowlist is limited to the Account, Domain, and Task get/query/set methods required by this specification and optional Log get/query. It has neither `impersonate` nor mail read/mutation/submission permissions.
 
 ### Mail access
 
 Normal browsing and mutation must not require the dashboard to persist every user's password.
 
-- Dovecot uses a dedicated, localhost-restricted master/operator identity for IMAP access.
-- Stalwart uses a protected operator identity with only the permissions needed for account impersonation and JMAP mail operations.
+- Dovecot uses a dedicated master/operator identity through a host-only ingress whose actual Docker network path is verified.
+- Stalwart uses a second protected Account with a normal Password credential and only the permissions required to authenticate and impersonate an ordinary user. An app password is not used for impersonation. The resulting user context performs JMAP mail operations.
 
-The Dovecot operator approach is a Gate 0C contract test. If the current image cannot support a localhost-restricted master identity without weakening ordinary account authentication, implementation stops for a credential-strategy decision.
+The Dovecot operator approach is a Gate 0C contract test. If the current image cannot isolate the master identity without weakening ordinary account authentication, implementation stops for a credential-strategy decision.
 
-The Stalwart operator approach is a Gate 0B contract test. If v0.16.14 cannot provide sufficiently scoped impersonation, implementation stops for a credential-strategy decision. It must not silently start storing user passwords.
+The Stalwart operator approach is a Gate 0B contract test. In v0.16.14, possession of the `impersonate` permission may be global rather than target-scoped, so an application-side protected-account denylist is not an authorization boundary. The gate must prove the operator cannot impersonate the management Account or any other protected identity. If sufficiently scoped impersonation cannot be enforced, implementation stops for a credential-strategy decision. It must not silently start storing user passwords.
+
+### Server-side secret material
+
+Operator and management secrets are generated during local setup and enter the Ktor process only through environment/Compose secret injection or an owner-readable gitignored runtime file. They never use repository defaults and are not stored in source, the dashboard database, browser payloads, operation receipts, or logs.
+
+Rotation stages and probes a new credential, atomically switches the backend reference, restarts or reloads the dependent adapter, revokes the old credential, and negatively verifies the old value. The management and mail-operator Account IDs are immutable protected resources and are excluded from ordinary account CRUD by provider ID, not only by display address.
 
 Passwords supplied during account creation or reset are request-scoped:
 
@@ -233,7 +252,8 @@ All endpoints are under `/api/v1`. Resource reads are synchronous; mutations ret
 
 | Route family | Purpose |
 |---|---|
-| `GET /bootstrap` | dashboard version, readiness, capabilities, retention, session metadata |
+| `POST /session/bootstrap` | exchange the one-time fragment secret and establish the browser session |
+| `GET /bootstrap` | authenticated dashboard version, readiness, capabilities, retention, and session metadata |
 | `/accounts` | list, inspect, create logical/provider instances |
 | `/accounts/{address}/providers/{profile}` | provider detail, credential reset, delete |
 | `/mailboxes` | list, create, update, delete |
@@ -284,7 +304,11 @@ Operation states are:
 
 Multi-provider work is a saga, not a distributed transaction. A provider that succeeds is never reported as failed merely because the other provider failed. The dashboard does not hide partial completion with an automatic destructive rollback. It records exact outcomes and offers scoped retry or inspection.
 
-Cancellation is cooperative between provider calls. It cannot interrupt an atomic remote method halfway through. An operation still marked running after a server restart becomes interrupted and is reconciled before it may be retried.
+Provider receipts separate the requested logical postcondition from ancillary verification. For Stalwart account deletion, principal absence plus failed authentication is the required logical postcondition; background data cleanup has its own Pending, Retry, Failed, confirmed-complete, or unverified receipt. An observed Failed cleanup makes the operation `reconciliationRequired`. A task that completed before observation may leave the logical deletion `succeeded` with an explicit unverified-cleanup warning; it is never reported as confirmed purge.
+
+Retry is offered only when its inputs still exist. After a request-scoped password or completed upload has been discarded, the UI asks the user to supply the secret or message source again and creates a linked retry operation; it never implies the ledger can replay secret material it did not retain.
+
+Cancellation is cooperative between provider calls. It cannot interrupt an atomic remote method halfway through. An operation still marked running after a server restart transitions to `reconciliationRequired` with a server-interruption reason before it may be retried.
 
 ### Local persistence
 
@@ -318,11 +342,17 @@ The UI exposes retention status and a deliberate Clear Local History action.
 
 Dovecot creation:
 
-- parse and preserve the existing user-file structure;
+- use `debug-dashboard/.runtime/dovecot/users` as the mutable eligibility and passwd-file authority; tracked `config/users` is migrated to non-secret seed input and is not mutated at runtime;
+- parse and preserve the runtime file structure;
 - reject delimiter, newline, duplicate, and path-injection input;
-- lock with a dedicated lock file;
-- write a same-filesystem temporary file, preserve permissions, flush it, and atomically rename;
+- generate a supported salted Dovecot password hash through an allowlisted provider command, never interpolate a raw password, and validate the scheme-prefixed result;
+- hold one file-global lock from read through verification because all accounts share the file;
+- fail closed unless the fixed parent and target resolve inside the repository runtime directory as regular, non-symlink paths;
+- write a restrictive same-directory temporary file, fsync it, atomically replace the target, then fsync the parent directory where supported;
+- preserve and verify the intended mode and ownership and clean abandoned temporary files;
 - flush auth cache as needed and verify authentication.
+
+Before Gate 1, existing scripts that create, update, restore, or read the account file must route through the same writer/snapshot boundary or be retired from mutation use. A per-account dashboard lock alone does not coordinate a shared file.
 
 Stalwart creation:
 
@@ -336,7 +366,7 @@ Stalwart creation:
 
 The user may reset one or both provider instances with the same new value. Outcomes remain separate.
 
-- Dovecot atomically replaces the target password entry, flushes auth state, kicks active sessions, verifies the new password, and confirms the old password fails.
+- Dovecot atomically replaces the target password hash, flushes auth state, kicks active sessions, and verifies the new password. It verifies the old password fails only when that secret is supplied request-scoped or owned by the disposable acceptance test.
 - Stalwart fetches the target Account, deliberately updates only the Password credential while preserving unrelated credentials, then verifies new/old password behavior.
 
 A password reset does not claim to revoke unrelated OAuth access or refresh tokens unless the provider proves that behavior.
@@ -351,13 +381,20 @@ Before deletion, the UI shows:
 - active reconciliation warnings;
 - a typed-address confirmation field.
 
-Stalwart `x:Account/set` destroy is immediate and removes the account's stored data. It is labeled irreversible.
+For Stalwart, `x:Account/set` returning the ID in `destroyed` proves synchronous principal removal and scheduling of irreversible cleanup; it does not prove stored-data cleanup is complete. The adapter queries `x:Task` for `DestroyAccount`, then matches returned tasks by account ID/name/domain because Task query cannot filter directly by account:
 
-Dovecot account deletion removes authentication and kicks sessions. Optional mailbox purge is a separate explicit choice performed through supported `doveadm` operations, never direct `vmail/` edits.
+- observed `Pending` or `Retry` keeps cleanup running and exposes due/attempt/failure detail;
+- observed `Failed` produces `reconciliationRequired`;
+- disappearance after the matching task was observed, plus failed Account lookup and authentication, confirms completion;
+- if the task completes before it can be observed, logical account deletion may succeed but physical cleanup is labeled `unverified`, never “confirmed.”
+
+Dovecot account deletion atomically removes the address from the canonical eligibility set, invalidates or rejects its mock OAuth tokens and refresh path, flushes auth state, and kicks sessions. Password login, OAuth login, master targeting, `doveadm` targeting, and LMTP user lookup must all reject the deleted address. Optional mailbox purge is a separate explicit choice performed through supported `doveadm` operations, never direct `vmail/` edits. If data is retained, the UI warns that recreating the same address may reattach the inert mailbox.
 
 Deleting one provider retains the logical account if another instance remains.
 
 ### 10.2 Message Lab
+
+The first-release delivery boundary is the registered local sandbox. Account creation and delivery targets are limited to domains discovered from the supported local provider configuration; the current default is `local.test`. The API and provider adapters accept envelope recipients only for live, non-protected registered provider instances, and the Postfix/Stalwart routing configuration rejects external or protected targets before queueing. Uploaded EML headers may name other addresses for fixture realism, but the preview shows the effective envelope separately and the dashboard does not offer external relay.
 
 Sources:
 
@@ -378,7 +415,11 @@ Two modes are always separate:
 
 Receipts identify the actual path and include available Message-ID, queue ID, mailbox/object ID, state, timing, and linked evidence.
 
-JMAP submission success means accepted for submission, not confirmed remote delivery. Later `deliveryStatus` is shown when available. A successful submission with a failed Sent-folder filing is a partial success, not a failed send.
+Delivery has two separately visible outcomes: provider acceptance and arrival in the selected registered target mailbox. Acceptance fixtures use a unique Message-ID and operation marker. For Dovecot, the adapter follows the Postfix queue ID through LMTP evidence and then fetches the marker from the recipient mailbox. For Stalwart, it tracks per-recipient `deliveryStatus` and independently impersonates the recipient to fetch the marker through JMAP.
+
+For the local baseline, the operation reaches `succeeded` only after the target provider can relist and read the delivered message. An accepted or queued submission without confirmed local arrival remains running while status is available, then becomes failed or `reconciliationRequired` with the acceptance receipt preserved; `unknown` is not treated as arrival.
+
+JMAP submission success means accepted for submission, not confirmed delivery. Later `deliveryStatus` is shown when available. A successful submission with a failed Sent-folder filing is a partial success, not a failed send; a filing success does not prove target arrival.
 
 ### 10.3 Folder lifecycle
 
@@ -462,7 +503,11 @@ Trace links are labeled:
 - **Time-adjacent:** account and bounded time window suggest a relationship but do not prove it.
 - **Unmatched:** displayed only in All Logs.
 
-The UI never promotes time adjacency to an exact link.
+An account-scoped log view includes an event in its primary results only when the parser found that account explicitly or a deterministic identifier chain links the event to an operation owned by that account. Stable identifiers are namespaced by provider and source; a Message-ID by itself is not unique enough to establish Exact confidence. Multi-recipient events may belong to more than one account and retain the relationship role for each.
+
+Time-adjacent events appear, when requested, in a separate Nearby evidence group and never become account membership or Exact/Linked confidence. An unparseable event stays unmatched rather than inheriting the current account from its timestamp.
+
+Correlation contract tests interleave two accounts and cover duplicate and missing Message-IDs, queue/session reuse, multi-recipient delivery, malformed parser input, and redaction failure paths. They assert both the expected inclusion set and the deterministic exclusion set for each selected account.
 
 Stalwart's documented structured Log filter is text-only. Level, event, and time filtering may be applied to fetched normalized pages, but server-side filter claims require a v0.16.14 probe.
 
@@ -543,11 +588,13 @@ The trace is never removed on small screens; it becomes a reachable full-width s
 ### Local HTTP boundary
 
 - Bind to loopback only.
-- Allowlist Host and Origin.
+- Use one startup-selected canonical origin and allowlist its exact Host; reject DNS-rebinding aliases.
+- Require the exact Origin on bootstrap and all mutations, and reject incompatible Fetch Metadata such as cross-site mutation requests.
 - Disable CORS.
-- Use a same-origin, SameSite session and CSRF token for mutations.
+- Use the one-time startup handshake and `HttpOnly`, host-only, `SameSite=Strict` session described in Section 7.
+- Require the session-bound CSRF value in a custom header for every mutation.
 - Set a restrictive Content Security Policy including `frame-ancestors 'none'`.
-- Use secure cookie transport whenever the chosen local Stalwart/TLS setup permits it.
+- The initial loopback-HTTP cookie is intentionally not marked `Secure`; if dashboard HTTPS is added later, it becomes mandatory. Dashboard transport does not inherit security from Stalwart's separate TLS setting.
 
 ### Privilege boundary
 
@@ -587,10 +634,15 @@ Before dashboard provider implementation:
 2. Back up existing Stalwart state before migration; never edit RocksDB directly.
 3. Replace legacy TOML/REST management assumptions with the v0.16 object model.
 4. Retain the internal directory so password changes are real; layer OAuth/OIDC as an authentication flow rather than an external account directory.
-5. Establish protected management and mail-operator identities.
-6. Discover and use the JMAP Session's `apiUrl`, `uploadUrl`, and `downloadUrl`.
-7. Contract-test Account/Domain management, password reset, Mailbox/Email mutations, raw import, Identity selection, import-to-submission chaining, structured Log access, and operator impersonation.
-8. If scoped impersonation or required Community-edition behavior is unavailable, stop for a design decision.
+5. Bind the Stalwart host port to loopback and verify management credential IP restrictions against the source address Stalwart actually observes through Docker.
+6. Establish an immutable protected management Account with an API key, permission `Replace`, only Account get/query/create/update/destroy, Domain get/query/create, Task get/query, and optional Log get/query permissions, and no impersonation or mail permissions. The exact v0.16.14 permission names are captured by the contract probe rather than represented by a wildcard grant.
+7. Establish a separate immutable protected mail operator with a normal Password credential and only `authenticate` plus `impersonate`; app passwords are not accepted as a substitute.
+8. Inject both secrets from environment/Compose secrets or owner-readable gitignored files and prove the stage–probe–switch–revoke rotation sequence.
+9. Discover and use the JMAP Session's `apiUrl`, `uploadUrl`, and `downloadUrl`.
+10. Contract-test Account/Domain management, password reset, Mailbox/Email mutations, raw import, Identity selection, import-to-submission chaining, local-only recipient routing and mailbox arrival, structured Log access, and operator impersonation.
+11. Run a negative authorization matrix: management cannot impersonate or access user mail; the operator cannot invoke Account/Domain/Task/Log management, impersonate either protected identity, or use wrong, old, expired, or non-loopback credentials; an ordinary disposable target succeeds. In particular, `management%operator` must fail at the server, not merely in dashboard code.
+12. Destroy a data-bearing disposable Account and prove `destroyed` means principal removal plus scheduled cleanup; observe matching `DestroyAccount` Pending/Retry/Failed/disappearance semantics and the fast-completion `unverified` path without inventing a succeeded Task state.
+13. If scoped impersonation, role isolation, task observation, or required Community-edition behavior is unavailable, stop for a design decision.
 
 The existing v0.15 store may be migrated through Stalwart's supported process. A destructive fresh reset is a separate, explicit user choice and is not implied by this spec.
 
@@ -598,29 +650,36 @@ The existing v0.15 store may be migrated through Stalwart's supported process. A
 
 Before dashboard provider implementation:
 
-1. Configure a dedicated Dovecot master/operator identity without making it a normal mailbox account.
-2. Restrict master-user authentication to the dashboard's loopback access path and retain ordinary per-account authentication.
-3. Prove that the operator can list, read, append, and mutate mail for disposable users through supported IMAP or `doveadm` paths.
-4. Prove that the operator cannot authenticate through the public user path or expand into arbitrary host commands.
-5. Verify that account password changes and deletion do not require the dashboard to retain the user's prior password.
-6. If the isolation cannot be demonstrated, stop for a credential-strategy decision.
+1. Pin the tested Dovecot image rather than `latest`.
+2. Bind ordinary Dovecot and Postfix host ports to loopback and prove they are unreachable through a non-loopback interface.
+3. Replace tracked, plaintext `config/users` as runtime authority with a gitignored, hashed eligibility/passwd file mounted through its containing directory; retain only non-secret seed input in Git.
+4. Make that eligibility set authoritative for PLAIN/LOGIN, mock OAuth issuance/refresh/introspection, userdb existence, LMTP lookup, allowlisted `doveadm` targets, and master-user targets. Prefix-style test tokens do not bypass eligibility.
+5. Route every account-file writer through one file-global lock and atomic writer, or retire the direct mutation path before Gate 1.
+6. Configure a dedicated hashed master credential that is neither a normal passdb identity nor a mailbox/userdb account and is unavailable through POP3, SMTP SASL, OAuth, or ordinary self-login.
+7. Establish an operator ingress that is demonstrably limited to the host-only dashboard path. Docker's container-observed source address must not be assumed to be `127.0.0.1`; the test uses the actual network path.
+8. Require master authentication to continue into the canonical target-eligibility lookup, so arbitrary, deleted, and protected targets fail.
+9. Prove the operator can list, read, append, and mutate mail for disposable eligible users through supported IMAP paths, and prove Postfix routes only to eligible sandbox recipients and mailbox arrival is observable, while the host-command surface remains the typed `doveadm` allowlist.
+10. Delete a disposable identity and prove password login, OAuth login, refresh/introspection, operator targeting, `doveadm` targeting, and LMTP lookup fail while retained mailbox data stays inert.
+11. Verify password reset and deletion do not require retaining the user's prior password.
+12. If credential or ingress isolation cannot be demonstrated, stop for a design decision; do not silently store user passwords or expose the master credential on an ordinary network path.
 
 ### Gate 1 — Live parity suite
 
-Against a fresh disposable Compose environment, every row must pass for both profiles:
+Against a fresh disposable Compose environment, every row must pass. “Both profiles” means that the same dashboard workflow is exercised once through `dovecot-imap` and once through `stalwart-jmap`; inspecting a disabled control or lower-level adapter test is insufficient.
 
-| Workflow | Dovecot proof | Stalwart proof |
-|---|---|---|
-| Logs | auth and delivery events appear from stdout | JMAP/mail events appear from stdout; `x:Log` enriches when enabled |
-| Account trace | queue/session/account evidence with confidence | account/object/operation evidence with confidence |
-| Create | new IMAP login and capabilities | new JMAP Session, internal password, and capabilities |
-| Append | message readable after `doveadm save` | message readable after blob upload + `Email/import` |
-| Deliver | Postfix accepts and Dovecot stores | `EmailSubmission` accepts and status/filing are truthful |
-| Folders | list/create/delete and safety checks | `Mailbox/get/set`, state, rights, and safety checks |
-| Read | structured and raw fixture coverage | structured body/blob and raw RFC 5322 coverage |
-| Password | new succeeds, old fails, session handling verified | new succeeds, old fails, unrelated credentials preserved |
-| Delete | login fails; optional purge behavior explicit | Account gone; irreversible data deletion explicit |
-| Mutations | read, flag, move, copy, trash, destroy relist correctly | keyword/membership/destroy results relist correctly |
+| Workflow | Proof required on both profiles | Dovecot-specific evidence | Stalwart-specific evidence |
+|---|---|---|---|
+| Registry and profile selection | List logical accounts; create Dovecot-only, Stalwart-only, and dual-provider addresses; switch provider tabs without state leakage; deleting one instance retains the other | passwd-file projection and IMAP readiness match the Dovecot tab | `x:Account` projection and JMAP readiness match the Stalwart tab |
+| Server logs | Query retained history, start live tail, pause/resume, reconnect, and see activity caused by the test | auth, IMAP, LMTP, and delivery events appear from allowlisted stdout | management, JMAP, and submission events appear from stdout; `x:Log` enriches only when enabled |
+| Account-scoped logs | Generate interleaved activity for two accounts; the selected account includes its exact/linked events, excludes the other account's deterministic events, and labels merely time-adjacent evidence | queue/session/account chains retain their confidence | account/object/operation chains retain their confidence |
+| Create account | Select the named profile, create the provider instance, verify login and mandatory capabilities, and show a browser-visible operation receipt | new IMAP login and capabilities succeed | new JMAP Session, internal password, Identity, and capabilities succeed |
+| Message source × path | For authored text, uploaded EML, and a deterministic random scenario, execute both Direct append and Deliver to a newly registered target; preview, receipt, resulting content, and replay seed/source remain truthful | append is readable after `doveadm save`; delivery is accepted by Postfix and arrives through Dovecot | append is readable after upload + `Email/import`; delivery uses `EmailSubmission` and reports both arrival/status and Sent filing truthfully |
+| Folders | List, create, relist, and delete an empty folder; exercise non-empty/child safety and destructive confirmation | IMAP delimiter, special-use, and UID context survive refresh | `Mailbox/get/set`, state, rights, role, and orphan-removal safety survive refresh |
+| List and read | Page and relist messages; read structured plain text, sanitized HTML, attachments, and raw RFC 5322; verify remote content remains blocked | UIDVALIDITY and UID remain attached to results | Email id, blob id, body parts, and current Email state remain distinct |
+| Password reset | Perform an administrator reset, verify the new credential, expire/kick affected sessions, and—when the old credential is test-owned or supplied for this request—verify it fails | supported password hash is replaced and auth caches are handled | unrelated credentials are preserved while the Password credential changes |
+| Delete account | Show counts and irreversible/purge semantics, require typed confirmation, delete one or both provider instances, and prove the deleted identity cannot log in or receive new mail | password, OAuth, operator, `doveadm`, and LMTP paths reject the identity; delivery cannot recreate it; retained/purged data is explicit | `destroyed` principal and failed Account/Session access are verified; observed cleanup-task disappearance confirms purge, while Pending/Retry/Failed/not-observed outcomes remain truthful |
+| Message mutations | Apply and reverse read/unread and flag/unflag; move, copy, move to Trash, remove membership where supported, and permanently delete; relist after each operation and inspect itemized batch failures | UID commands honor UIDVALIDITY; MOVE is real and no broad EXPUNGE fallback occurs | keyword/membership patches honor `ifInState`; permanent destroy and partial `set` results remain explicit |
+| Operation evidence | Every mutation exposes provider/item outcome, safe native receipt, correlated evidence, and reconciliation after injected partial failure | queue, session, UID, and mailbox identifiers are safe and traceable | operation, object, state, and submission identifiers are safe and traceable |
 
 The suite uses newly generated disposable accounts and never deletes pre-existing developer accounts.
 
@@ -629,7 +688,8 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 ### Unit tests
 
 - address, mailbox, and filename validation;
-- user-file parsing and atomic rewrite planning;
+- eligibility-file parsing, hashed-entry validation, and atomic rewrite planning;
+- fixed runtime-path, regular-file, non-symlink, mode, and ownership validation;
 - provider-key serialization;
 - MIME parsing/generation and deterministic seeds;
 - log redaction before and after parsing;
@@ -641,10 +701,10 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 ### Adapter contract tests
 
 - fake-server tests for protocol errors and partial results;
-- live Dovecot IMAP/admin tests;
+- live Dovecot password/OAuth/userdb/LMTP/master eligibility and admin tests;
 - live Postfix SMTP receipt tests;
 - live Stalwart v0.16.14 management/mail/submission tests;
-- Stalwart state mismatch, partial `Foo/set`, Identity, Log, and permission behavior;
+- Stalwart state mismatch, partial `Foo/set`, Identity, Log, DestroyAccount Task, and management/operator permission behavior;
 - Docker log follow/reconnect and service allowlist behavior.
 
 ### Browser tests
@@ -652,6 +712,7 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 Browser automation is authored from Kotlin/JVM and invoked through the Kotlin Toolchain, subject to Gate 0A. It covers:
 
 - account creation and provider switching;
+- one-time session bootstrap, replay rejection, expiry, CSRF, Host/Origin, and Fetch Metadata enforcement;
 - Message Lab append and delivery;
 - folder and message actions;
 - Evidence Split selection and Trace cursor linkage;
@@ -666,6 +727,7 @@ No JavaScript/TypeScript test project is introduced.
 
 - one provider stops during a two-provider operation;
 - server restarts with an operation running;
+- concurrent Dovecot eligibility writers, crash before/after atomic replace, and abandoned temporary cleanup;
 - duplicate idempotency key;
 - IMAP UIDVALIDITY change;
 - JMAP `stateMismatch`;
@@ -673,6 +735,7 @@ No JavaScript/TypeScript test project is introduced.
 - invalid/oversized EML;
 - unavailable Identity or submission capability;
 - stale log cursor and SSE resync;
+- Stalwart deletion task retry/failure and completion-before-observation;
 - redaction parser receives malformed native output.
 
 ## 16. Implementation Sequence Constraints
@@ -702,8 +765,10 @@ These are implementation gates, not unresolved product choices:
 
 - Kotlin Toolchain Wasm asset/bootstrap and browser-test ergonomics.
 - Stalwart documentation inconsistency between generated `/api` examples and the v0.16 `/jmap`/Session model.
-- Scoped Stalwart operator impersonation.
-- Localhost-restricted Dovecot master-user isolation.
+- Server-enforced Stalwart impersonation target scoping, especially the protected management target.
+- Stalwart DestroyAccount task observation when cleanup completes before the first query.
+- Dovecot eligibility migration and operator-ingress isolation across the actual Docker Desktop network path.
+- Provider-side local-only routing and mailbox-arrival correlation.
 - Exact import-to-submission creation-ID chaining on v0.16.14.
 - Actual server-side filters supported by `x:Log/query`.
 - Exact open-source condensed workhorse and monospace families.
@@ -720,6 +785,11 @@ These are implementation gates, not unresolved product choices:
 - [Stalwart management overview](https://stalw.art/docs/management/)
 - [Stalwart Account object](https://stalw.art/docs/ref/object/account/)
 - [Stalwart AccountPassword object](https://stalw.art/docs/ref/object/account-password/)
+- [Stalwart Task object](https://stalw.art/docs/ref/object/task/)
 - [Stalwart Log object](https://stalw.art/docs/ref/object/log/)
+- [Stalwart API-key authentication](https://stalw.art/docs/auth/authentication/api-key/)
+- [Stalwart permissions](https://stalw.art/docs/auth/authorization/permissions/)
+- [Dovecot password databases](https://doc.dovecot.org/2.4.1/core/config/auth/passdb.html)
+- [Dovecot master users](https://doc.dovecot.org/2.4.1/core/config/auth/master_users.html)
 - [JMAP core, RFC 8620](https://www.rfc-editor.org/rfc/rfc8620.html)
 - [JMAP mail and submission, RFC 8621](https://www.rfc-editor.org/rfc/rfc8621.html)
