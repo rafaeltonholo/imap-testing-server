@@ -220,7 +220,7 @@ The browser never receives mail-server administration credentials, operator cred
 ### Provider administration
 
 - Dovecot administration uses the gitignored runtime eligibility file and allowlisted `doveadm`.
-- Stalwart administration uses a protected, server-side v0.16 management Account with an API-key credential in permission `Replace` mode. Its allowlist is limited to the Account, Domain, and Task get/query/set methods required by this specification and optional Log get/query. It has neither `impersonate` nor mail read/mutation/submission permissions.
+- Stalwart administration uses a protected, server-side v0.16 management Account with an API-key credential in permission `Replace` mode. Its allowlist is limited to Account get/query/create/update/destroy, Domain get/query/create, Task get/query, and optional Log get/query. It has neither `impersonate` nor mail read/mutation/submission permissions.
 
 ### Mail access
 
