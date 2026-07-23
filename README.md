@@ -9,7 +9,7 @@ clients, automation, and development workflows.
 
 ## Features
 
-- **Dovecot IMAP server** (with STARTTLS and IMAPS)
+- **Dovecot IMAP server** (with STARTTLS and IMAPS) and **POP3** (with STARTTLS and POP3S)
 - **Stalwart JMAP server** with built-in OAuth2 and web admin
 - **Postfix SMTP server** with SASL authentication via Dovecot
 - **OAuth2 mock server** with full authorization code flow, token refresh, and error simulation
@@ -63,6 +63,8 @@ This starts four services:
 | --------------- | ----------- | ------ | ------------------------------------------------- |
 | IMAP (STARTTLS) | `localhost` | `143`  | Use STARTTLS for encryption                       |
 | IMAPS (TLS)     | `localhost` | `993`  | Direct TLS connection                             |
+| POP3 (STARTTLS) | `localhost` | `110`  | Use STARTTLS for encryption                       |
+| POP3S (TLS)     | `localhost` | `995`  | Direct TLS connection                             |
 | SMTP            | `localhost` | `1025` | No auth required from local networks              |
 | SMTPS           | `localhost` | `465`  | Direct TLS connection                             |
 | SMTP Submission | `localhost` | `587`  | STARTTLS + SASL for local-domain sending          |

@@ -102,6 +102,8 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
 - **dovecot** (`dovecot/dovecot:latest`, container: `dovecot-dev`) — IMAP server
   - IMAP STARTTLS: `localhost:143`
   - IMAPS: `localhost:993`
+  - POP3 STARTTLS: `localhost:110`
+  - POP3S: `localhost:995`
   - Mail stored in `./vmail/` (mounted at `/srv/vmail`)
   - Config from `./config/` (mounted read-only at `/etc/dovecot/conf.d`)
   - Healthcheck via `doveadm who` (ready after ~15s start period)
@@ -159,6 +161,7 @@ The default injection delay (2.5s) between successive injections prevents Doveco
 - `10-ssl.conf` — TLS using certs from `./ssl/`
 - `10-logging.conf` — verbose logging to stdout (visible via `docker compose logs`)
 - `15-namespace.conf` — IMAP namespace with `INBOX.` prefix and `.` separator
+- `20-pop3.conf` — enables POP3 protocol; stable UIDL format; POP3 reads update `\Seen` flag (cross-protocol state testing)
 
 ### SSL Certificates
 

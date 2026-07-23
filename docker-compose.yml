@@ -6,6 +6,8 @@ services:
     ports:
       - "143:31143"   # map container's IMAP (STARTTLS) to localhost:143
       - "993:31993"   # map container's IMAPS (TLS)   to localhost:993
+      - "110:31110"   # map container's POP3 (STARTTLS) to localhost:110
+      - "995:31990"   # map container's POP3S (TLS)   to localhost:995 (image quirk: pop3s listens on 31990)
     volumes:
       - ./config:/etc/dovecot/conf.d:ro
       - ./ssl:/etc/dovecot/ssl:ro

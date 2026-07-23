@@ -20,12 +20,12 @@ Enables POP3 and configures its behavior:
 ```
 protocols = imap pop3 lmtp
 
-pop3_uidl_format = %08Xu%08Xv
+pop3_uidl_format = %{uid | hex(8)}%{uidvalidity | hex(8)}
 pop3_no_flag_updates = no
 ```
 
 - `protocols` adds `pop3` alongside the already-active `imap` and `lmtp`.
-- `pop3_uidl_format = %08Xu%08Xv` — stable UIDL format derived from message UID/validity; ensures clients using "leave mail on server" see consistent IDs across sessions.
+- `pop3_uidl_format = %{uid | hex(8)}%{uidvalidity | hex(8)}` — stable UIDL format derived from message UID/validity; ensures clients using "leave mail on server" see consistent IDs across sessions. (Dovecot 2.4 syntax; the older `%08Xu%08Xv` form fails to parse on the `dovecot:latest` 2.4.x image.)
 - `pop3_no_flag_updates = no` — reading via POP3 marks messages `\Seen` in IMAP too, enabling cross-protocol state testing.
 
 ### 2. `docker-compose.yml` — Dovecot port mappings
@@ -34,10 +34,10 @@ Two new entries under the `dovecot` service `ports`:
 
 ```yaml
 - "110:31110"   # POP3 STARTTLS
-- "995:31995"   # POP3S (implicit TLS)
+- "995:31990"   # POP3S (implicit TLS)
 ```
 
-Follows the existing `+30000` offset pattern used by the Dovecot image (`31143`/`31993` for IMAP).
+Follows the existing `+30000` offset pattern used by the Dovecot image (`31143`/`31993` for IMAP, `31110` for POP3). Note: the image's built-in `pop3s` listener uses port `31990` (not `31995`), so POP3S must map to `31990`.
 
 ### 3. Documentation
 
