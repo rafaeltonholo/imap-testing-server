@@ -211,6 +211,8 @@ The first release serves the dashboard over loopback HTTP. On each Ktor start, t
 - a host-only, `HttpOnly`, `SameSite=Strict` session cookie scoped to `/`;
 - a session-bound CSRF value returned in the response body and held only in memory.
 
+After a full-page reload, the fragment is intentionally gone but the process-local session cookie may still be valid. In that case the SPA POSTs to a dedicated session-maintenance endpoint to reacquire the current session-bound CSRF value. The value is derived from the opaque session through a process-local secret, so the server need not persist or expose plaintext CSRF material and concurrent tabs receive the same current value. The endpoint requires the valid cookie plus the same exact Host, Origin, and Fetch Metadata checks as bootstrap, accepts no query credentials, performs no provider mutation, and returns a no-store response. It is the only authenticated POST that does not require the CSRF header. Failure requires a new locally printed bootstrap URL.
+
 The session rotates at bootstrap, ends with the server process, and has an eight-hour absolute maximum. Expiry requires a new locally printed bootstrap URL. No API, SSE stream, or mutation accepts a session or bearer value in its query string.
 
 The session protects the privileged loopback API from unrelated browser origins, DNS rebinding, and LAN callers. A process already running as the same operating-system user is outside this boundary because it can read the repository configuration and control the same Docker sandbox.
@@ -589,10 +591,10 @@ The trace is never removed on small screens; it becomes a reachable full-width s
 
 - Bind to loopback only.
 - Use one startup-selected canonical origin and allowlist its exact Host; reject DNS-rebinding aliases.
-- Require the exact Origin on bootstrap and all mutations, and reject incompatible Fetch Metadata such as cross-site mutation requests.
+- Require the exact Origin on bootstrap, CSRF reacquisition, and all mutations, and reject incompatible Fetch Metadata such as cross-site requests.
 - Disable CORS.
 - Use the one-time startup handshake and `HttpOnly`, host-only, `SameSite=Strict` session described in Section 7.
-- Require the session-bound CSRF value in a custom header for every mutation.
+- Require the session-bound CSRF value in a custom header for every provider/application mutation; the no-store session-maintenance reacquisition POST is the sole exception and cannot reach providers or the operation ledger.
 - Set a restrictive Content Security Policy including `frame-ancestors 'none'`.
 - The initial loopback-HTTP cookie is intentionally not marked `Secure`; if dashboard HTTPS is added later, it becomes mandatory. Dashboard transport does not inherit security from Stalwart's separate TLS setting.
 
@@ -712,7 +714,7 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 Browser automation is authored from Kotlin/JVM and invoked through the Kotlin Toolchain, subject to Gate 0A. It covers:
 
 - account creation and provider switching;
-- one-time session bootstrap, replay rejection, expiry, CSRF, Host/Origin, and Fetch Metadata enforcement;
+- one-time session bootstrap, reload-time CSRF reacquisition, replay rejection, expiry, CSRF, Host/Origin, and Fetch Metadata enforcement;
 - Message Lab append and delivery;
 - folder and message actions;
 - Evidence Split selection and Trace cursor linkage;
