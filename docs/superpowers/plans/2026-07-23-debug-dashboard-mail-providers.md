@@ -4,7 +4,7 @@
 
 **Goal:** Implement folder lifecycle, message list/read/raw, and all required message mutations through real IMAP and JMAP paths with provider-native identity and concurrency semantics.
 
-**Architecture:** Expose one application-facing mail port with sealed provider-specific keys, but keep two direct adapters. Dovecot uses the Gate 0C isolated master/operator IMAP ingress and UID/UIDVALIDITY commands. Stalwart uses user-context JMAP discovered from Session. Batch results are itemized and state conflicts remain explicit.
+**Architecture:** Expose one application-facing mail port with sealed provider-specific keys, but keep two direct adapters. Dovecot uses the Gate 0C isolated master/operator IMAP ingress and UID/UIDVALIDITY commands. Stalwart discovers JMAP Session while directly authenticated with a leased Account-bound AppPassword from the Gate 0B encrypted store; an unready Account fails before any JMAP call. Batch results are itemized and state conflicts remain explicit.
 
 **Tech Stack:** Kotlin/JVM, Jakarta Mail API 2.1.5, Angus Mail 2.0.5, Ktor client, kotlinx.serialization, IMAP UIDPLUS/MOVE where advertised, Stalwart v0.16.14 JMAP Mail.
 
@@ -12,7 +12,7 @@
 
 ## Execution prerequisite
 
-Do not execute this plan until Gate 0B passes under a user-approved Stalwart mail-credential strategy and this document has been revised and independently reviewed. Replace every Stalwart user-context setup, teardown, retry, rotation, and protected-account test with that approved mechanism; the rejected global impersonation operator is not an available implementation shortcut.
+Gate 0B's direct AppPassword/store/lifecycle proof and the account-provider mail-access routes must pass. Stalwart adapters consume only the approved credential-lease port; they never accept a normal password, management key, raw snapshot path, operator identity, or impersonation target.
 
 ## Task 1: Define the mail application port and mutation semantics
 
@@ -32,6 +32,7 @@ Do not execute this plan until Gate 0B passes under a user-approved Stalwart mai
   - message pages to retain IMAP UIDVALIDITY+UID or JMAP Email id+state;
   - stale provider keys to fail with a typed concurrency problem;
   - batch mutations to report each requested key independently;
+  - `enrollmentRequired`, `rotating`, `recoveryRequired`, `removalPending`, and global `storeUnavailable` to return their typed problem before the provider port is invoked;
   - read/unread and flag/unflag to be reversible;
   - move, copy, Trash, membership removal where supported, and permanent delete to stay distinct.
 
@@ -103,13 +104,22 @@ Expected: pass.
 **Files:**
 
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/JmapMethodCall.kt`
-- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartUserContext.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartLeasedSession.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartMailSessionFactory.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartMailboxMapper.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartMessageMapper.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartMailAdapter.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/provider/stalwart/StalwartMailAdapterTest.kt`
 
-- [ ] Write fake-JMAP tests for the revised Gate 0B credential mechanism entering only the requested non-protected user context, Session capability/account selection, credential-revocation behavior, and denial before any method call for protected provider IDs. Do not use global operator impersonation.
+- [ ] Write fake-JMAP tests in which `StalwartMailSessionFactory` acquires a Gate 0B credential lease by immutable Account ID, authenticates directly as that Account, discovers Session URLs/capabilities, verifies the Session's primary account matches, and closes/wipes the lease on success, protocol failure, timeout, and coroutine cancellation.
+
+- [ ] Hold the same `StalwartLeasedSession` through Session discovery and every `apiUrl`, `uploadUrl`, and `downloadUrl` request in one application operation. It cannot expose the AppPassword to callers; it only authorizes bounded requests and closes the underlying lease.
+
+- [ ] Prove `enrollmentRequired`, `rotating`, `recoveryRequired`, `removalPending`, `storeUnavailable`, protected provider IDs, missing Account IDs, and address/ID mismatch are rejected before Session discovery or any JMAP method. Prove there is no normal-password, management-key, `target%operator`, cross-account, or fallback-auth path.
+
+- [ ] When the provider rejects the stored active credential during Session authentication, notify the lifecycle projector, return typed `recoveryRequired`, and never retry with another credential. After that state is recorded, subsequent mail calls make zero JMAP requests until Repair succeeds.
+
+- [ ] Add concurrency tests using the real `StalwartCredentialLeaseRegistry`: ordinary calls hold a generation lease for their bounded operation; explicit credential mutation blocks new sessions and waits for all current adapters to close; a 30-second drain timeout leaves the active generation/provider untouched. After successful rotation every new session uses the successor and the old credential fails.
 
 - [ ] Cover `Mailbox/get|set`, `Email/query|get|set`, and blob/raw download:
 
@@ -121,6 +131,8 @@ Expected: pass.
   - map `notUpdated`, `notDestroyed`, and `stateMismatch` per item.
 
 - [ ] Implement read/unread via `$seen`, flag/unflag via `$flagged`, copy/move through mailbox membership patches, Trash through the role-resolved mailbox, supported membership removal, and confirmation-grant-only permanent destroy. Never flatten JMAP partial `set` results into one boolean.
+
+- [ ] Ensure no request, exception, fake transport capture, log, metric, operation receipt, or test diagnostic serializes the Basic header or `app_` value. The adapter receives secret bytes only through the lease and clears transport copies after request construction.
 
 - [ ] Run:
 
@@ -204,7 +216,7 @@ Expected: pass.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/live/MailParityLiveTest.kt`
 - Create: `docs/debug-dashboard/evidence/mail-parity.md`
 
-- [ ] For a fresh dual-provider disposable account seeded through supported paths:
+- [ ] For a fresh dual-provider disposable account whose Stalwart instance is `ready` and seeded through supported paths:
 
   1. list, create, and relist an empty folder; preview deletion, prove no deletion before confirmation, induce stale state and prove rejection, then obtain a fresh grant, confirm once, prove replay rejection, and relist;
   2. prove non-empty/child/orphan-choice deletion safety and that every scope change requires a fresh grant;
@@ -214,6 +226,7 @@ Expected: pass.
   6. relist after every mutation and assert provider-native keys/states;
   7. preview permanent deletion, prove no deletion before confirmation, induce a stale preview and prove rejection, then obtain a fresh preview, confirm once, prove replay rejection, and relist;
   8. induce one stale UIDVALIDITY/JMAP state and one partial batch failure.
+  9. remove Stalwart dashboard access and prove list/read/mutation return `enrollmentRequired` with zero JMAP calls; re-enroll request-scoped, then prove the same workflow succeeds again.
 
 - [ ] Run:
 

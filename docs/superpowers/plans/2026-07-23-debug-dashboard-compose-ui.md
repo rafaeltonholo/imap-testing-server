@@ -12,7 +12,7 @@
 
 ## Execution prerequisite
 
-Do not execute this plan until the revised Gate 0B and every affected provider/Message Lab plan pass independent review. If the approved credential strategy changes readiness, setup, recovery, rotation, or deletion UX, revise those surfaces and their browser tests here before implementation; credentials must remain server-side.
+Gate 0B and the account/mail/Message Lab plans must pass with the direct AppPassword lifecycle. The browser receives only safe mail-access states/actions and operation receipts; normal passwords may appear only in the active create/enroll/repair/rotate/reset form and are cleared after submission, while AppPassword values never enter browser memory.
 
 ## Task 1: Replace the gate shell with production session/API/event clients
 
@@ -98,10 +98,13 @@ git commit -m "feat: establish Mail Flight Recorder shell"
 - Create: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/accounts/CreateAccountSheet.kt`
 - Create: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/accounts/ResetPasswordDialog.kt`
 - Create: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/accounts/DeleteAccountDialog.kt`
+- Create: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/accounts/StalwartMailAccessPanel.kt`
 - Create: `debug-dashboard/dashboard-web/test/mail/sandbox/dashboard/web/accounts/AccountFormReducerTest.kt`
+- Create: `debug-dashboard/dashboard-web/test/mail/sandbox/dashboard/web/accounts/StalwartMailAccessReducerTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/browser/AccountWorkflowBrowserTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/browser/StalwartMailAccessWorkflowBrowserTest.kt`
 
-- [ ] Write reducer tests for account search/profile/status filters, protected rows, address/password validation, named capability profile selection, all-provider preflight, partial results, and cleared secret fields after completion/error.
+- [ ] Write reducer tests for account search/profile/status filters, protected rows, address/password validation, named capability profile selection, all-provider preflight, partial results, and cleared secret fields after completion/error. Include `enrollmentRequired`, `ready`, `rotating`, `recoveryRequired`, `removalPending`, and global `storeUnavailable`; protected identities expose no lifecycle actions.
 
 - [ ] Implement the progressive creation sheet:
 
@@ -114,9 +117,24 @@ Unsupported combinations are absent, not disabled theater.
 
 - [ ] Implement password reset for one/both profiles with separate result rows and no claim about unrelated OAuth token revocation.
 
-- [ ] Implement account-delete preview with counts, provider selection, Dovecot retain/purge meaning, Stalwart irreversible cleanup truth, reconciliation warnings, grant expiry, and exact typed-address confirmation. The confirm request carries only the server-issued opaque grant, exact typed address, and unchanged selection; dismissal makes no mutation. Missing/expired/stale/reused responses state that nothing was deleted and force a fresh preview.
+- [ ] For Stalwart password reset, state that dashboard mail access is preserved and re-probed. Offer a separate unchecked **Rotate dashboard access too** choice that reuses the new password only in the same request; never imply rotation is automatic.
+
+- [ ] Implement the mail-access panel:
+
+  - `enrollmentRequired`: **Enable dashboard mail access**, requesting the current normal password once;
+  - `ready`: generation/status plus explicit **Rotate** and **Remove dashboard access**;
+  - `rotating`: disabled mail actions and visible reconciliation progress;
+  - `recoveryRequired`: **Repair**, requesting the current normal password once;
+  - `removalPending`: mail disabled with retry/reconciliation detail and no password field;
+  - global `storeUnavailable`: Stalwart mail actions disabled and a link to Server Setup reset; account administration, deletion, logs, and evidence remain available.
+
+Password fields clear after submit, cancellation, error, navigation, and operation completion. The UI never requests a password for Remove or global reset and never displays an AppPassword.
+
+- [ ] Implement account-delete preview with counts when mail access is `ready` and explicit **unknown — dashboard mail access unavailable** otherwise, provider selection, Dovecot retain/purge meaning, Stalwart irreversible cleanup truth, reconciliation warnings, grant expiry, and exact typed-address confirmation. Never force Stalwart enrollment to delete. The confirm request carries only the server-issued opaque grant, exact typed address, and unchanged selection; dismissal makes no mutation. Missing/expired/stale/reused responses state that nothing was deleted and force a fresh preview.
 
 - [ ] Drive the live API in `AccountWorkflowBrowserTest`: create a dual-provider disposable account, switch provider state, reset, preview deletion, prove dismiss/unconfirmed makes no confirm request, reject stale and altered-selection grants, delete one instance with a fresh grant, reject replay, and inspect partial/provider receipts. Run after a linked web build.
+
+- [ ] Drive `StalwartMailAccessWorkflowBrowserTest` through existing-account enrollment, ready mail access, explicit rotation, remove without password, re-enrollment, orphan/revoked repair, every restart-reconciliation state, protected denial, and unenrolled deletion with unknown counts. Assert zero password/AppPassword value in URL, DOM after submit, browser storage, console, network response, or operation detail.
 
 ## Task 4: Build the defining Evidence Split workspace
 
@@ -136,6 +154,8 @@ Unsupported combinations are absent, not disabled theater.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/browser/EvidenceSplitBrowserTest.kt`
 
 - [ ] Write reducer tests proving Dovecot and Stalwart selections, pages, cursors, and readiness do not leak across provider tabs; switching back restores each provider's independent state.
+
+- [ ] When the selected Stalwart instance is not `ready`, preserve Account header, administration, provider receipt, logs, and evidence while replacing folder/message/mail-mutation controls with state-specific recovery: Enable for `enrollmentRequired`, Repair for `recoveryRequired`, progress/wait for `rotating`, cleanup/reconciliation detail for `removalPending`, and Server Setup reset for `storeUnavailable`. Browser tests prove no disabled mail control can issue a request.
 
 - [ ] Implement the wide 62/38 composition: folders/messages on the left; message/receipt/evidence on the right; contextual trace across the lower edge. Only one provider mailbox is active, with channel plates implemented as accessible tabs.
 
@@ -160,15 +180,15 @@ Unsupported combinations are absent, not disabled theater.
 - Create: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/setup/ServerSetupScreen.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/browser/SecondaryDestinationsBrowserTest.kt`
 
-- [ ] Fixture Lab: source tabs for authored text/upload/fixture/random/thread; visible envelope separate from headers; seed and replay controls; raw preview; target profiles/accounts; explicit Direct append and Deliver actions; provider/item receipts.
+- [ ] Fixture Lab: source tabs for authored text/upload/fixture/random/thread; visible envelope separate from headers; seed and replay controls; raw preview; target profiles/accounts; explicit Direct append and Deliver actions; provider/item receipts. Before Stalwart delivery, show sender/recipient readiness and disable submission when any selected Account is not `ready`. Route each blocker correctly: Enable for `enrollmentRequired`, Repair for `recoveryRequired`, wait/progress for `rotating`, reconciliation detail for `removalPending`, and Server Setup for `storeUnavailable`. Surface all-accepted/all-arrived, conclusive rejection, partial/ambiguous acceptance, accepted-but-unverified, and delivery-success/Sent-filing-failure truth without collapsing receipts.
 
 - [ ] All Logs: bounded history/live state, source/level/confidence/time filters, selected account, pause/resume, reconnect/resync, raw-safe detail, and export. Label time adjacency as low confidence.
 
 - [ ] Operations: state/progress, provider/item result table, cancellation boundary, scoped retry, source/secret re-supply prompts, reconciliation links, cleanup truth, retention, and Clear Local History.
 
-- [ ] Overview: readiness gates, provider/service health, recent operations, and outstanding reconciliation. Server Setup: discovered versions/endpoints/capabilities/permission probe results only; do not expose secrets or unimplemented protocol toggles.
+- [ ] Overview: readiness gates, provider/service health, recent operations, and outstanding reconciliation. Server Setup: discovered versions/endpoints/capabilities/permission probe results plus aggregate Stalwart credential-store health. In `storeUnavailable`, provide an explicit **Reset dashboard credential store** action explaining that every dashboard-owned remote credential will be revoked and every ordinary Stalwart Account will require re-enrollment; Dovecot and protected identities are unaffected. Show progress/failure and never expose paths, key/ciphertext, credentials, or unimplemented protocol toggles.
 
-- [ ] Browser-test one representative complete flow in each destination plus deep-link/reload/Back behavior. Every reload case must reacquire CSRF before its next mutation rather than relying on stale in-memory state.
+- [ ] Browser-test one representative complete flow in each destination plus deep-link/reload/Back behavior. For Fixture Lab, assert distinct rendering and itemized receipts for all-accepted/all-arrived → `succeeded`, every-recipient conclusive rejection → `failed`, partial or ambiguous acceptance → `reconciliationRequired`, accepted-but-unverified → `reconciliationRequired`, and confirmed delivery with failed Sent filing → `reconciliationRequired` while preserving the successful delivery sub-result. Include successful global store reset, remote-cleanup failure leaving `storeUnavailable`, and Clear Local History leaving store readiness unchanged. Every reload case must reacquire CSRF before its next mutation rather than relying on stale in-memory state.
 
 ## Task 6: Implement structural responsive behavior
 

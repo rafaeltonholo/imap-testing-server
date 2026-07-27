@@ -4,7 +4,7 @@
 
 **Goal:** Deliver the local-only Kotlin debug dashboard described in `docs/superpowers/specs/2026-07-23-debug-dashboard-design.md`, with every requested workflow proven through both `dovecot-imap` and `stalwart-jmap`.
 
-**Architecture:** Execute three stop/go feasibility gates before feature work. Then build shared KMP contracts, a loopback Ktor/JVM control plane, direct Dovecot/IMAP/Postfix and Stalwart/JMAP adapters, an evidence pipeline, and a Compose/Wasm Evidence Split SPA. Treat provider work as typed, idempotent operations backed by SQLite; preserve provider-native concurrency keys and honest partial outcomes.
+**Architecture:** Execute three stop/go feasibility gates before feature work. Then build shared KMP contracts, a loopback Ktor/JVM control plane, direct Dovecot/IMAP/Postfix and Stalwart/JMAP adapters, an evidence pipeline, and a Compose/Wasm Evidence Split SPA. Stalwart mail calls authenticate with the Account's active dashboard AppPassword leased from an owner-only encrypted snapshot; rotation may temporarily retain one staged/retiring generation. Normal passwords exist only inside explicit create, enrollment, repair, reset, or rotation requests. Treat provider work as typed, idempotent operations backed by SQLite while keeping the credential snapshot outside SQLite.
 
 **Tech Stack:** Kotlin Toolchain 0.11.1 wrapper and YAML model, Kotlin 2.3.x, Compose Multiplatform/Wasm, Ktor/JVM, kotlinx.serialization, SQLite JDBC, Jakarta Mail/Angus, jsoup, Selenium/JVM, Docker Compose, Dovecot/Postfix/OAuth mock, Stalwart v0.16.14.
 
@@ -21,13 +21,16 @@
 
 Do not weaken an acceptance rule in this plan to get a green build. A failed Gate 0A, 0B, or 0C is a deliberate stop condition requiring a new user-approved design decision.
 
-## Planning-time blocker
+## Approved Stalwart credential decision
 
-Tagged Stalwart v0.16.14 source inspection shows `impersonate` is global: an operator permitted to impersonate an ordinary Account can also authenticate as the protected management Account. That contradicts the approved server-side negative requirement. The first Gate 0B task is therefore a disposable, no-migration reproduction and is expected to record `STOP`.
+The planning-time impersonation blocker is resolved by the approved design. No Stalwart Account, role, API key, fixture, or dashboard path receives `impersonate`.
 
-No Stalwart migration, Gate 0C work, foundation work, or feature implementation is authorized past that stop until the user approves a revised mail-access credential strategy. The recommended strategy to evaluate is a dedicated revocable per-user dashboard AppPassword held in an owner-only secret store, with global impersonation removed; this deliberately changes the approved no-per-account-secret architecture.
-
-After that decision, revise the design plus the Gate 0B, account-provider, mail-provider, Message Lab/observability, Compose UI (when setup/recovery UX changes), and acceptance plans for provisioning, secret lifecycle, user-mail authentication, rotation, account deletion, recovery, and live negative tests. Run a new independent plan review over the complete affected set before continuing. Approval of Gate 0B alone cannot make unchanged downstream impersonation assumptions executable.
+- The protected management Account uses one Replace-scoped API key with `authenticate` plus only the required Account/Domain/Task and optional Log management methods. It cannot read, mutate, or submit mail and cannot create/use another Account's AppPassword.
+- Each ordinary Account may have one active dashboard-owned, mail-only AppPassword whose description starts with `mail-sandbox/debug-dashboard/`, plus at most one staged/retiring generation during rotation. Recovery may discover additional reserved-prefix orphans, which must be cleaned before another create. A new credential is created only while directly authenticated with that Account's request-scoped normal password.
+- Read-once AppPassword values live in the fixed owner-only JDK AES-256-GCM snapshot from the approved design. They never enter SQLite, browser data, logs, receipts, exports, or default Stalwart backups.
+- Existing/migrated Accounts begin `enrollmentRequired`. Enrollment, repair, and explicit rotation ask for the normal password for that request only; explicit removal and Account deletion do not.
+- Management revocation uses a freshly fetched Account credential list under the trusted no-concurrent-external-writer contract. v0.16.14 supplies no `ifInState` guard for that patch, so the adapter preserves unrelated credentials and re-fetches/verifies after one update.
+- Gate 0B must prove the complete enrollment/ready/rotation/recovery/removal/global-store-reset lifecycle, reserved-prefix orphan cleanup, lease draining, restart reconciliation, negative permission matrix, and quota behavior before migration or downstream work.
 
 ## Working location and command conventions
 
@@ -43,7 +46,7 @@ After that decision, revise the design plus the Gate 0B, account-provider, mail-
 | Order | Plan | Required outcome |
 |---|---|---|
 | 0A | `2026-07-23-debug-dashboard-gate-0a-kotlin-toolchain.md` | Toolchain-only Compose/Wasm + Ktor + browser proof |
-| 0B | `2026-07-23-debug-dashboard-gate-0b-stalwart.md` | Stalwart v0.16.14 management, mail, submission, isolation, and deletion proof |
+| 0B | `2026-07-23-debug-dashboard-gate-0b-stalwart.md` | Stalwart v0.16.14 management plus Account-bound AppPassword/store/lifecycle, mail, submission, isolation, and deletion proof |
 | 0C | `2026-07-23-debug-dashboard-gate-0c-dovecot.md` | Hashed eligibility authority, isolated operator path, local routing, and deletion proof |
 | 1 | `2026-07-23-debug-dashboard-foundation.md` | Shared contracts, HTTP security boundary, operation ledger, API/event shell |
 | 2 | `2026-07-23-debug-dashboard-account-providers.md` | Live registry and account create/password/delete on both profiles |
@@ -52,7 +55,7 @@ After that decision, revise the design plus the Gate 0B, account-provider, mail-
 | 5 | `2026-07-23-debug-dashboard-compose-ui.md` | All destinations and the responsive, accessible Evidence Split SPA |
 | 6 | `2026-07-23-debug-dashboard-acceptance.md` | Full Gate 1 matrix, fault/security/accessibility proof, and operator docs |
 
-Each plan ends with a focused commit. Do not begin the next numbered plan until the previous plan's verification commands pass and its gate report contains concrete evidence.
+Each plan ends with a focused commit. For Gates 0A–0C, do not begin downstream work until the gate's verification commands pass and its report contains concrete evidence. For Plans 1–6, do not begin the next numbered plan until the previous plan's verification commands pass.
 
 ## Cross-plan engineering rules
 
@@ -101,6 +104,9 @@ If a gate requires a dependency change, update the recorded baseline and explain
 
 - Browser input never becomes a command name, service name, command flag, working directory, or arbitrary path.
 - Provider secrets and request passwords never enter JSON responses, SQLite, logs, events, operation receipts, exports, or browser persistence.
+- Outside Stalwart's own credential storage, dashboard AppPassword plaintext exists only during creation/capture or a transient leased operation; dashboard persistence is limited to the fixed encrypted snapshot. The snapshot key, ciphertext, temporary files, and secret-bearing lifecycle records never enter SQLite, diagnostic exports, default Stalwart backups, or Clear Local History. Safe Account IDs, provider credential IDs, generations, and lifecycle outcomes may enter the operation ledger.
+- Stalwart mail calls require a `ready` Account-bound credential lease. They never fall back to a normal password, management key, global operator, or cross-account credential.
+- Stalwart credential mutation takes the Account's exclusive lease lock, drains for at most 30 seconds, and leaves provider/local state unchanged on timeout. External credential-list edits are excluded only by the documented trusted-test-sandbox contract, not by a nonexistent provider state guard.
 - Redaction happens before parsing or persistence.
 - All mutable Dovecot eligibility writes share one file-global lock and atomic writer.
 - Every provider/application mutation requires an idempotency key, exact-origin session, and CSRF header; the no-store CSRF reacquisition POST is session maintenance only and performs no provider/ledger mutation.
@@ -111,11 +117,12 @@ If a gate requires a dependency change, update the recorded baseline and explain
 ## Completion checklist
 
 - [ ] Gate reports `0a`, `0b`, and `0c` are committed with passing, reproducible evidence.
+- [ ] Gate 0B proves no `impersonate` grant exists, management/mail permissions are disjoint, AppPassword secrets survive an approved restart only through the encrypted snapshot, and every enrollment/rotation/recovery/removal/store-reset fault case has a deterministic result.
 - [ ] `cd debug-dashboard && ./kotlin show modules && ./kotlin build && ./kotlin test` succeeds.
 - [ ] `docker compose config --quiet` succeeds and all dashboard-relevant published ports are loopback-only.
 - [ ] The live Gate 1 suite passes every row once through each provider profile.
 - [ ] Browser security, redaction, fault, keyboard, reduced-motion, and responsive tests pass.
-- [ ] `rg -n '(password|secret|token|authorization|cookie)' debug-dashboard/.runtime` is reviewed as a secret-boundary check without printing secret values.
+- [ ] Runtime hygiene uses filename/type/mode/symlink checks plus the purpose-built secret-exclusion test; no recursive grep or diagnostic command prints runtime file contents or secret matches.
 - [ ] `git ls-files debug-dashboard | rg '(^|/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(js|mjs|ts|tsx)$'` prints nothing; ignored Toolchain linker `.mjs` output is allowed.
 - [ ] README/operator docs identify the local-only threat boundary, backup/restore path, retention, and all irreversible operations.
 - [ ] `.ai/self-review.md` is executed against the final diff before completion is claimed.

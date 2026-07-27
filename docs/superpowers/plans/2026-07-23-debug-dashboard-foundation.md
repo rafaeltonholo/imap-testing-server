@@ -4,7 +4,7 @@
 
 **Goal:** Establish the stable shared contract, loopback HTTP security boundary, idempotent operation engine, SQLite ledger, safe process boundary, and reconnectable event shell used by every dashboard feature.
 
-**Architecture:** Keep serializable provider truth in the KMP contract module. The JVM server owns exact-origin authentication, validation, orchestration, locks, persistence, subprocess allowlists, and redaction. Mutations become durable operation resources before provider calls; reads remain synchronous.
+**Architecture:** Keep serializable provider truth—including only safe Stalwart mail-access state—in the KMP contract module. The JVM server owns exact-origin authentication, validation, orchestration, locks, persistence, subprocess allowlists, redaction, and the Gate-0B-proven encrypted AppPassword store. Mutations become durable operation resources before provider calls; reads remain synchronous, while credential bytes remain outside contracts and SQLite.
 
 **Tech Stack:** Kotlin Toolchain, Kotlin/JVM + Wasm shared contracts, Ktor server/client, kotlinx.serialization, SQLite JDBC 3.53.1.0, JDK NIO and ProcessBuilder.
 
@@ -17,6 +17,7 @@
 **Files:**
 
 - Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/Account.kt`
+- Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/MailAccess.kt`
 - Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/Capability.kt`
 - Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/ProviderKey.kt`
 - Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/Mail.kt`
@@ -25,6 +26,7 @@
 - Create: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/Validation.kt`
 - Replace: `debug-dashboard/dashboard-contract/src/mail/sandbox/dashboard/contract/Routes.kt`
 - Create: `debug-dashboard/dashboard-contract/test/mail/sandbox/dashboard/contract/AddressValidationTest.kt`
+- Create: `debug-dashboard/dashboard-contract/test/mail/sandbox/dashboard/contract/StalwartMailAccessContractTest.kt`
 - Create: `debug-dashboard/dashboard-contract/test/mail/sandbox/dashboard/contract/ProviderKeySerializationTest.kt`
 - Create: `debug-dashboard/dashboard-contract/test/mail/sandbox/dashboard/contract/OperationContractTest.kt`
 
@@ -56,9 +58,29 @@ Mirror this rule for IMAP/JMAP mailbox keys.
 
 - [ ] Add named `ProviderProfile` values `dovecot-imap` and `stalwart-jmap`, capability/readiness DTOs, logical/provider account summaries, mailbox/message/page DTOs, safe message-body/attachment DTOs, request DTOs, `OperationState`, item/provider receipts, cleanup status, correlation confidence, and typed problem details.
 
+- [ ] Model the complete safe Stalwart surface without a secret field:
+
+```kotlin
+@Serializable
+enum class StalwartMailAccessState {
+    EnrollmentRequired,
+    Ready,
+    Rotating,
+    RecoveryRequired,
+    RemovalPending,
+    StoreUnavailable,
+}
+```
+
+Add safe status metadata (Account ID, reserved generation label, remediation/action availability, last verified time, and operation link), plus enroll/repair/rotate/remove/reset request DTOs. Only enroll/repair/rotate may carry a normal password in their request body; no response DTO can represent a normal password or AppPassword.
+
+- [ ] Model deletion counts as a sealed known value or explicit `UnavailableBecauseMailAccessIsNotReady`; never serialize unavailable counts as zero. When state is `ready`, the preview contract may bind the safe active generation label without exposing its credential ID/value.
+
+- [ ] Add typed problems for `enrollmentRequired`, `recoveryRequired`, `storeUnavailable`, credential lease-drain timeout, stale Account ID, and discarded-secret `resupplyRequired`. Contract tests must prove every problem is safe to serialize and maps to one explicit user action.
+
 - [ ] Encode the legal operation transition table in a pure shared function and test every legal edge plus rejection of terminal-to-running transitions.
 
-- [ ] Define all `/api/v1` route constants centrally. Run:
+- [ ] Define all `/api/v1` route constants centrally, including `/accounts/{address}/providers/stalwart-jmap/mail-access` actions and `/server-setup/stalwart-credential-store` status/reset. Run:
 
 ```bash
 cd debug-dashboard
@@ -85,7 +107,7 @@ git commit -m "feat: define dashboard provider contracts"
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/security/CanonicalOriginTest.kt`
 - Modify: `debug-dashboard/dashboard-server/resources/application.yaml`
 
-- [ ] Write failing tests that accept only an explicit repository root, runtime root inside `debug-dashboard/.runtime`, one `http://127.0.0.1:<port>` origin, and known provider endpoints. Reject symlinks, missing roots, wildcard bind addresses, `localhost` aliases, non-loopback addresses, and roots outside the worktree.
+- [ ] Write failing tests that accept only an explicit repository root, runtime root inside `debug-dashboard/.runtime`, one `http://127.0.0.1:<port>` origin, and known provider endpoints. Derive the Gate-0B-fixed AppPassword ciphertext/key/lock paths from that validated runtime root; no request or general environment value may supply alternate credential paths. Reject symlinks, missing roots, wildcard bind addresses, `localhost` aliases, non-loopback addresses, and roots outside the worktree.
 
 - [ ] Implement immutable configuration loaded once at startup. Requests never supply service names, provider URLs, repository roots, runtime paths, or origin aliases.
 
@@ -154,16 +176,24 @@ git commit -m "feat: secure the loopback dashboard session"
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/operation/AccountLockRegistry.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/operation/OperationOrchestrator.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/operation/DestructiveGrantStore.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/operation/EphemeralOperationInputs.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/safety/SecretChars.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/OperationMachineTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/IdempotencyIndexTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/OperationOrchestratorTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/DestructiveGrantStoreTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/EphemeralOperationInputsTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/safety/SecretCharsTest.kt`
 
 - [ ] Write failing tests for the exact flow `accepted → preflight → running → terminal`, cooperative cancellation between provider calls, separate provider/item results, partial success becoming `reconciliationRequired`, and no automatic destructive rollback.
 
 - [ ] Define the idempotency fingerprint as `operation kind + normalized logical target + normalized non-secret intent`. Assert same key/same fingerprint resumes; same key/different fingerprint returns a typed conflict.
 
 - [ ] Write a concurrency test proving mutations for one logical account serialize while different accounts may run concurrently. File-global Dovecot locking remains an additional Gate 0C primitive.
+
+- [ ] Implement `SecretChars` as a non-serializable, non-printable mutable request value that clears its backing storage on close. `EphemeralOperationInputs` associates it with one in-memory operation execution only, removes/closes it on terminal state or cancellation, and never includes it in the idempotency fingerprint, persisted intent, ledger, event, retry state, or exception text.
+
+- [ ] Test create, password reset, Stalwart enrollment, repair, and rotation with the ephemeral input registry. Restart or retry after the value is gone returns `resupplyRequired`; remove, deletion, and credential-store reset cannot request or recover a normal password from it.
 
 - [ ] Implement one shared destructive-preview grant primitive for account, mailbox, and permanent-message deletion. A grant is a 256-bit opaque random value whose server-side hash is bound to the current session, destructive kind, provider profile, canonical account, exact provider-native target keys/state fingerprint, preview digest, and a two-minute expiry. It is process-local, never stored in browser storage/SQLite/logs, and becomes invalid on restart/session expiry.
 
@@ -204,7 +234,11 @@ Expected: pass.
 
 Assert repeated restarts do not duplicate queue entries, provider calls, or events.
 
-- [ ] Implement operation creation as one transaction that stores `accepted`, its idempotency fingerprint, persisted non-secret intent, recovery policy, and initial event before enqueue. On startup, scan and resolve every nonterminal row before accepting mutations. Implement the schema and direct JDBC repository with prepared statements. Store no request password, authorization header, cookie, API key, bearer value, raw EML, or unredacted native output.
+- [ ] Add credential-operation restart cases. Enrollment, repair, and rotation whose request-scoped normal password was discarded become `failed` with `resupplyRequired` unless the Gate-0B lifecycle can finish a durable staged/retiring cleanup without it. Removal and store reset may resume only from a durable phase whose remaining work needs no secret. Never re-create an AppPassword merely because an operation row was nonterminal.
+
+- [ ] Implement operation creation as one transaction that stores `accepted`, its idempotency fingerprint, persisted non-secret intent, recovery policy, and initial event before enqueue. On startup, scan and resolve every nonterminal row before accepting mutations. Implement the schema and direct JDBC repository with prepared statements. Store no request password, authorization header, cookie, API key, bearer value, AppPassword value, encrypted snapshot/key bytes, raw EML, or unredacted native output.
+
+- [ ] Add a schema/repository canary test proving the Gate 0B snapshot, its key, credential IDs paired with values, and `app_`-form secrets never enter SQLite. Clear Local History deletes only ledger/event rows and does not open, rewrite, rotate, quarantine, or delete the credential store.
 
 - [ ] Run:
 
@@ -226,7 +260,7 @@ Expected: pass.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/safety/AllowedPathTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/process/TypedProcessRunnerTest.kt`
 
-- [ ] Write failing tests that redact passwords, Basic/Bearer headers, cookies, API keys, OAuth tokens, recovery credentials, URI credentials, and known structured secret fields before malformed parsing can throw.
+- [ ] Write failing tests that redact passwords, Stalwart `app_` credentials, Basic/Bearer headers, cookies, API keys, OAuth tokens, recovery credentials, URI credentials, encrypted-store/key errors containing sensitive material, and known structured secret fields before malformed parsing can throw.
 
 - [ ] Write failing path tests for repository fixtures under `mails/`, runtime files under `debug-dashboard/.runtime/`, and generated upload names. Reject traversal, absolute user paths, symlink components, and non-regular targets.
 
@@ -256,7 +290,7 @@ Expected: pass.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/event/EventBufferTest.kt`
 - Modify: `debug-dashboard/dashboard-server/src/Application.kt`
 
-- [ ] Write failing Ktor tests for authenticated `GET /api/v1/bootstrap`, operation status/list/cancel/retry/reconcile routes, typed safe problems, required idempotency header, CSRF, monotonic SSE IDs, `Last-Event-ID` resume, and explicit `resync`.
+- [ ] Write failing Ktor tests for authenticated `GET /api/v1/bootstrap`, operation status/list/cancel/retry/reconcile routes, typed safe problems, required idempotency header, CSRF, monotonic SSE IDs, `Last-Event-ID` resume, and explicit `resync`. Bootstrap readiness includes the aggregate safe Stalwart credential-store state but never file paths, key material, ciphertext, or credential values.
 
 - [ ] Replace the Gate 0A event source with the bounded production `EventBuffer` backed by the ledger. Keep the proven browser behavior.
 

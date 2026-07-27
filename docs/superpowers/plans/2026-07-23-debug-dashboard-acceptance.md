@@ -12,7 +12,7 @@
 
 ## Execution prerequisite
 
-Do not execute this plan until Gate 0B passes under the approved Stalwart mail-credential strategy and the design, Gate 0B, account-provider, mail-provider, Message Lab/observability, and any affected Compose UI plans have been revised and independently reviewed. Gate 1 must test the approved credential's provisioning, rotation, revocation, recovery, deletion, protected-account denial, and secret-exclusion behavior; it must not retain the rejected global-impersonation assertions as if they were executable.
+Every preceding plan must pass under the direct Account-bound Stalwart AppPassword/encrypted-snapshot design. Gate 1 tests the exact enrollment, lease, rotation, recovery, removal, store-reset, deletion, protected-account, delivery-aggregation, and secret-exclusion contracts; no fixture or assertion may introduce impersonation or retained normal passwords.
 
 ## Task 1: Create an isolated acceptance harness
 
@@ -48,19 +48,23 @@ Expected: pass and leave no account/container/runtime residue.
 
 - [ ] Implement each approved matrix row as a named parameterized test, once for `dovecot-imap` and once for `stalwart-jmap`:
 
-  1. registry/profile selection, including Dovecot-only, Stalwart-only, dual-provider, and provider-tab isolation;
+  1. registry/profile selection, including Dovecot-only, Stalwart-only, dual-provider, provider-tab isolation, and every safe Stalwart mail-access state;
   2. server-wide history/live/pause/resume/reconnect with activity from the test;
   3. account-scoped interleaved logs with exact inclusion and deterministic exclusion;
-  4. create account with login, capability, and browser-visible receipt;
-  5. authored text, uploaded EML, deterministic random × direct append and delivery, with arrival/content/replay truth;
+  4. create account with login, capability, Stalwart AppPassword provisioning while the request password exists, and browser-visible secret-free receipt;
+  5. authored text, uploaded EML, deterministic random × direct append and delivery, with readiness preflight, arrival/content/replay truth, multi-recipient aggregation, and Sent-filing truth;
   6. folder list/create/relist, server-issued delete preview, no deletion before confirmation, stale/altered/reused grant rejection, confirmed empty delete, plus non-empty/child/orphan-choice safety;
   7. message paging/relist, plain, sanitized HTML, attachments, and raw;
-  8. password reset/new login and old-login failure when test-owned;
-  9. account deletion preview with typed address and server grant, no deletion before confirmation, stale/altered/reused grant rejection, confirmed deletion, and every required provider negative path/cleanup status;
+  8. password reset/new login and old-login failure when test-owned; Stalwart preserves/re-probes the AppPassword unless explicit rotation is selected;
+  9. account deletion preview with typed address and server grant, known counts when ready/explicit unknown when not, no forced enrollment, no deletion before confirmation, stale/altered/reused grant rejection, confirmed deletion, and every required provider negative path/cleanup status;
   10. seen/unseen, flag/unflag, move, copy, Trash, and membership removal where supported; for permanent delete, prove preview scope, no deletion before explicit confirmation, stale-preview rejection, one successful confirmation, replay rejection, exact-item deletion, and relist after each;
   11. provider/item receipt, safe native identifiers, correlated evidence, and reconciliation.
 
 - [ ] Every test must drive the dashboard route/application boundary, then verify provider-native postconditions. A lower-level adapter-only pass cannot satisfy a row.
+
+- [ ] Add a named Stalwart lifecycle scenario inside the matrix: an existing Account starts `enrollmentRequired`; Enable makes it `ready`; rotation blocks new leases for that Account while an existing lease is allowed to finish within the 30-second bound, leaves a different Account's lease acquisition unaffected, and invalidates the old value after the drain; Remove returns to `enrollmentRequired` without deleting the Account; Repair cleans one orphan/revoked case; corrupt-store Reset revokes every reserved credential and returns all Accounts to enrollment. Protected identities expose no action.
+
+- [ ] Add delivery aggregation rows for all accepted/all arrived → `succeeded`, every recipient conclusively rejected → `failed`, and partial/ambiguous/accepted-but-unverified → `reconciliationRequired`. A failed Sent filing after confirmed all-recipient delivery preserves successful delivery as a sub-result.
 
 - [ ] Run:
 
@@ -96,6 +100,14 @@ Expected: every row passes for both profiles. Record durations, safe generated i
   - unavailable Identity/submission capability;
   - stale SSE/log cursor and resync;
   - Stalwart deletion Pending/Retry/Failed/fast-complete-not-observed;
+  - AppPassword create response lost before capture and durable-capture failure after remote creation;
+  - reserved-prefix remote orphan, external credential-list mismatch, revoked active credential, and quota exhaustion;
+  - 30-second credential lease-drain timeout with no provider/local change;
+  - restart during staged, active-switch/retiring, and `removalPending` phases;
+  - missing key with ciphertext, lone key, wrong key, bad tag, malformed snapshot, and unreadable store;
+  - global store-reset remote cleanup failure, proving no local quarantine/replacement;
+  - Stalwart sender/recipient in every non-ready state, proving zero provider-resource acquisition and zero upload/import/submission calls, with Enable for `enrollmentRequired`, Repair for `recoveryRequired`, wait/progress for `rotating`, reconciliation/cleanup detail for `removalPending`, and Server Setup reset for `storeUnavailable`;
+  - partial/ambiguous multi-recipient submission and accepted-but-arrival-timeout;
   - malformed native output containing secrets.
 
 - [ ] Assert honest achieved state, itemized results, safe remediation, and `reconciliationRequired` where prescribed. Assert no automatic destructive rollback.
@@ -120,9 +132,9 @@ Expected: pass.
 
 - [ ] Attempt path traversal/symlink fixtures/uploads, arbitrary Docker service/flags/working directory, unknown `doveadm` commands, protected account mutation, off-domain/protected/unregistered delivery, and non-loopback provider/dashboard connections. For account, mailbox, and permanent-message deletion, attempt the generic mutation route plus missing, forged, altered-scope, expired, reused, cross-session, wrong-kind, wrong-target, and stale-state grants; every case must make zero destructive provider calls.
 
-- [ ] Seed unique canary passwords, API keys, bearer tokens, cookies, and malformed raw lines. After all workflows, query responses, SSE capture, SQLite through the repository, exports, Ktor logs, and Docker logs. Assert every canary's deterministic exclusion from every unauthorized sink.
+- [ ] Seed unique canary normal passwords, `app_` AppPasswords, API keys, bearer tokens, cookies, snapshot plaintext, and malformed raw lines. After all workflows, inspect query responses, SSE capture, SQLite through the repository, exports, browser URL/DOM/storage/console, Ktor logs, and Docker logs. Assert every canary's deterministic exclusion from every unauthorized sink. Inspect credential files only through mode/type/symlink checks and a purpose-built decrypting test that never prints values.
 
-- [ ] Re-run the approved/revised Gate 0B and Gate 0C negative authorization matrices so later code cannot weaken provider isolation.
+- [ ] Re-run Gate 0B and Gate 0C authorization matrices so later code cannot weaken provider isolation. Gate 0B must prove zero `impersonate`, management-key mail denial, AppPassword management denial, cross-account denial, old-generation rejection, and no normal-password fallback.
 
 - [ ] Run:
 
@@ -170,7 +182,7 @@ Expected: pass.
 
 - [ ] Document exact prerequisites, Toolchain wrapper commands, current browser requirement, provider startup/readiness, startup fragment bootstrap, linked Wasm asset discovery, and loopback URLs.
 
-- [ ] Document Stalwart backup/migration/restore, Dovecot seed/runtime eligibility migration, protected identities, secret provisioning/rotation, retention/Clear Local History, and disposable acceptance environment.
+- [ ] Document Stalwart backup/migration/restore, Dovecot seed/runtime eligibility migration, protected identities, request-scoped enrollment/repair/rotation, AppPassword removal, global store reset/re-enrollment effect, the trusted no-concurrent-external-writer rule, retention/Clear Local History separation, and the disposable acceptance environment.
 
 - [ ] Document append vs delivery, provider-specific deletion/purge truth, reconciliation, account eligibility, local-only recipients, and every irreversible confirmation.
 
@@ -215,6 +227,22 @@ git status --short
 ```
 
 Expected: no whitespace errors; only intended implementation/evidence changes before commit.
+
+- [ ] Run the secret-store hygiene check without recursively printing runtime contents:
+
+```bash
+cd ..
+find debug-dashboard/.runtime/stalwart debug-dashboard/.runtime/keys debug-dashboard/.runtime/secrets \
+  -maxdepth 4 -type l -print
+find debug-dashboard/.runtime/stalwart debug-dashboard/.runtime/keys debug-dashboard/.runtime/secrets \
+  -maxdepth 4 -type f ! -perm 0600 -print
+cd debug-dashboard
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.acceptance.SecretLeakAcceptanceTest'
+```
+
+Expected: no symlink or unsafe-mode output; the test reports pass/fail only and never emits secret values.
 
 - [ ] Execute `.ai/self-review.md`, resolve every applicable issue, and repeat the verification commands affected by fixes.
 
