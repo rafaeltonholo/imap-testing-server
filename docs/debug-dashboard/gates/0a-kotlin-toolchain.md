@@ -1,4 +1,4 @@
-# Gate 0A: Kotlin Toolchain scaffold
+# Gate 0A: Kotlin Toolchain browser proof
 
 Date: 2026-07-27
 
@@ -309,15 +309,14 @@ renders:
 - the keyboard-focusable Material button labeled exactly `Increment proof`;
 - text labels for current route, activation count, JSON API status, SSE
   sequence, reconnect status, and sync status;
-- truthful initial `pending`/`disconnected` status until Task 5 wires
-  transport; and
+- truthful initial `pending`/`disconnected` status before transport starts; and
 - the exact marker `GATE_RESOURCE: toolchain-compose-resource-ok`.
 
 Pinned Compose Wasm 1.10.3 mirrors heading semantics as `role="heading"` but
 does not add an `aria-level`. The UI also declares polite Compose live-region
 semantics for changing status text, while this pinned Wasm semantics mirror
-does not currently emit `aria-live`. Keyboard and browser accessibility-tree
-behavior therefore remain explicit Task 5 browser-runtime checks.
+does not currently emit `aria-live`. Task 5's browser-runtime checks below
+verify the actual keyboard, focus, and accessibility-tree behavior.
 
 The checked-in marker is loaded through the generated
 `mail.sandbox.dashboard.web.generated.resources.Res.readBytes` API. The
@@ -356,7 +355,8 @@ rg -a -l -F 'GATE_RESOURCE: toolchain-compose-resource-ok' \
 
 There is no merged prepared-resource artifact in the final build. Serving
 only the linker directory would therefore make this resource request return
-404; Task 4 must explicitly stage or map the prepared resource root.
+404. Task 4 resolves that finding by validating and mapping the prepared
+resource root separately, as recorded below.
 
 ### Link artifacts and variant behavior
 
@@ -373,7 +373,8 @@ could not reach Maven. The identical command was allowed to fetch that pinned
 metadata, then succeeded; the final cached command above succeeded without
 network access.
 
-The exact linker directory and code assets are:
+The exact linker directory and current code assets, refreshed by the final
+Task 6 build, are:
 
 ```text
 build/tasks/_dashboard-web_linkWasmJs/
@@ -381,9 +382,9 @@ build/tasks/_dashboard-web_linkWasmJs/
 
 | Filename | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `dashboard-web.wasm` | 8,453,189 | `68d78641bb476163a7a69faa9e4a605805cd3550c16971233e2677b3c7cbe990` |
+| `dashboard-web.wasm` | 9,165,892 | `a799190b3c85994884064907c7f88a549598191e8f1950817901aeefd2240964` |
 | `dashboard-web.mjs` | 2,833 | `cb4cb2d848a3f7c7959fe7d1b70ce5be34eb999db4d640858e09cbac413c2917` |
-| `dashboard-web.import-object.mjs` | 30,042 | `5651da31cf4f09e9a17a4e6b2dcdab181d0769c9ddaaa4b908dbbfbb33d3927e` |
+| `dashboard-web.import-object.mjs` | 31,696 | `af1c221d54fbb2fa8e56478772d563cce7d2f1daecd9da4624edf1d75f5313c3` |
 | `dashboard-web.js-builtins.mjs` | 2,095 | `a370c66f8031ae3a8d5718123a7fb1aeed4f43caca681181ef69b512321d5b94` |
 
 The entry module uses relative imports for `dashboard-web.wasm` and
@@ -406,9 +407,11 @@ The resolved transitive
 `skiko.wasm`, but Toolchain 0.11.1 does not copy them to its linker output.
 Task 3 intentionally did not vendor/copy runtime JavaScript or introduce a
 Node/npm packaging stack: doing so would hide the Toolchain-only gate result
-and exceed this task's scope. Consequently the compiler and linker succeed,
-but the requirement for a complete set of runnable relative companions is
-not satisfied by the Toolchain build output.
+and exceed this task's scope. This was an intentionally unresolved Task 3
+finding about the linker directory in isolation. Task 4 resolves it without
+copying either resource into source control: Ktor loads the exact resources
+from one pinned Maven artifact, validates their hashes, and adds them to the
+immutable production manifest.
 
 The explicit release probe also exited 0:
 
@@ -422,5 +425,206 @@ Build successful
 
 No separate release artifact exists in Toolchain 0.11.1. Browser startup,
 resource delivery, focus traversal, accessibility-tree output, reducer
-interaction, and live transport are not claimed here; those remain Task 4/5
-runtime validation.
+interaction, and live transport are proved by the Task 4/5 evidence below.
+
+## Task 4: validated production asset bundle
+
+Task 4 closes every missing-companion and separately prepared-resource finding
+from Task 3. The Ktor `WebAssetBundle` starts only when all three explicit
+inputs are present and canonical:
+
+```text
+DASHBOARD_WEB_ASSETS=<absolute linker directory>
+DASHBOARD_WEB_RESOURCES=<absolute prepared Compose-resource directory>
+DASHBOARD_WEB_ENTRY=dashboard-web.mjs
+```
+
+The production loader accepts one explicit `.mjs` entry, recursively validates
+its executable import and `new URL` closure, snapshots every accepted byte,
+rejects traversal, symlinks, ambiguous classpath resources, unreviewed loaders,
+unknown bare imports, and unreviewed MIME extensions, and exposes only the
+immutable validated manifest. The Compose resource mapper serves the prepared
+marker at:
+
+```text
+/assets/composeResources/mail.sandbox.dashboard.web.generated.resources/files/gate-proof.txt
+```
+
+The authored HTML contains one module entry and one narrow import map. It maps
+only `@js-joda/core` to `/assets/js-joda.esm.js`; there is no generated
+bootstrap or development server.
+
+Exactly two additional Maven runtime artifacts are ordinary, version-pinned
+Toolchain dependencies:
+
+| Maven artifact | Served file | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| `org.jetbrains.skiko:skiko-js-wasm-runtime:0.9.37.4` | `skiko.mjs` | 632,832 | `5dc3302763d61014d4a3277727f6e1af041741ae1f0efcc2acc21f2924cad99e` |
+| `org.jetbrains.skiko:skiko-js-wasm-runtime:0.9.37.4` | `skiko.wasm` | 8,642,989 | `69afd1fba0567fc79515d97bac5c0670cfeb180284823f986199637f154a9bbe` |
+| `org.webjars.npm:js-joda__core:3.2.0` | `js-joda.esm.js` | 401,606 | `a716a37f4c3bb47f8795688e1cd6451130a08d825d8a6df664ef72b349ec445b` |
+
+The final prepared marker remains 45 bytes with SHA-256
+`7b0f843ebd49d2709bcd8e3d1021db98e68413823647895d8377a6657f5e6960`.
+The final production bundle is therefore the four current Toolchain-linked
+files listed above, this one Toolchain-prepared resource, and the three
+hash-pinned classpath resources from exactly two Maven artifacts. No unresolved
+browser import remains in the validated manifest.
+
+## Task 5: production browser evidence
+
+The Kotlin/JVM Selenium gate starts the real Ktor `module()` on an ephemeral
+loopback port. That production configuration calls
+`WebAssetBundle.fromEnvironment()` and consumes all three values above; the
+test does not inject a fixture asset bundle or infer the entry filename.
+
+The final explicit browser run used:
+
+```text
+Google Chrome: 150.0.7871.182
+ChromeDriver: 150.0.7871.124
+ChromeDriver build:
+9261fd0a595ac4964ea84e6bd4a025c1173a2ffa-refs/branch-heads/7871@{#3359}
+```
+
+Chrome ran headlessly with
+`--enable-features=WebAssemblyGarbageCollection`. **WasmGC PASS:** the
+Toolchain-linked application and Skiko Wasm both loaded, the Compose viewport
+rendered, and the browser reported no runtime exception, console error,
+uncancelled loading failure, HTTP error, or wrong/unreviewed response MIME.
+
+The observed runtime assertions were:
+
+- **Compose/resource:** the visible Compose canvas exposed the heading
+  `Mail Flight Recorder` and the generated-`Res` marker
+  `GATE_RESOURCE: toolchain-compose-resource-ok`.
+- **API:** same-origin `fetch("/api/v1/gate/probe")` decoded the exact typed
+  payload and rendered `API message: ready`.
+- **History:** activating `Gate details` pushed `/gate/details`; a full reload
+  retained that route and rendered `Selected route: /gate/details`; browser
+  Back restored `/` and `Selected route: /`.
+- **SSE:** native browser `EventSource` received ordinary IDs `1`, `2`, then
+  automatically reconnected with `Last-Event-ID: 2` and received `3`, `4`.
+  After the two-item buffer evicted that cursor, the next reconnect received a
+  typed `resync` event at ID `6`. CDP observed event IDs
+  `[1, 2, 3, 4, 6]`, event names
+  `[message, message, message, message, resync]`, and at least three event
+  stream requests. The UI rendered `SSE sequence: 4`,
+  `SSE sync: resyncing`, and, after the client intentionally closed,
+  `Reconnect status: disconnected`. No SSE request carried a query string.
+- **Keyboard/focus:** Tab reached `Increment proof`; the semantic focus label
+  changed to `Keyboard focus: increment proof`; the active `main` host was
+  `#dashboard-root` with a computed solid 3 px outline; Enter rendered
+  `Activation count: 1`.
+- **Accessibility tree:** Chrome exposed `Mail Flight Recorder` with role
+  `heading`, and `Increment proof` with role `button`, the exact accessible
+  name, `ignored=false`, and no disabled state.
+
+The deterministic server tests separately prove fresh-page reset, monotonic
+resume, invalid/unknown cursor resync, eviction-induced stale cursor resync,
+valid closing event-stream framing, and real `Last-Event-ID` handling.
+
+## Task 6: final verification
+
+All commands in this section were rerun against the final Task 5 source before
+this report was frozen. Commands ran from `debug-dashboard/` unless noted.
+
+| Command | Exit | Exact result |
+| --- | ---: | --- |
+| `shasum -a 256 kotlin` | 0 | `6dbcdde0bcae41705c187aefb6c91c6c29ef9079c8072a473c2149151f8d7962` |
+| `./kotlin --version` | 0 | `Kotlin Toolchain version 0.11.1 (801e9d4, 2026-06-05)` |
+| `./kotlin build` | 0 | `Build successful`; JVM modules compiled and the Wasm app linked |
+| `./kotlin build --module dashboard-web --variant release` | 0 | `Build successful`; 0.11.1 warned that Wasm ignores variants, so no separate release artifact exists |
+| production-environment explicit `KotlinToolchainBrowserGateTest` | 0 | 1/1 test passed in the browser/driver versions above |
+| production-environment `./kotlin test` | 0 | `dashboard-contract`: 20/20 JVM tests; `dashboard-server`: 25/25 JVM tests; 45 total, zero skipped/failed |
+| `./kotlin show modules` | 0 | exactly `dashboard-contract` (`kmp/lib`), `dashboard-server` (`jvm/app`), `dashboard-web` (`wasm-js/app`) |
+| `./kotlin show settings` | 1 | expected multi-module selector error |
+| `./kotlin show settings --all-modules` | 0 | Kotlin `2.3.21`, Compose `1.10.3`, Ktor `3.4.3`; contract targets JVM + WasmJs |
+| `./kotlin show dependencies` | 1 | expected multi-module selector error |
+| `./kotlin show dependencies --all-modules --include-tests` | 0 | complete graph resolved; includes the two runtime pins and Selenium Java `4.46.0` only in server tests |
+| `./kotlin show tasks` | 0 | Toolchain JVM/Wasm/Compose tasks only; no Gradle, npm, Node, React, or TypeScript task |
+
+Toolchain 0.11.1's bare settings and dependency reports are not valid
+non-interactive shorthand for this multi-module project. Both exit 1 with:
+
+```text
+ERROR: Please specify the module(s) to inspect with --module, or use --all-modules to inspect all modules
+```
+
+The successful `--all-modules` reports resolve these reviewed versions:
+
+| Component | Version |
+| --- | --- |
+| Kotlin Toolchain wrapper/distribution | `0.11.1 (801e9d4, 2026-06-05)` |
+| Kotlin | `2.3.21` |
+| Kotlinx Serialization JSON | `1.10.0` |
+| Compose Multiplatform | `1.10.3` |
+| Compose Material 3 | `1.10.0-alpha05` |
+| Ktor | `3.4.3` |
+| Skiko runtime artifact | `0.9.37.4` |
+| JS-Joda WebJar | `3.2.0` |
+| Selenium Java, server test scope only | `4.46.0` |
+
+The full Toolchain test command was:
+
+```bash
+DASHBOARD_WEB_ASSETS="$PWD/build/tasks/_dashboard-web_linkWasmJs" \
+  DASHBOARD_WEB_RESOURCES="$PWD/build/artifacts/PreparedComposeResourcesDirArtifact/dashboard-webcommon" \
+  DASHBOARD_WEB_ENTRY="dashboard-web.mjs" \
+  ./kotlin test
+```
+
+The explicit production browser command was:
+
+```bash
+DASHBOARD_WEB_ASSETS="$PWD/build/tasks/_dashboard-web_linkWasmJs" \
+  DASHBOARD_WEB_RESOURCES="$PWD/build/artifacts/PreparedComposeResourcesDirArtifact/dashboard-webcommon" \
+  DASHBOARD_WEB_ENTRY="dashboard-web.mjs" \
+  ./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
+```
+
+The Kotlin Toolchain can compile and link Wasm test artifacts, but 0.11.1 does
+not expose a Wasm test-execution task. The 20 shared-contract tests therefore
+run on JVM, while `./kotlin build` proves the shared and web sources compile and
+link for Wasm and the Chrome gate executes the actual linked Wasm application.
+No JavaScript test runner was added.
+
+### Alternate-stack search
+
+From the worktree root, this final scan included the Git index and every
+non-ignored untracked file:
+
+```bash
+git ls-files --cached --others --exclude-standard . \
+  | rg '(^|/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradlew(\.bat)?|gradle\.properties|\.npmrc|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml)$|(^|/)gradle/wrapper(/|$)|\.(js|jsx|cjs|mjs|ts|tsx|mts|cts)$'
+```
+
+The pipeline exited 1 with no output because `rg` found no match. This
+explicitly covers tracked and non-ignored untracked `.js`, `.jsx`, `.cjs`,
+`.mjs`, `.ts`, `.tsx`, `.mts`, and `.cts` files, as well as Gradle and
+npm/Node manifests, wrappers, and lockfiles. Ignored Toolchain-generated
+`.mjs` files under `build/` are the only JavaScript-family worktree files used
+by the browser bundle. Ktor also serves the hash-pinned `skiko.mjs` and
+`js-joda.esm.js` resources directly from the two Maven artifacts recorded
+above; neither is copied into the worktree. There is no React or TypeScript
+path.
+
+## Gate decision
+
+| Design criterion | Result | Evidence |
+| --- | --- | --- |
+| Compose semantics | **PASS** | Visible heading/resource/button state plus real Chrome heading and enabled-button accessibility-tree assertions |
+| Browser loading | **PASS** | Current Toolchain-linked/prepared bytes plus exactly two hash-pinned Maven runtime artifacts load under Chrome with WasmGC and no console, network, HTTP, or MIME failure |
+| Ktor hosting | **PASS** | Production `module()` consumes the three explicit environment values, validates the immutable closure, serves authored history HTML, typed JSON, SSE, and every required asset |
+| SSE reconnect | **PASS** | Native `EventSource` automatically resumes `1`–`4` through `Last-Event-ID`, then receives typed resync after deterministic buffer eviction; no query credentials |
+| Kotlin-authored automation | **PASS** | All state, server, manifest, Ktor, and Selenium automation is Kotlin; the final JVM suites pass and the browser gate drives the actual linked Wasm bundle |
+
+**Gate 0A: PASS. Failed criteria: none.**
+
+All five criteria work from the reviewed Toolchain-linked/prepared output and
+only the two explicitly pinned Maven runtime artifacts. No Gradle, npm, Node
+build tooling, generated Node tooling, checked-in or handwritten JavaScript,
+React, or TypeScript is present. Gate 0B may proceed in a later task; no Gate
+0B work is included here.

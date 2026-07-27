@@ -14,6 +14,7 @@ enum class ApiProbeStatus {
     Pending,
     Probing,
     Ready,
+    Failed,
 }
 
 enum class SseConnectionStatus {
@@ -32,6 +33,7 @@ enum class SseSyncStatus {
 data class GateState(
     val route: GateRoute = GateRoute.Overview,
     val apiProbeStatus: ApiProbeStatus = ApiProbeStatus.Pending,
+    val apiProbeMessage: String? = null,
     val sseSequence: Long? = null,
     val sseConnectionStatus: SseConnectionStatus = SseConnectionStatus.Disconnected,
     val sseSyncStatus: SseSyncStatus = SseSyncStatus.Pending,
@@ -43,13 +45,17 @@ sealed interface GateAction {
 
     data object ApiProbeStarted : GateAction
 
-    data object ApiProbeSucceeded : GateAction
+    data class ApiProbeSucceeded(val message: String) : GateAction
+
+    data class ApiProbeFailed(val message: String) : GateAction
 
     data object SseConnected : GateAction
 
     data class SseSequenceReceived(val sequence: Long) : GateAction
 
     data object SseReconnectScheduled : GateAction
+
+    data object SseDisconnected : GateAction
 
     data object SseResyncStarted : GateAction
 
@@ -65,11 +71,21 @@ fun reduceGateState(state: GateState, action: GateAction): GateState = when (act
     }
 
     GateAction.ApiProbeStarted -> state.copy(apiProbeStatus = ApiProbeStatus.Probing)
-    GateAction.ApiProbeSucceeded -> state.copy(apiProbeStatus = ApiProbeStatus.Ready)
+    is GateAction.ApiProbeSucceeded -> state.copy(
+        apiProbeStatus = ApiProbeStatus.Ready,
+        apiProbeMessage = action.message,
+    )
+    is GateAction.ApiProbeFailed -> state.copy(
+        apiProbeStatus = ApiProbeStatus.Failed,
+        apiProbeMessage = action.message,
+    )
     GateAction.SseConnected -> state.copy(sseConnectionStatus = SseConnectionStatus.Connected)
     is GateAction.SseSequenceReceived -> state.receiveSequence(action.sequence)
     GateAction.SseReconnectScheduled -> {
         state.copy(sseConnectionStatus = SseConnectionStatus.Reconnecting)
+    }
+    GateAction.SseDisconnected -> {
+        state.copy(sseConnectionStatus = SseConnectionStatus.Disconnected)
     }
 
     GateAction.SseResyncStarted -> state.copy(sseSyncStatus = SseSyncStatus.Resyncing)

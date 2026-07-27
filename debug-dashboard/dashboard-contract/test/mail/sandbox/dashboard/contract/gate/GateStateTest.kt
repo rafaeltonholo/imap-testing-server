@@ -10,6 +10,7 @@ class GateStateTest {
         val state = GateState()
 
         assertEquals(ApiProbeStatus.Pending, state.apiProbeStatus)
+        assertNull(state.apiProbeMessage)
         assertNull(state.sseSequence)
         assertEquals(SseConnectionStatus.Disconnected, state.sseConnectionStatus)
         assertEquals(SseSyncStatus.Pending, state.sseSyncStatus)
@@ -38,10 +39,26 @@ class GateStateTest {
     @Test
     fun apiProbeMovesFromPendingThroughProbingToReady() {
         val probing = reduceGateState(GateState(), GateAction.ApiProbeStarted)
-        val ready = reduceGateState(probing, GateAction.ApiProbeSucceeded)
+        val ready = reduceGateState(
+            probing,
+            GateAction.ApiProbeSucceeded(message = "ready"),
+        )
 
         assertEquals(ApiProbeStatus.Probing, probing.apiProbeStatus)
         assertEquals(ApiProbeStatus.Ready, ready.apiProbeStatus)
+        assertEquals("ready", ready.apiProbeMessage)
+    }
+
+    @Test
+    fun failedApiProbeKeepsTheFailureTruthful() {
+        val probing = reduceGateState(GateState(), GateAction.ApiProbeStarted)
+        val failed = reduceGateState(
+            probing,
+            GateAction.ApiProbeFailed(message = "HTTP 503"),
+        )
+
+        assertEquals(ApiProbeStatus.Failed, failed.apiProbeStatus)
+        assertEquals("HTTP 503", failed.apiProbeMessage)
     }
 
     @Test
@@ -195,6 +212,23 @@ class GateStateTest {
         assertEquals(20L, completed.sseSequence)
         assertEquals(SseSyncStatus.Current, completed.sseSyncStatus)
         assertEquals(SseConnectionStatus.Reconnecting, completed.sseConnectionStatus)
+    }
+
+    @Test
+    fun intentionalDisconnectAfterResyncPreservesTheResyncState() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(4L),
+        )
+        val resyncing = reduceGateState(current, GateAction.SseResyncStarted)
+        val disconnected = reduceGateState(resyncing, GateAction.SseDisconnected)
+
+        assertEquals(4L, disconnected.sseSequence)
+        assertEquals(SseSyncStatus.Resyncing, disconnected.sseSyncStatus)
+        assertEquals(
+            SseConnectionStatus.Disconnected,
+            disconnected.sseConnectionStatus,
+        )
     }
 
     @Test

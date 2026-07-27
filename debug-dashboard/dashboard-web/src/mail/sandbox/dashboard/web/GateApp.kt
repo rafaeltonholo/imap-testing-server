@@ -9,6 +9,9 @@ package mail.sandbox.dashboard.web
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,11 +34,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,12 +50,23 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlin.js.ExperimentalWasmJsInterop
+import kotlin.js.JsString
+import kotlin.js.unsafeCast
 import kotlinx.browser.window
+import kotlinx.coroutines.await
+import kotlinx.serialization.json.Json
+import mail.sandbox.dashboard.contract.GateEvent
+import mail.sandbox.dashboard.contract.GateProbe
+import mail.sandbox.dashboard.contract.Routes
 import mail.sandbox.dashboard.contract.gate.GateAction
 import mail.sandbox.dashboard.contract.gate.GateRoute
 import mail.sandbox.dashboard.contract.gate.GateState
 import mail.sandbox.dashboard.contract.gate.reduceGateState
 import mail.sandbox.dashboard.web.generated.resources.Res
+import org.w3c.dom.EventSource
+import org.w3c.dom.MessageEvent
+import org.w3c.dom.events.Event
+import org.w3c.fetch.Response
 
 private val InstrumentGraphite = Color(0xFF17242A)
 private val RecorderPaper = Color(0xFFF4F2E8)
@@ -85,11 +99,85 @@ private val GateShapes = Shapes(
 @Composable
 internal fun GateApp(modifier: Modifier = Modifier) {
     val initialRoute = GateRoute.fromPath(window.location.pathname) ?: GateRoute.Overview
-    var state by remember { mutableStateOf(GateState(route = initialRoute)) }
-    var resourceMarker by remember { mutableStateOf("GATE_RESOURCE: loading") }
+    val stateHolder = remember { mutableStateOf(GateState(route = initialRoute)) }
+    val state = stateHolder.value
+    val resourceMarkerHolder = remember { mutableStateOf("GATE_RESOURCE: loading") }
+    val dispatch: (GateAction) -> Unit = { action ->
+        stateHolder.value = reduceGateState(stateHolder.value, action)
+    }
 
     LaunchedEffect(Unit) {
-        resourceMarker = Res.readBytes("files/gate-proof.txt").decodeToString().trim()
+        resourceMarkerHolder.value =
+            Res.readBytes("files/gate-proof.txt").decodeToString().trim()
+    }
+
+    LaunchedEffect(Unit) {
+        dispatch(GateAction.ApiProbeStarted)
+        runCatching {
+            val response: Response = window.fetch(Routes.GATE_PROBE).await()
+            require(response.ok) { "HTTP ${response.status}" }
+            val body: JsString = response.text().await()
+            Json.decodeFromString<GateProbe>(body.toString())
+        }.onSuccess { probe ->
+            dispatch(GateAction.ApiProbeSucceeded(probe.message))
+        }.onFailure { failure ->
+            dispatch(
+                GateAction.ApiProbeFailed(
+                    failure.message ?: "probe failed",
+                ),
+            )
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val popStateListener: (Event) -> Unit = {
+            dispatch(GateAction.RouteSelected(window.location.pathname))
+        }
+        window.addEventListener("popstate", popStateListener)
+        onDispose {
+            window.removeEventListener("popstate", popStateListener)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val eventSource = EventSource(Routes.GATE_EVENTS)
+        val resyncListener: (Event) -> Unit = { rawEvent ->
+            val event = rawEvent.unsafeCast<MessageEvent>()
+            val gateEvent = decodeGateEvent(event)
+            if (gateEvent?.kind == "resync") {
+                dispatch(GateAction.SseResyncStarted)
+                eventSource.close()
+                dispatch(GateAction.SseDisconnected)
+            } else {
+                dispatch(GateAction.SseSequenceReceived(0L))
+            }
+        }
+
+        eventSource.onopen = {
+            dispatch(GateAction.SseConnected)
+        }
+        eventSource.onmessage = { event ->
+            val gateEvent = decodeGateEvent(event)
+            if (gateEvent?.kind == "sequence" && gateEvent.id == gateEvent.payload.sequence) {
+                dispatch(GateAction.SseSequenceReceived(gateEvent.payload.sequence))
+            } else {
+                dispatch(GateAction.SseSequenceReceived(0L))
+            }
+        }
+        eventSource.onerror = {
+            if (eventSource.readyState == EventSource.CONNECTING) {
+                dispatch(GateAction.SseReconnectScheduled)
+            }
+        }
+        eventSource.addEventListener("resync", resyncListener)
+
+        onDispose {
+            eventSource.removeEventListener("resync", resyncListener)
+            eventSource.onopen = null
+            eventSource.onmessage = null
+            eventSource.onerror = null
+            eventSource.close()
+        }
     }
 
     MaterialTheme(
@@ -98,20 +186,25 @@ internal fun GateApp(modifier: Modifier = Modifier) {
     ) {
         GateSurface(
             state = state,
-            resourceMarker = resourceMarker,
-            onAction = { action ->
-                state = reduceGateState(state, action)
-            },
+            resourceMarker = resourceMarkerHolder.value,
+            onAction = dispatch,
             onRouteSelected = { route ->
                 if (route != state.route) {
                     window.history.pushState(null, "", route.path)
-                    state = reduceGateState(state, GateAction.RouteSelected(route.path))
+                    dispatch(GateAction.RouteSelected(route.path))
                 }
             },
             modifier = modifier,
         )
     }
 }
+
+@OptIn(ExperimentalWasmJsInterop::class)
+private fun decodeGateEvent(event: MessageEvent): GateEvent? = runCatching {
+    val data = event.data?.unsafeCast<JsString>()?.toString()
+        ?: return@runCatching null
+    Json.decodeFromString<GateEvent>(data)
+}.getOrNull()
 
 @Composable
 private fun GateSurface(
@@ -121,6 +214,9 @@ private fun GateSurface(
     onRouteSelected: (GateRoute) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val incrementInteractionSource = remember { MutableInteractionSource() }
+    val incrementFocused by incrementInteractionSource.collectIsFocusedAsState()
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -215,6 +311,16 @@ private fun GateSurface(
                         ) {
                             Button(
                                 onClick = { onAction(GateAction.IncrementProof) },
+                                interactionSource = incrementInteractionSource,
+                                modifier = if (incrementFocused) {
+                                    Modifier.border(
+                                        width = 3.dp,
+                                        color = RecorderCursorRed,
+                                        shape = MaterialTheme.shapes.small,
+                                    )
+                                } else {
+                                    Modifier
+                                },
                             ) {
                                 Text("Increment proof")
                             }
@@ -224,6 +330,19 @@ private fun GateSurface(
                                 modifier = Modifier.semantics {
                                     liveRegion = LiveRegionMode.Polite
                                 },
+                            )
+                            Text(
+                                text = if (incrementFocused) {
+                                    "Keyboard focus: increment proof"
+                                } else {
+                                    "Keyboard focus: none"
+                                },
+                                color = if (incrementFocused) {
+                                    RecorderCursorRed
+                                } else {
+                                    SilkscreenGray
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
                             )
                         }
                     }
@@ -241,6 +360,7 @@ private fun GateSurface(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         GateStatusText("JSON API: ${state.apiProbeStatus.name.lowercase()}")
+                        GateStatusText("API message: ${state.apiProbeMessage ?: "pending"}")
                         GateStatusText("SSE sequence: ${state.sseSequence ?: "pending"}")
                         GateStatusText(
                             "Reconnect status: ${state.sseConnectionStatus.name.lowercase()}",
