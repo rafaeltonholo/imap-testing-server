@@ -2,13 +2,15 @@
 
 **Date:** 2026-07-23
 
-**Status:** Design approved; pending implementation planning
+**Status:** Design approved; AppPassword amendment pending implementation-plan revision
+
+**Amended:** 2026-07-27 — direct per-account Stalwart AppPasswords and a trusted test-sandbox threat model
 
 **Target:** `debug-dashboard/`
 
 ## 1. Goal
 
-Build a local web application that lets one developer administer, exercise, and diagnose the repository's Dovecot and Stalwart mail stores without switching among shell scripts, protocol clients, and container logs.
+Build a local web application that lets a trusted developer team administer, exercise, and diagnose the repository's Dovecot and Stalwart test mail stores without switching among shell scripts, protocol clients, and container logs.
 
 The first usable release must support all nine requested workflows against both supported provider profiles:
 
@@ -40,6 +42,8 @@ A disabled baseline action does not count as support. The release remains not re
 ### Out of scope
 
 - Remote, production, or multi-user administration.
+- Protection from a malicious teammate, a process already running as the repository owner, or anyone with Docker/repository access.
+- Production secret management, compliance controls, external identity governance, or public deployment hardening.
 - Implicit synchronization between Dovecot and Stalwart stores.
 - Arbitrary Docker, shell, filesystem, or server-management access.
 - Enabling arbitrary provider/protocol combinations in the first release.
@@ -60,6 +64,10 @@ A disabled baseline action does not count as support. The release remains not re
 | Build | Kotlin Toolchain wrapper and YAML module model only |
 | Supported profiles | `dovecot-imap` and `stalwart-jmap` |
 | Stalwart baseline | Pin v0.16.14 and migrate before dashboard implementation |
+| Stalwart mail access | One dashboard-owned, mail-only AppPassword per ordinary Account; no global impersonation |
+| Stalwart enrollment | Use the Account's normal password only for the active create, enroll, repair, or explicit rotate request |
+| Local secret store | Small JDK-only AES-256-GCM snapshot under `.runtime`; repository-owner access is trusted |
+| Security posture | Pragmatic loopback safety for a trusted test sandbox, not production hardening |
 | Logical accounts | Same address, separate provider instances and provider state |
 | Message creation | Direct append and true delivery, visibly distinguished |
 | Operation model | Durable jobs with provider/item outcomes and reconciliation |
@@ -93,11 +101,13 @@ flowchart LR
     Ktor --> Operations["Operation orchestrator + SQLite ledger"]
     Ktor --> Logs["Log ingestion, redaction, correlation"]
     Ktor --> Fixtures["MIME + fixture pipeline"]
+    Ktor --> Credentials["Encrypted local Stalwart AppPassword snapshot"]
     Ktor --> Dovecot["Dovecot admin + IMAP adapters"]
     Ktor --> Postfix["Postfix SMTP adapter"]
     Ktor --> Stalwart["Stalwart v0.16 management + JMAP adapters"]
     Dovecot --> Compose["Local Docker Compose services"]
     Postfix --> Compose
+    Credentials --> Stalwart
     Stalwart --> Compose
     Logs --> Compose
 ```
@@ -133,7 +143,8 @@ The Ktor service runs on the host and binds only to `127.0.0.1`. Host placement 
 - reads Docker Compose stdout without mounting the Docker socket into another container;
 - atomically updates the gitignored Dovecot runtime eligibility file;
 - connects to the exposed IMAP, SMTP, and JMAP endpoints;
-- maintains a local, gitignored operation database and short-lived upload spool.
+- maintains a local, gitignored operation database and short-lived upload spool;
+- keeps dashboard-owned Stalwart AppPasswords in a small encrypted snapshot outside SQLite.
 
 All host-published sandbox ports used by the dashboard are bound to loopback during the provider-baseline gates; the current unqualified Compose bindings are not an acceptable local-only boundary.
 
@@ -152,7 +163,8 @@ The service discovers the repository root from validated configuration. Requests
 | Dovecot mail adapter | IMAP folder/message reads and mutations with UID semantics | IMAP endpoint |
 | Postfix submission adapter | Real SMTP envelope submission and queue receipt capture | SMTP endpoint |
 | Stalwart admin adapter | Domain/account query, create, credential update, destroy | v0.16 JMAP management |
-| Stalwart mail adapter | Mailbox, Email, Identity, blob, import, and submission operations | discovered JMAP Session |
+| Stalwart credential lifecycle | Enroll, load, rotate, revoke, and repair the exact Account's dashboard AppPassword | request-scoped normal password, management revocation, encrypted snapshot |
+| Stalwart mail adapter | Mailbox, Email, Identity, blob, import, and submission operations | discovered JMAP Session and exact Account credential lease |
 | Message factory | Text-to-MIME, EML validation, fixtures, deterministic random data, threads | bounded host inputs |
 | Log pipeline | Docker log tail/history, optional `x:Log`, parsing, redaction, correlation | allowlisted log sources |
 
@@ -174,9 +186,11 @@ The registry is a projection of live provider state, not a second authoritative 
 1. lists eligible Dovecot users;
 2. queries eligible Stalwart `Account/User` objects;
 3. joins them by canonical address;
-4. overlays dashboard operation/reconciliation metadata.
+4. overlays dashboard operation/reconciliation metadata and safe Stalwart mail-access readiness.
 
 Protected administration or service identities are marked as protected and cannot be edited or deleted through ordinary account workflows.
+
+The encrypted credential snapshot is not account authority. It can only mark a live Stalwart provider instance as `ready`, `enrollmentRequired`, `recoveryRequired`, or temporarily `rotating`. Records are keyed by immutable Stalwart Account ID, never attached by email address alone, and are never created for protected identities.
 
 ### 6.2 Capability profiles
 
@@ -229,17 +243,39 @@ The browser never receives mail-server administration credentials, operator cred
 Normal browsing and mutation must not require the dashboard to persist every user's password.
 
 - Dovecot uses a dedicated master/operator identity through a host-only ingress whose actual Docker network path is verified.
-- Stalwart uses a second protected Account with a normal Password credential and only the permissions required to authenticate and impersonate an ordinary user. An app password is not used for impersonation. The resulting user context performs JMAP mail operations.
+- Stalwart authenticates directly as the selected ordinary Account with one dashboard-owned AppPassword stored by the Ktor process. There is no Stalwart mail-operator Account and no `impersonate` grant or `target%operator` authentication path.
 
 The Dovecot operator approach is a Gate 0C contract test. If the current image cannot isolate the master identity without weakening ordinary account authentication, implementation stops for a credential-strategy decision.
 
-The Stalwart operator approach is a Gate 0B contract test. In v0.16.14, possession of the `impersonate` permission may be global rather than target-scoped, so an application-side protected-account denylist is not an authorization boundary. The gate must prove the operator cannot impersonate the management Account or any other protected identity. If sufficiently scoped impersonation cannot be enforced, implementation stops for a credential-strategy decision. It must not silently start storing user passwords.
+Tagged v0.16.14 makes this split necessary: AppPasswords are server-generated, returned only when created, scoped to the Account that owns them, and explicitly rejected for impersonation. A non-impersonating management credential can revoke a known secondary credential through an Account update but cannot create an AppPassword for another Account.
+
+The dashboard therefore creates an AppPassword only while authenticated as the exact ordinary Account:
+
+- new Stalwart accounts reuse the normal password already present for the active create request;
+- an existing or migrated Account asks for its current normal password once to enable dashboard mail access;
+- repair and explicit rotation ask for the current normal password again, or may use the new request-scoped value during an explicit normal-password reset;
+- the normal password is released after the operation and is never written to the credential store or operation ledger.
+
+Each dashboard AppPassword uses permission `Replace` with only the exact Gate-0B-proven JMAP authentication, mailbox, Email, blob, Identity, and submission permissions needed by the requested workflows. It has no impersonation, Account/Domain/Task/Log management, normal-password management, API-key management, or AppPassword-management permission. A leaked mail credential therefore cannot mint a replacement credential.
+
+Steady state is one active dashboard AppPassword per ordinary Stalwart Account. Manual rotation may briefly hold one staged successor: authenticate with the request-scoped normal password, create and capture the successor, probe it, atomically switch new operations, revoke the old credential through the management adapter while preserving unrelated credentials, verify the old value fails, and erase it locally. Quota exhaustion stops before revoking the active credential. Normal password reset preserves and re-probes the dashboard AppPassword unless the user explicitly requests rotation.
+
+Existing Accounts without a local record remain visible and administrable but their Stalwart mail surface is `enrollmentRequired`. Missing, corrupt, externally revoked, or mismatched records produce `recoveryRequired`; the dashboard never falls back to global impersonation or silently resets the normal password.
 
 ### Server-side secret material
 
-Operator and management secrets are generated during local setup and enter the Ktor process only through environment/Compose secret injection or an owner-readable gitignored runtime file. They never use repository defaults and are not stored in source, the dashboard database, browser payloads, operation receipts, or logs.
+The Dovecot operator and Stalwart management secrets are generated during local setup and enter the Ktor process only through environment/Compose secret injection or an owner-readable gitignored runtime file. They never use repository defaults and are not stored in source, SQLite, browser payloads, operation receipts, or logs. Their protected provider IDs are excluded from ordinary account CRUD.
 
-Rotation stages and probes a new credential, atomically switches the backend reference, restarts or reloads the dependent adapter, revokes the old credential, and negatively verifies the old value. The management and mail-operator Account IDs are immutable protected resources and are excluded from ordinary account CRUD by provider ID, not only by display address.
+Dashboard-owned Stalwart AppPasswords live in:
+
+- ciphertext snapshot: `debug-dashboard/.runtime/stalwart/app-passwords.v1.enc`;
+- 256-bit AES key: `debug-dashboard/.runtime/keys/stalwart-app-passwords.v1.key`.
+
+The implementation uses only JDK cryptography: AES-256-GCM with a fresh nonce for every snapshot rewrite and format/store identity as associated data. Directories are owner-only and files are mode `0600` on supported POSIX filesystems. The fixed paths reject symlinks and non-regular files. Snapshot writes use a file lock, restrictive same-directory temporary file, fsync, and atomic replace.
+
+This encryption is an accidental-disclosure guard for a trusted test sandbox, not a defense against another process running as the repository owner. The key and ciphertext are gitignored, excluded from SQLite, diagnostic exports, default Stalwart backups, and Clear Local History. There is no Keychain, KMS, shared-team vault, automatic expiry, or unattended rotation in the first release.
+
+The snapshot is keyed by immutable Account ID and records a store UUID, revision, provider credential ID, reserved dashboard description/generation, lifecycle phase, and mutable secret bytes. It holds one active value and, only during rotation, one staged value. If the key or snapshot is lost or unreadable, the dashboard does not invent a replacement key over existing data; it marks affected Accounts for re-enrollment. If Stalwart is unavailable or state is ambiguous, it mutates neither side and reports reconciliation.
 
 Passwords supplied during account creation or reset are request-scoped:
 
@@ -258,6 +294,7 @@ All endpoints are under `/api/v1`. Resource reads are synchronous; mutations ret
 | `GET /bootstrap` | authenticated dashboard version, readiness, capabilities, retention, and session metadata |
 | `/accounts` | list, inspect, create logical/provider instances |
 | `/accounts/{address}/providers/{profile}` | provider detail, credential reset, delete |
+| `/accounts/{address}/providers/stalwart-jmap/mail-access` | safe enrollment status plus enroll, rotate, repair, or revoke actions |
 | `/mailboxes` | list, create, update, delete |
 | `/messages` | query, structured read, raw download |
 | `/message-actions` | read/unread, flag/unflag, move, copy, trash, permanent delete |
@@ -310,6 +347,10 @@ Provider receipts separate the requested logical postcondition from ancillary ve
 
 Retry is offered only when its inputs still exist. After a request-scoped password or completed upload has been discarded, the UI asks the user to supply the secret or message source again and creates a linked retry operation; it never implies the ledger can replay secret material it did not retain.
 
+Ordinary Stalwart mail operations acquire a lease on the active AppPassword generation from the encrypted snapshot. An in-flight operation may finish with its leased generation while a manual rotation switches new operations to the successor. A missing, unreadable, revoked, or mismatched credential does not trigger password fallback; it produces a typed mail-access recovery result.
+
+Enrollment, repair, and rotation cannot be replayed after their request-scoped normal password has been discarded. Their safe Account ID, provider credential ID, generation, and lifecycle outcome may be recorded, but neither the normal password nor AppPassword value enters the ledger.
+
 Cancellation is cooperative between provider calls. It cannot interrupt an atomic remote method halfway through. An operation still marked running after a server restart transitions to `reconciliationRequired` with a server-interruption reason before it may be retried.
 
 ### Local persistence
@@ -321,6 +362,8 @@ A gitignored SQLite database stores:
 - correlation identifiers;
 - reconciliation links;
 - bounded redacted event history.
+
+SQLite never stores the AppPassword snapshot, its key, or raw provider credentials. Clear Local History affects only SQLite and the redacted event cache; removing dashboard mail access is a separate explicit provider operation.
 
 Default bounds:
 
@@ -339,8 +382,9 @@ The UI exposes retention status and a deliberate Clear Local History action.
 1. Validate canonical address, selected profiles, password policy, domain, and duplicates.
 2. Preflight all selected providers before mutating either.
 3. Create each provider instance under the account lock.
-4. Verify login and baseline capabilities.
-5. Refresh the logical registry and publish provider-specific results.
+4. Provision any provider-specific dashboard mail credential while the request-scoped password is available.
+5. Verify login and baseline capabilities.
+6. Refresh the logical registry and publish provider-specific results.
 
 Dovecot creation:
 
@@ -361,17 +405,22 @@ Stalwart creation:
 - discover the management/JMAP endpoint rather than hardcoding `/api`;
 - query or create the required `Domain`;
 - create `x:Account` with `@type: User`, local-part `name`, `domainId`, User role, inherited permissions, and an internal Password credential;
-- verify the user's JMAP Session and required account capabilities;
+- authenticate as that exact user with the request-scoped normal password, create the mail-only dashboard AppPassword, and capture its read-once value directly into the encrypted snapshot;
+- verify the user's JMAP Session and required account capabilities through the AppPassword;
 - ensure a usable submission Identity is available.
+
+If the Account exists but AppPassword creation, local capture, or verification fails, the Account is not automatically destroyed. The provider result is truthful, mail access becomes `recoveryRequired`, and retry asks for the normal password again.
 
 #### Change password
 
 The user may reset one or both provider instances with the same new value. Outcomes remain separate.
 
 - Dovecot atomically replaces the target password hash, flushes auth state, kicks active sessions, and verifies the new password. It verifies the old password fails only when that secret is supplied request-scoped or owned by the disposable acceptance test.
-- Stalwart fetches the target Account, deliberately updates only the Password credential while preserving unrelated credentials, then verifies reauthentication with the new password. It verifies the old password fails only when that secret is supplied request-scoped or owned by the disposable acceptance test.
+- Stalwart fetches the target Account, deliberately updates only the Password credential while preserving unrelated credentials, then verifies reauthentication with the new password. It verifies the old password fails only when that secret is supplied request-scoped or owned by the disposable acceptance test. The dashboard AppPassword remains a separate credential and is re-probed rather than silently rotated.
 
 A password reset does not claim to revoke unrelated OAuth access or refresh tokens unless the provider proves that behavior.
+
+The Stalwart form states that normal-password reset preserves dashboard mail access. A separate Rotate dashboard access action may reuse the new password during that same request; otherwise rotation remains a later explicit action.
 
 #### Delete
 
@@ -389,6 +438,8 @@ For Stalwart, `x:Account/set` returning the ID in `destroyed` proves synchronous
 - observed `Failed` produces `reconciliationRequired`;
 - disappearance after the matching task was observed, plus failed Account lookup and authentication, confirms completion;
 - if the task completes before it can be observed, logical account deletion may succeed but physical cleanup is labeled `unverified`, never “confirmed.”
+
+The Stalwart deletion preview also identifies the dashboard mail-access generation that will become invalid. After principal absence is proven, the adapter negatively probes the captured AppPassword and erases the Account-ID record from the encrypted snapshot. Provider deletion with failed local erasure is `reconciliationRequired`, not a failed provider deletion. Recreating the same address with a new Account ID never reuses the old record.
 
 Dovecot account deletion atomically removes the address from the canonical eligibility set, invalidates or rejects its mock OAuth tokens and refresh path, flushes auth state, and kicks sessions. Password login, OAuth login, master targeting, `doveadm` targeting, and LMTP user lookup must all reject the deleted address. Optional mailbox purge is a separate explicit choice performed through supported `doveadm` operations, never direct `vmail/` edits. If data is retained, the UI warns that recreating the same address may reattach the inert mailbox.
 
@@ -417,7 +468,7 @@ Two modes are always separate:
 
 Receipts identify the actual path and include available Message-ID, queue ID, mailbox/object ID, state, timing, and linked evidence.
 
-Delivery has two separately visible outcomes: provider acceptance and arrival in the selected registered target mailbox. Acceptance fixtures use a unique Message-ID and operation marker. For Dovecot, the adapter follows the Postfix queue ID through LMTP evidence and then fetches the marker from the recipient mailbox. For Stalwart, it tracks per-recipient `deliveryStatus` and independently impersonates the recipient to fetch the marker through JMAP.
+Delivery has two separately visible outcomes: provider acceptance and arrival in the selected registered target mailbox. Acceptance fixtures use a unique Message-ID and operation marker. For Dovecot, the adapter follows the Postfix queue ID through LMTP evidence and then fetches the marker from the recipient mailbox. For Stalwart, the sender's AppPassword drives import/submission and each recipient's own dashboard AppPassword drives arrival read-back. A recipient without ready dashboard mail access may receive mail, but the baseline operation cannot claim verified arrival until that Account is enrolled.
 
 For the local baseline, the operation reaches `succeeded` only after the target provider can relist and read the delivered message. An accepted or queued submission without confirmed local arrival remains running while status is available, then becomes failed or `reconciliationRequired` with the acceptance receipt preserved; `unknown` is not treated as arrival.
 
@@ -435,6 +486,7 @@ Dovecot:
 Stalwart:
 
 - list with `Mailbox/get`;
+- authenticate every call with the selected Account's active AppPassword generation;
 - use `role` for system mailbox meaning and preserve `myRights`;
 - create/update/delete with `Mailbox/set` and `ifInState`;
 - default deletion uses `onDestroyRemoveEmails: false`;
@@ -442,7 +494,7 @@ Stalwart:
 
 ### 10.4 Message list and read
 
-Dovecot queries use UID-based paging and retain UIDVALIDITY. Stalwart chains `Email/query` to `Email/get` and keeps query state distinct from Email state.
+Dovecot queries use UID-based paging and retain UIDVALIDITY. Stalwart uses the selected Account's active AppPassword, chains `Email/query` to `Email/get`, and keeps query state distinct from Email state. Missing or unhealthy dashboard mail access returns the typed enrollment/recovery state before any mail method call.
 
 The reader supports:
 
@@ -469,7 +521,7 @@ Baseline single and batch operations:
 
 Dovecot uses UID commands with UIDVALIDITY. MOVE is required for the baseline profile; broad EXPUNGE is never used as an unsafe fallback.
 
-Stalwart uses `Email/set` keyword and mailbox-membership patches with `ifInState`. Same-account copy adds destination membership when `maxMailboxesPerEmail` allows it. Cross-account `Email/copy` remains explicitly non-atomic when followed by source deletion.
+Stalwart uses the selected Account's active AppPassword for `Email/set` keyword and mailbox-membership patches with `ifInState`. Same-account copy adds destination membership when `maxMailboxesPerEmail` allows it. Cross-account `Email/copy` remains explicitly non-atomic when followed by source deletion.
 
 Batch results remain itemized. On stale state or UIDVALIDITY change, the affected resource refreshes, successful items remain applied, and failed selections remain selected for deliberate retry.
 
@@ -483,6 +535,8 @@ Batch results remain itemized. On stale state or UIDVALIDITY change, the affecte
 Community-edition structured Log access is optional enrichment; Docker stdout remains the baseline. Enterprise-only trace history, metric history, or live telemetry is not required.
 
 The dashboard never calls `x:Log/set`.
+
+Stalwart mail activity is direct ordinary-account authentication, not an operator-target chain. Log redaction recognizes the v0.16 AppPassword form, Basic authorization values, normal passwords, management API keys, and secret-store errors before parsing or correlation. Account-scoped logs still work for unenrolled Accounts when server events identify them; enrollment controls only dashboard mail access.
 
 ### Normalized event
 
@@ -528,7 +582,7 @@ Primary destinations:
 
 ### 12.2 Account registry
 
-The registry supports search, profile/status filters, provider capability markers, protected identities, and account create/delete entry points.
+The registry supports search, profile/status filters, provider capability markers, protected identities, Stalwart mail-access readiness, and account create/delete entry points.
 
 Account creation uses a progressive side sheet:
 
@@ -538,6 +592,8 @@ Account creation uses a progressive side sheet:
 4. review and create.
 
 Unsupported combinations are absent, not merely selectable with a warning.
+
+New Stalwart Accounts show dashboard-mail provisioning as part of create. Existing Accounts may show **Enable dashboard mail access**, which asks for the normal password for that request only. Ready Accounts expose explicit Rotate and Remove dashboard access actions; unhealthy Accounts expose Repair. The browser never receives or displays the AppPassword value. Protected identities expose none of these actions.
 
 ### 12.3 Evidence Split workspace
 
@@ -550,7 +606,7 @@ The wide composition contains:
 5. selected message, provider-native receipt, and vertical evidence inspector on the right;
 6. contextual recorder strip across the lower edge.
 
-Only one provider's mailbox state is active at a time; channel plates behave as accessible tabs and retain their independent readiness state.
+Only one provider's mailbox state is active at a time; channel plates behave as accessible tabs and retain their independent readiness state. A Stalwart plate in `enrollmentRequired` or `recoveryRequired` keeps account administration and evidence reachable while replacing mail actions with the corresponding enrollment or repair action.
 
 Moving the selected trace cursor updates the evidence inspector and highlights the related message or operation. Selection is conveyed through text, geometry, and focus—not color alone.
 
@@ -587,6 +643,8 @@ The trace is never removed on small screens; it becomes a reachable full-width s
 
 ## 13. Security and Safety
 
+This is a local test-email provider for trusted developers reproducing client/provider issues. A teammate or process with the same operating-system identity, repository access, Docker control, or access to `.runtime` is trusted and outside the threat model. The design keeps enough isolation to avoid accidental data loss, accidental secret disclosure, browser-origin mistakes, and cross-account test contamination; it does not add production IAM, KMS, hostile-user isolation, security audit trails, or public-service hardening.
+
 ### Local HTTP boundary
 
 - Bind to loopback only.
@@ -607,11 +665,13 @@ The trace is never removed on small screens; it becomes a reachable full-width s
 - Repository fixtures are selectable only under `mails/`.
 - Temporary uploads use generated names in a dedicated gitignored directory.
 - Never modify `vmail/` or `stalwart-data/` directly.
+- Stalwart has no dashboard mail-operator principal or `impersonate` permission; each ordinary Account's AppPassword is server-bound to that Account.
 
 ### Content and secret boundary
 
-- Redact passwords, bearer tokens, Basic headers, cookies, recovery credentials, API keys, and known secret fields before storage or broadcast.
+- Redact normal passwords, Stalwart `app_` credentials, bearer tokens, Basic headers, cookies, recovery credentials, API keys, root-key material, and known secret fields before storage or broadcast.
 - Apply redaction before parsing failures can emit raw payloads.
+- Keep the AppPassword ciphertext and key at fixed gitignored owner-only paths outside SQLite and exports. Encryption protects accidental store-only copies; it is not claimed to resist the trusted repository owner.
 - Sanitize HTML, block remote content, isolate rendering, and constrain downloads.
 - Destructive account, mailbox, and permanent-message deletion require preview plus explicit confirmation.
 - Stalwart account deletion and any orphan-removing mailbox deletion are labeled irreversible.
@@ -636,17 +696,19 @@ Before dashboard provider implementation:
 2. Back up existing Stalwart state before migration; never edit RocksDB directly.
 3. Replace legacy TOML/REST management assumptions with the v0.16 object model.
 4. Retain the internal directory so password changes are real; layer OAuth/OIDC as an authentication flow rather than an external account directory.
-5. Bind the Stalwart host port to loopback and verify management credential IP restrictions against the source address Stalwart actually observes through Docker.
+5. Bind the Stalwart host port to loopback and record the source address Stalwart observes through Docker; IP-restrict credentials only if that local path is stable.
 6. Establish an immutable protected management Account with an API key, permission `Replace`, only Account get/query/create/update/destroy, Domain get/query/create, Task get/query, and optional Log get/query permissions, and no impersonation or mail permissions. The exact v0.16.14 permission names are captured by the contract probe rather than represented by a wildcard grant.
-7. Establish a separate immutable protected mail operator with a normal Password credential and only `authenticate` plus `impersonate`; app passwords are not accepted as a substitute.
-8. Inject both secrets from environment/Compose secrets or owner-readable gitignored files and prove the stage–probe–switch–revoke rotation sequence.
-9. Discover and use the JMAP Session's `apiUrl`, `uploadUrl`, and `downloadUrl`.
-10. Contract-test Account/Domain management, password reset, Mailbox/Email mutations, raw import, Identity selection, import-to-submission chaining, local-only recipient routing and mailbox arrival, structured Log access, and operator impersonation.
-11. Run a negative authorization matrix: management cannot impersonate or access user mail; the operator cannot invoke Account/Domain/Task/Log management, impersonate either protected identity, or use wrong, old, expired, or non-loopback credentials; an ordinary disposable target succeeds. In particular, `management%operator` must fail at the server, not merely in dashboard code.
-12. Destroy a data-bearing disposable Account and prove `destroyed` means principal removal plus scheduled cleanup; observe matching `DestroyAccount` Pending/Retry/Failed/disappearance semantics and the fast-completion `unverified` path without inventing a succeeded Task state.
-13. If scoped impersonation, role isolation, task observation, or required Community-edition behavior is unavailable, stop for a design decision.
+7. Prove an ordinary Account authenticated with its request-scoped normal password can create a server-generated AppPassword, the secret is returned only on creation and cannot be changed, and at least two credentials may coexist for bounded manual rotation.
+8. Prove the management API key without `impersonate` cannot create or use another Account's AppPassword for mail, but can revoke the exact dashboard credential through an optimistic Account update while preserving the normal password and every unrelated credential.
+9. Give the dashboard AppPassword permission `Replace` with only the exact JMAP authentication/mail/blob/Identity/submission permissions required by the baseline. Prove it cannot impersonate, manage Accounts/Domains/Tasks/Logs, change normal passwords, or create/update/destroy AppPasswords.
+10. Prove the JDK-only encrypted snapshot can capture the read-once secret, reload it after restart, reject a wrong key or malformed snapshot, atomically switch a manually staged successor, and mark a missing/revoked record for re-enrollment without exposing values.
+11. Discover and use the JMAP Session's `apiUrl`, `uploadUrl`, and `downloadUrl`.
+12. Contract-test direct per-account Mailbox/Email mutations, raw import, Identity selection, import-to-submission chaining, local-only recipient routing and mailbox arrival, password reset with AppPassword preservation, structured Log access, manual AppPassword rotation/recovery, and old-credential rejection.
+13. Run a negative matrix for wrong Account, protected Account, management Account, missing/revoked credential, and cross-account credential use. No fixture, Account, role, or API key may have `impersonate`.
+14. Destroy a data-bearing disposable Account, prove its captured AppPassword fails, erase its local record, and observe matching `DestroyAccount` Pending/Retry/Failed/disappearance semantics plus the fast-completion `unverified` path without inventing a succeeded Task state.
+15. If direct AppPassword mail access, targeted revocation, two-credential overlap, required Community-edition behavior, or safe re-enrollment cannot be demonstrated, stop for a design decision.
 
-The existing v0.15 store may be migrated through Stalwart's supported process. A destructive fresh reset is a separate, explicit user choice and is not implied by this spec.
+The existing v0.15 store may be migrated through Stalwart's supported process. Migrated ordinary Accounts begin `enrollmentRequired` because Stalwart cannot reproduce a read-once AppPassword value. A destructive fresh reset is a separate, explicit user choice and is not implied by this spec.
 
 ### Gate 0C — Dovecot operator access
 
@@ -671,15 +733,15 @@ Against a fresh disposable Compose environment, every row must pass. “Both pro
 
 | Workflow | Proof required on both profiles | Dovecot-specific evidence | Stalwart-specific evidence |
 |---|---|---|---|
-| Registry and profile selection | List logical accounts; create Dovecot-only, Stalwart-only, and dual-provider addresses; switch provider tabs without state leakage; deleting one instance retains the other | passwd-file projection and IMAP readiness match the Dovecot tab | `x:Account` projection and JMAP readiness match the Stalwart tab |
+| Registry and profile selection | List logical accounts; create Dovecot-only, Stalwart-only, and dual-provider addresses; switch provider tabs without state leakage; deleting one instance retains the other | passwd-file projection and IMAP readiness match the Dovecot tab | `x:Account` projection plus `ready`/enrollment/recovery mail-access state match the Stalwart tab |
 | Server logs | Query retained history, start live tail, pause/resume, reconnect, and see activity caused by the test | auth, IMAP, LMTP, and delivery events appear from allowlisted stdout | management, JMAP, and submission events appear from stdout; `x:Log` enriches only when enabled |
 | Account-scoped logs | Generate interleaved activity for two accounts; the selected account includes its exact/linked events, excludes the other account's deterministic events, and labels merely time-adjacent evidence | queue/session/account chains retain their confidence | account/object/operation chains retain their confidence |
-| Create account | Select the named profile, create the provider instance, verify login and mandatory capabilities, and show a browser-visible operation receipt | new IMAP login and capabilities succeed | new JMAP Session, internal password, Identity, and capabilities succeed |
-| Message source × path | For authored text, uploaded EML, and a deterministic random scenario, execute both Direct append and Deliver to a newly registered target; preview, receipt, resulting content, and replay seed/source remain truthful | append is readable after `doveadm save`; delivery is accepted by Postfix and arrives through Dovecot | append is readable after upload + `Email/import`; delivery uses `EmailSubmission` and reports both arrival/status and Sent filing truthfully |
+| Create account | Select the named profile, create the provider instance, provision dashboard mail access while the request password exists, verify login and mandatory capabilities, and show a browser-visible operation receipt | new IMAP login and capabilities succeed | internal Password, mail-only AppPassword capture, JMAP Session, Identity, and capabilities succeed without exposing either secret |
+| Message source × path | For authored text, uploaded EML, and a deterministic random scenario, execute both Direct append and Deliver to a newly registered target; preview, receipt, resulting content, and replay seed/source remain truthful | append is readable after `doveadm save`; delivery is accepted by Postfix and arrives through Dovecot | sender import/submission and recipient arrival read-back use their respective Account-bound AppPasswords; status and Sent filing remain truthful |
 | Folders | List, create, relist, and delete an empty folder; exercise non-empty/child safety and destructive confirmation | IMAP delimiter, special-use, and UID context survive refresh | `Mailbox/get/set`, state, rights, role, and orphan-removal safety survive refresh |
 | List and read | Page and relist messages; read structured plain text, sanitized HTML, attachments, and raw RFC 5322; verify remote content remains blocked | UIDVALIDITY and UID remain attached to results | Email id, blob id, body parts, and current Email state remain distinct |
-| Password reset | Perform an administrator reset, verify reauthentication with the new credential, and—when the old credential is test-owned or supplied for this request—verify it fails | supported password hash is replaced, auth caches are flushed, and affected sessions are kicked | unrelated credentials are preserved while only the Password credential changes; no unrelated OAuth-token revocation is claimed |
-| Delete account | Show counts and irreversible/purge semantics, require typed confirmation, delete one or both provider instances, and prove the deleted identity cannot log in or receive new mail | password, OAuth, operator, `doveadm`, and LMTP paths reject the identity; delivery cannot recreate it; retained/purged data is explicit | `destroyed` principal and failed Account/Session access are verified; observed cleanup-task disappearance confirms purge, while Pending/Retry/Failed/not-observed outcomes remain truthful |
+| Password reset | Perform an administrator reset, verify reauthentication with the new credential, and—when the old credential is test-owned or supplied for this request—verify it fails | supported password hash is replaced, auth caches are flushed, and affected sessions are kicked | only the normal Password changes; the dashboard AppPassword and unrelated credentials are preserved and re-probed unless explicit rotation is selected |
+| Delete account | Show counts and irreversible/purge semantics, require typed confirmation, delete one or both provider instances, and prove the deleted identity cannot log in or receive new mail | password, OAuth, operator, `doveadm`, and LMTP paths reject the identity; delivery cannot recreate it; retained/purged data is explicit | `destroyed` principal, failed Account/AppPassword access, and local-record erasure are verified; cleanup Pending/Retry/Failed/not-observed outcomes remain truthful |
 | Message mutations | Apply and reverse read/unread and flag/unflag; move, copy, move to Trash, remove membership where supported, and permanently delete; relist after each operation and inspect itemized batch failures | UID commands honor UIDVALIDITY; MOVE is real and no broad EXPUNGE fallback occurs | keyword/membership patches honor `ifInState`; permanent destroy and partial `set` results remain explicit |
 | Operation evidence | Every mutation exposes provider/item outcome, safe native receipt, correlated evidence, and reconciliation after injected partial failure | queue, session, UID, and mailbox identifiers are safe and traceable | operation, object, state, and submission identifiers are safe and traceable |
 
@@ -692,6 +754,8 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 - address, mailbox, and filename validation;
 - eligibility-file parsing, hashed-entry validation, and atomic rewrite planning;
 - fixed runtime-path, regular-file, non-symlink, mode, and ownership validation;
+- AES-GCM AppPassword snapshot round-trip, tamper/wrong-key rejection, atomic rewrite, and account-ID binding;
+- Stalwart mail-access readiness and active/staged lifecycle transitions;
 - provider-key serialization;
 - MIME parsing/generation and deterministic seeds;
 - log redaction before and after parsing;
@@ -706,7 +770,8 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 - live Dovecot password/OAuth/userdb/LMTP/master eligibility and admin tests;
 - live Postfix SMTP receipt tests;
 - live Stalwart v0.16.14 management/mail/submission tests;
-- Stalwart state mismatch, partial `Foo/set`, Identity, Log, DestroyAccount Task, and management/operator permission behavior;
+- Stalwart AppPassword create/capture/direct-auth/targeted-revoke/rotation/recovery tests with no impersonation;
+- Stalwart state mismatch, partial `Foo/set`, Identity, Log, DestroyAccount Task, and management/mail-credential permission behavior;
 - Docker log follow/reconnect and service allowlist behavior.
 
 ### Browser tests
@@ -714,6 +779,7 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 Browser automation is authored from Kotlin/JVM and invoked through the Kotlin Toolchain, subject to Gate 0A. It covers:
 
 - account creation and provider switching;
+- Stalwart existing-account enrollment, explicit rotation, recovery, and protected-account denial;
 - one-time session bootstrap, reload-time CSRF reacquisition, replay rejection, expiry, CSRF, Host/Origin, and Fetch Metadata enforcement;
 - Message Lab append and delivery;
 - folder and message actions;
@@ -738,6 +804,7 @@ No JavaScript/TypeScript test project is introduced.
 - unavailable Identity or submission capability;
 - stale log cursor and SSE resync;
 - Stalwart deletion task retry/failure and completion-before-observation;
+- AppPassword create response lost before local capture, missing/corrupt snapshot, revoked active credential, rotation quota exhaustion, and restart during a staged rotation;
 - redaction parser receives malformed native output.
 
 ## 16. Implementation Sequence Constraints
@@ -767,7 +834,9 @@ These are implementation gates, not unresolved product choices:
 
 - Kotlin Toolchain Wasm asset/bootstrap and browser-test ergonomics.
 - Stalwart documentation inconsistency between generated `/api` examples and the v0.16 `/jmap`/Session model.
-- Server-enforced Stalwart impersonation target scoping, especially the protected management target.
+- Exact minimal v0.16.14 AppPassword permission set for the required JMAP mail, blob, Identity, and submission calls.
+- Non-impersonating management revocation of one dashboard credential while preserving every unrelated credential.
+- Stable AppPassword overlap/quota, read-once capture, cache invalidation, and restart reconciliation behavior.
 - Stalwart DestroyAccount task observation when cleanup completes before the first query.
 - Dovecot eligibility migration and operator-ingress isolation across the actual Docker Desktop network path.
 - Provider-side local-only routing and mailbox-arrival correlation.
@@ -787,6 +856,10 @@ These are implementation gates, not unresolved product choices:
 - [Stalwart management overview](https://stalw.art/docs/management/)
 - [Stalwart Account object](https://stalw.art/docs/ref/object/account/)
 - [Stalwart AccountPassword object](https://stalw.art/docs/ref/object/account-password/)
+- [Stalwart AppPassword object](https://stalw.art/docs/ref/object/app-password/)
+- [Stalwart AppPassword authentication](https://stalw.art/docs/auth/authentication/app-password/)
+- [Stalwart v0.16.14 credential implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.14/crates/common/src/auth/credential.rs)
+- [Stalwart v0.16.14 authentication implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.14/crates/common/src/auth/authentication.rs)
 - [Stalwart Task object](https://stalw.art/docs/ref/object/task/)
 - [Stalwart Log object](https://stalw.art/docs/ref/object/log/)
 - [Stalwart API-key authentication](https://stalw.art/docs/auth/authentication/api-key/)
