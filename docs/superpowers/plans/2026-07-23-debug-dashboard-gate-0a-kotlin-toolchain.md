@@ -4,7 +4,7 @@
 
 **Goal:** Prove that the installed Kotlin Toolchain can build and test the required Compose/Wasm SPA and Ktor/JVM host without Gradle, npm, generated Node tooling, React, or TypeScript.
 
-**Architecture:** Initialize the project from the official Ktor template, retain one root wrapper, and reshape it into the approved three-module graph. Serve the Toolchain linker output directly from Ktor through a validated asset root. A minimal Compose shell exercises browser history, same-origin JSON, reconnectable SSE, and real keyboard/focus semantics in headless Chrome before any mail feature exists.
+**Architecture:** Initialize the project from the official Ktor template, retain one root wrapper, and reshape it into the approved three-module graph. Serve the Toolchain linker output and any empirically required, version-pinned Maven runtime resources through one validated Ktor asset manifest; do not add npm, Node tooling, or checked-in JavaScript to compensate for Toolchain preview gaps. A minimal Compose shell exercises browser history, same-origin JSON, reconnectable SSE, and real keyboard/focus semantics in headless Chrome before any mail feature exists.
 
 **Tech Stack:** Kotlin Toolchain 0.11.1, Kotlin 2.3.x, Compose Multiplatform, Ktor, kotlinx.serialization, Selenium Java 4.46.0, Chrome with WasmGC.
 
@@ -169,7 +169,9 @@ Expected: reducer tests pass. If Toolchain cannot execute Wasm tests in the inst
 ./kotlin build --module dashboard-web
 ```
 
-Expected: successful linkage with at least one `.wasm`, one entry `.mjs`, every relative code companion imported by that entry, and every separately emitted Compose runtime resource under the Toolchain build directory. Record whether the gate resource is embedded in Wasm or emitted separately and, if separate, its path/MIME. A disposable 0.11.1 string-resource probe embedded the value and still rendered it through generated accessors; later font/image builds must be observed independently. For reference, the code-only 0.11.0 probe emitted:
+Expected: successful linkage with at least one `.wasm` and one entry `.mjs`. Walk the complete static/dynamic import and `new URL(..., import.meta.url)` graph and classify every referenced companion as linker-emitted, separately prepared by Toolchain, supplied by a version-pinned Maven runtime artifact, or unresolved. Record whether the gate resource is embedded in Wasm or emitted separately and, if separate, its path/MIME. Missing companions are a Gate 0A finding: do not hide them by copying generated JavaScript into source control or introducing npm/Node tooling. A disposable 0.11.1 string-resource probe embedded the value and still rendered it through generated accessors; later file/font/image builds must be observed independently.
+
+The frozen 0.11.1 result is known: the linker emits the four application files below, while `dashboard-web.import-object.mjs` imports an unstaged `./skiko.mjs` and bare `@js-joda/core`; Skiko in turn requires `skiko.wasm`; and `gate-proof.txt` exists only in the prepared Compose-resource artifact. Task 4 must validate the recovery for these exact findings rather than treating missing companions as hypothetical. For reference, the code-only 0.11.0 probe emitted:
 
 ```text
 build/tasks/_dashboard-web_linkWasmJs/dashboard-web.wasm
@@ -178,9 +180,9 @@ build/tasks/_dashboard-web_linkWasmJs/dashboard-web.import-object.mjs
 build/tasks/_dashboard-web_linkWasmJs/dashboard-web.js-builtins.mjs
 ```
 
-Do not turn that reference directory into production logic: the Toolchain documents the task output location as unstable. Observe and record the exact 0.11.1 asset directory and basenames after the first build.
+Do not turn that reference directory into production logic: the Toolchain documents the task output location as unstable. Observe and record the exact 0.11.1 asset directory and basenames after the first build. If 0.11.1 omits runtime companions that are already resolved as Maven artifacts, Task 4 may test one Kotlin-only recovery: Ktor can expose those exact, pinned classpath resources alongside the linker files. The gate still passes only if Task 5 proves that combined manifest in a real browser.
 
-Run one explicit `./kotlin build --module dashboard-web --variant release` probe and record whether Toolchain 0.11.1 still reports that Wasm ignores variants. If it does, do not pretend a separate release variant exists: for this local product, the plain linked files are the deployable artifact. Gate evidence must prove they run without a dev server or hot-reload process.
+Run one explicit `./kotlin build --module dashboard-web --variant release` probe and record whether Toolchain 0.11.1 still reports that Wasm ignores variants. If it does, do not pretend a separate release variant exists: for this local product, the linked files plus the validated runtime-resource manifest are the deployable bundle candidate. Gate evidence must prove that bundle runs without a dev server or hot-reload process.
 
 - [ ] Add filenames, byte sizes, and SHA-256 hashes to the gate report. Commit:
 
@@ -194,6 +196,8 @@ git commit -m "feat: link minimal Compose Wasm dashboard"
 **Files:**
 
 - Create: `debug-dashboard/dashboard-server/resources/web/index.html`
+- Modify: `debug-dashboard/dashboard-server/module.yaml`
+- Modify: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/Main.kt`
 - Replace: `debug-dashboard/dashboard-server/src/Application.kt`
 - Replace: `debug-dashboard/dashboard-server/src/Routing.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/web/WebAssetBundle.kt`
@@ -204,25 +208,28 @@ git commit -m "feat: link minimal Compose Wasm dashboard"
 
 - [ ] Write failing tests that require `WebAssetBundle` to:
 
-  - accept one configured, canonical directory;
+  - accept one configured, canonical linker directory and one configured, canonical prepared-Compose-resource directory;
   - accept one explicitly configured entry `.mjs`;
   - recursively resolve the entry's complete relative static `import`, literal dynamic `import(...)`, `export from`, and `new URL(..., import.meta.url)` closure;
-  - require every referenced `.mjs` and `.wasm` asset, including at least one `.wasm`, without assuming a fixed companion count or basename;
-  - recursively enumerate every additional regular file emitted beneath that exact linker-output root into an immutable runtime-resource manifest, including nested Compose resources that code may resolve dynamically;
-  - reject absolute/network imports, traversal, symlinks, missing references, duplicate normalized paths, and paths outside the configured project;
-  - map `.wasm`, `.mjs`, CSS, JSON/text, SVG/raster images, and WOFF/WOFF2/TTF/OTF fonts to explicit safe MIME types; an observed runtime extension without a reviewed mapping fails startup instead of being silently omitted.
+  - resolve relative runtime companions missing from the linker directory only from an explicit, version-pinned classpath-resource allowlist; for the observed 0.11.1 graph, pin JAR-root `skiko.mjs` (SHA-256 `5dc3302763d61014d4a3277727f6e1af041741ae1f0efcc2acc21f2924cad99e`) and JAR-root `skiko.wasm` (SHA-256 `69afd1fba0567fc79515d97bac5c0670cfeb180284823f986199637f154a9bbe`) from `org.jetbrains.skiko:skiko-js-wasm-runtime:0.9.37.4`;
+  - resolve the observed bare `@js-joda/core` import only through an authored import-map entry targeting `js-joda.esm.js` from `org.webjars.npm:js-joda__core:3.2.0`; the exact classpath resource is `META-INF/resources/webjars/js-joda__core/3.2.0/dist/js-joda.esm.js` with SHA-256 `a716a37f4c3bb47f8795688e1cd6451130a08d825d8a6df664ef72b349ec445b`; reject any unreviewed bare specifier;
+  - require every referenced `.mjs` and `.wasm` asset, including both the application and Skiko Wasm binaries, without assuming a fixed application-companion count or basename;
+  - recursively enumerate every additional regular file beneath the prepared Compose resource root into an immutable `/assets/composeResources/<generated-package>/...` manifest; assert the observed `files/gate-proof.txt` bytes have SHA-256 `7b0f843ebd49d2709bcd8e3d1021db98e68413823647895d8377a6657f5e6960`;
+  - recognize the fixed Kotlin/Skiko non-browser dynamic imports only in their reviewed, environment-dead generated branches; fail on a new generated loader shape rather than broadly allowing `node:`, network, or arbitrary bare imports;
+  - reject unreviewed absolute/network/bare imports, traversal, symlinks, missing references, duplicate normalized paths, and filesystem paths outside the configured project;
+  - map `.wasm`, `.mjs`, `.js`, CSS, JSON/text, SVG/raster images, and WOFF/WOFF2/TTF/OTF fonts to explicit safe MIME types; both `.mjs` and `.js` use `text/javascript`, and an observed runtime extension without a reviewed mapping fails startup instead of being silently omitted.
 
-- [ ] Implement the validator without guessing from request input. Startup requires `DASHBOARD_WEB_ASSETS` to supply the observed canonical linker-output directory and `DASHBOARD_WEB_ENTRY` to supply the observed entry basename; it fails closed if either is absent or invalid. The server exposes only files in the validated code closure plus runtime-resource manifest. Do not hardcode a private `build/tasks/_...` path or the four-file 0.11.0 probe shape into production Kotlin.
+- [ ] Add the two observed runtime artifacts as ordinary Maven dependencies in `dashboard-server/module.yaml`, resolved by the Kotlin Toolchain. Do not unpack them into tracked files. Configure Compose web resource URLs in `Main.kt` with `configureWebResources { resourcePathMapping { "/assets/$it" } }`, before creating the viewport, so history routes do not turn the generated path into `/gate/composeResources/...`. Implement the validator without guessing from request input. Startup requires `DASHBOARD_WEB_ASSETS` to supply the observed canonical linker-output directory, `DASHBOARD_WEB_RESOURCES` to supply the observed canonical prepared-resource directory, and `DASHBOARD_WEB_ENTRY` to supply the observed entry basename; it fails closed if any is absent or invalid. The server exposes only files in the validated filesystem/classpath closure plus runtime-resource manifest and verifies the pinned hashes above at startup. Do not hardcode a private `build/tasks/_...` or `build/artifacts/_...` path, the four-file 0.11.0 probe shape, or a developer cache path into production Kotlin.
 
 - [ ] Write failing Ktor tests for:
 
   - `/` and `/gate/details` returning the authored `index.html`;
-  - `/assets/<observed-entry-basename>.mjs`, every code asset in its closure, and nested text/image/font fixture resources returning correct content types;
+  - `/assets/<observed-entry-basename>.mjs`, every linker/classpath code asset in its closure, both Wasm binaries, the imported JS-Joda module specifically returning `text/javascript`, and nested text/image/font fixture resources returning correct content types;
   - `/api/v1/gate/probe` returning `GateProbe`;
   - an unknown `/api/v1/...` returning typed 404 JSON rather than SPA HTML;
   - cache policy: HTML `no-store`, fingerprint-ready assets cacheable.
 
-- [ ] Author `index.html` directly after observing the pinned link output. It must include UTF-8/viewport metadata, a named mount target, full-page/focus-visible CSS, a noscript message, and exactly one `<script type="module" src="/assets/<observed-entry-basename>.mjs"></script>`; it must not contain generated framework bootstrap code.
+- [ ] Author `index.html` directly after observing the pinned link output. It must include UTF-8/viewport metadata, a named mount target, full-page/focus-visible CSS, a noscript message, one narrow import map from `@js-joda/core` to `/assets/js-joda.esm.js`, and exactly one `<script type="module" src="/assets/<observed-entry-basename>.mjs"></script>`; it must not contain generated framework bootstrap code or any other dependency mapping.
 
 - [ ] Implement routes and run:
 
@@ -236,7 +243,8 @@ Expected: all pass.
 - [ ] Commit:
 
 ```bash
-git add debug-dashboard/dashboard-server
+git add debug-dashboard/dashboard-server \
+  debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/Main.kt
 git commit -m "feat: serve Toolchain Wasm assets from Ktor"
 ```
 
@@ -250,7 +258,7 @@ git commit -m "feat: serve Toolchain Wasm assets from Ktor"
 - Modify: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/GateApp.kt`
 - Modify: `debug-dashboard/dashboard-web/src/mail/sandbox/dashboard/web/GateState.kt`
 
-- [ ] Write a failing server test for a bounded event source that emits IDs `1`, `2`, closes deliberately, and on reconnect resumes after the supplied `Last-Event-ID`. A cursor outside the buffer must emit a typed `resync` event.
+- [ ] Write a failing server test for a bounded event source with this deterministic browser sequence: the first connection emits IDs `1`, `2` and closes; the automatic reconnect presents `Last-Event-ID: 2`, receives `3`, `4`, and closes; the source then appends `5`, `6` into its two-event buffer, evicting `3`, `4` before the next automatic reconnect; the next `Last-Event-ID: 4` is therefore outside the buffer and emits a typed `resync` event. Tests must prove the monotonic resume and stale-cursor branches without attempting to set `Last-Event-ID` from browser JavaScript.
 
 - [ ] Implement the minimal Ktor SSE endpoint and browser `EventSource` client. Browser credentials remain same-origin; no session value appears in the event URL.
 
@@ -270,18 +278,22 @@ git commit -m "feat: serve Toolchain Wasm assets from Ktor"
 ```bash
 ./kotlin build
 DASHBOARD_WEB_ASSETS="<observed-absolute-0.11.1-linker-directory>" \
+  DASHBOARD_WEB_RESOURCES="<observed-absolute-0.11.1-prepared-resource-directory>" \
   DASHBOARD_WEB_ENTRY="<observed-entry-basename>.mjs" \
   ./kotlin test \
   --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
 ```
 
-The test must start Ktor through the same production configuration loader and consume both environment values; it may not inject a test-only asset bundle or infer the entry file. Expected: pass in a current WasmGC browser using only linked static output. Record browser and driver versions in the gate report.
+The test must start Ktor through the same production configuration loader and consume all three environment values; it may not inject a test-only asset bundle or infer the entry file. Expected: pass in a current WasmGC browser using only Toolchain-linked/prepared output plus the two explicitly pinned Toolchain-resolved Maven runtime artifacts. Record browser and driver versions in the gate report.
 
 - [ ] Run the complete Toolchain suite and inspect the dependency/task graph:
 
 ```bash
-./kotlin test
+DASHBOARD_WEB_ASSETS="<observed-absolute-0.11.1-linker-directory>" \
+  DASHBOARD_WEB_RESOURCES="<observed-absolute-0.11.1-prepared-resource-directory>" \
+  DASHBOARD_WEB_ENTRY="<observed-entry-basename>.mjs" \
+  ./kotlin test
 ./kotlin show tasks
 ./kotlin show dependencies
 ```
@@ -306,7 +318,7 @@ Expected: pass; no npm/Node build task or Gradle task.
 
 - [ ] Gate decision:
 
-  - **PASS:** all five design criteria work from the plain linked artifact and Kotlin/JVM browser tests.
+  - **PASS:** all five design criteria work from the validated Toolchain-linked/prepared output and only the two explicitly pinned Maven runtime artifacts above, with Kotlin/JVM browser tests. No npm, Node build tool, checked-in/handwritten JavaScript, or Gradle path is present; ignored `.mjs` emitted by the reviewed Toolchain linker is permitted.
   - **STOP:** Compose semantics, browser loading, Ktor hosting, SSE reconnect, or Kotlin-authored automation cannot be made reliable without Gradle, npm, generated Node tooling, React, or TypeScript.
 
 Do not begin Gate 0B on `STOP`.
