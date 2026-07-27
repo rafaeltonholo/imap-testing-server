@@ -92,16 +92,30 @@ class WebAssetBundleTest {
 
     @Test
     fun acceptsOnlyTheReviewedEnvironmentDeadGeneratedLoaders() {
-        withFixture { fixture ->
-            fixture.load()
+        val alteredLoaders = mapOf(
+            "altered Node predicate" to
+                "if (maybeNode) await import(/* webpackIgnore: true */'node:module')",
+            "altered Deno predicate" to
+                "if (maybeDeno) await import('https://deno.land/std/path/mod.ts')",
+            "altered Skiko predicate" to
+                """
+                if (true) {
+                    const { createRequire: createRequire } = await import('module')
+                }
+                """.trimIndent(),
+        )
 
-            fixture.entry.writeText(
-                fixture.entry.readText() +
-                    "\nif (maybeNode) await import(/* webpackIgnore: true */'node:module')\n",
-            )
+        alteredLoaders.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.load()
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
 
-            val failure = assertFailsWith<IllegalArgumentException> { fixture.load() }
-            assertTrue(failure.message.orEmpty().lowercase().contains("unreviewed dynamic import"))
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
         }
     }
 
@@ -120,6 +134,89 @@ class WebAssetBundleTest {
             )
 
             fixture.load()
+        }
+    }
+
+    @Test
+    fun validatesExecutableModuleReferencesInsideTemplateSubstitutions() {
+        val invalidSubstitutions = mapOf(
+            "network dynamic import" to
+                "const value = `prefix ${'$'}{await import('https://example.test/runtime.mjs')}`",
+            "bare dynamic import" to
+                "const value = `prefix ${'$'}{await import('other-package')}`",
+            "nested missing dynamic import" to
+                "const value = `outer ${'$'}{`inner " +
+                    "${'$'}{await import('./missing-template.mjs')}`}`",
+            "regex-delimited network dynamic import" to
+                """
+                const value = `prefix ${'$'}{/\}/,
+                    await import('https://example.test/hidden-runtime.mjs')}`
+                """.trimIndent(),
+            "missing new URL asset" to
+                "const value = `prefix " +
+                    "${'$'}{new URL('./missing-template.wasm', import.meta.url)}`",
+        )
+
+        invalidSubstitutions.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().lowercase().contains("unreviewed") ||
+                        failure.message.orEmpty().lowercase().contains("missing"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsLexicalDecoysThatSpoofReviewedDeadLoaderPredicates() {
+        val spoofedLoaders = mapOf(
+            "node string" to
+                """
+                const decoy = "if (isNodeJs) {";
+                await import('node:module')
+                """.trimIndent(),
+            "node comment" to
+                """
+                // if (isNodeJs) {
+                await import('node:module')
+                """.trimIndent(),
+            "node ternary comment" to
+                """
+                // globalThis.module = (typeof process !== 'undefined') &&
+                // (process.release.name === 'node') ? await
+                import('node:module')
+                """.trimIndent(),
+            "Deno string" to
+                """
+                const decoy = "if (isDeno) {";
+                await import('https://deno.land/std/path/mod.ts')
+                """.trimIndent(),
+            "Deno comment" to
+                """
+                // if (isDeno) {
+                await import('https://deno.land/std/path/mod.ts')
+                """.trimIndent(),
+            "Skiko module comment" to
+                """
+                // if (false) { const { createRequire: createRequire } = await
+                import('module')
+                """.trimIndent(),
+        )
+
+        spoofedLoaders.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
         }
     }
 

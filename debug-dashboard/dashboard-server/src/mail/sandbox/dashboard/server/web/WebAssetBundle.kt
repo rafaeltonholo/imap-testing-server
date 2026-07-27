@@ -195,9 +195,8 @@ class WebAssetBundle private constructor(
             if (specifier == "./" && reference.kind == ReferenceKind.NewUrl) {
                 require(
                     fromPublicName == "skiko.mjs" &&
-                        reference.reviewContext.endsWith(
-                            """scriptDirectory=require("url").fileURLToPath(""",
-                        ),
+                        reference.reviewedLoaderContext ==
+                        ReviewedLoaderContext.SkikoDirectoryUrl,
                 ) {
                     "Unreviewed new URL directory loader shape"
                 }
@@ -379,34 +378,20 @@ class WebAssetBundle private constructor(
         private fun isReviewedEnvironmentDeadImport(
             reference: ModuleReference,
             specifier: String,
-        ): Boolean {
-            val context = reference.reviewContext
-            return when (specifier) {
-                "node:module" ->
-                    Regex("""if\s*\(\s*isNodeJs\s*\)\s*\{[^{}]*$""")
-                        .containsMatchIn(context) ||
-                        Regex(
-                            """if\s*\(\s*typeof process\s*!==\s*'undefined'\s*&&\s*""" +
-                                """process\.release\.name\s*===\s*'node'\s*\)\s*\{[^{}]*$""",
-                        ).containsMatchIn(context) ||
-                        Regex(
-                            """globalThis\.module\s*=\s*\(typeof process\s*!==\s*'undefined'\)""" +
-                                """\s*&&\s*\(process\.release\.name\s*===\s*'node'\)\s*\?\s*""" +
-                                """(?:await\s*)?$""",
-                        ).containsMatchIn(context)
+        ): Boolean = when (specifier) {
+            "node:module" ->
+                reference.reviewedLoaderContext in setOf(
+                    ReviewedLoaderContext.NodeBlock,
+                    ReviewedLoaderContext.NodeTernary,
+                )
 
-                "https://deno.land/std/path/mod.ts" ->
-                    Regex("""if\s*\(\s*isDeno\s*\)\s*\{[^{}]*$""")
-                        .containsMatchIn(context)
+            "https://deno.land/std/path/mod.ts" ->
+                reference.reviewedLoaderContext == ReviewedLoaderContext.DenoBlock
 
-                "module" ->
-                    Regex(
-                        """if\s*\(\s*false\s*\)\s*\{\s*const\s*\{\s*createRequire\s*:""" +
-                            """\s*createRequire\s*}\s*=\s*await\s*$""",
-                    ).containsMatchIn(context)
+            "module" ->
+                reference.reviewedLoaderContext == ReviewedLoaderContext.SkikoDeadBlock
 
-                else -> false
-            }
+            else -> false
         }
 
         private fun assetRoute(publicName: String): String = "/assets/$publicName"
@@ -542,8 +527,16 @@ private enum class ReferenceKind {
 private data class ModuleReference(
     val kind: ReferenceKind,
     val specifier: String,
-    val reviewContext: String,
+    val reviewedLoaderContext: ReviewedLoaderContext?,
 )
+
+private enum class ReviewedLoaderContext {
+    NodeBlock,
+    NodeTernary,
+    DenoBlock,
+    SkikoDeadBlock,
+    SkikoDirectoryUrl,
+}
 
 private class ModuleReferenceScanner(private val source: String) {
     private val tokens = tokenize(source)
@@ -577,10 +570,14 @@ private class ModuleReferenceScanner(private val source: String) {
             require((tokens.getOrNull(index + 3) as? JsToken.Punctuation)?.value == ")") {
                 "Found an unreviewed dynamic import loader shape"
             }
-            return reference(ReferenceKind.DynamicImport, value.value, import.start)
+            return reference(
+                kind = ReferenceKind.DynamicImport,
+                specifier = value.value,
+                reviewedLoaderContext = reviewedDynamicImportContext(index),
+            )
         }
         if (next is JsToken.StringLiteral) {
-            return reference(ReferenceKind.StaticImport, next.value, import.start)
+            return reference(ReferenceKind.StaticImport, next.value)
         }
         val fromIndex = findAhead(index + 1) { candidate ->
             candidate is JsToken.Identifier && candidate.value == "from"
@@ -589,7 +586,7 @@ private class ModuleReferenceScanner(private val source: String) {
         require(value is JsToken.StringLiteral) {
             "Found an unreviewed static import loader shape"
         }
-        return reference(ReferenceKind.StaticImport, value.value, import.start)
+        return reference(ReferenceKind.StaticImport, value.value)
     }
 
     private fun scanExport(index: Int): ModuleReference? {
@@ -607,7 +604,7 @@ private class ModuleReferenceScanner(private val source: String) {
         require(value is JsToken.StringLiteral) {
             "Found an unreviewed export-from loader shape"
         }
-        return reference(ReferenceKind.ExportFrom, value.value, tokens[index].start)
+        return reference(ReferenceKind.ExportFrom, value.value)
     }
 
     private fun scanNewUrl(index: Int): ModuleReference? {
@@ -652,7 +649,12 @@ private class ModuleReferenceScanner(private val source: String) {
             "Found an unreviewed non-literal new URL asset reference"
         }
         val firstArgument = firstArgumentTokens.single() as JsToken.StringLiteral
-        return reference(ReferenceKind.NewUrl, firstArgument.value, tokens[index].start)
+        val loaderContext = if (matchesBefore(index, SKIKO_DIRECTORY_URL_PREFIX)) {
+            ReviewedLoaderContext.SkikoDirectoryUrl
+        } else {
+            null
+        }
+        return reference(ReferenceKind.NewUrl, firstArgument.value, loaderContext)
     }
 
     private fun findAhead(start: Int, predicate: (JsToken) -> Boolean): Int? {
@@ -667,12 +669,171 @@ private class ModuleReferenceScanner(private val source: String) {
     private fun reference(
         kind: ReferenceKind,
         specifier: String,
-        start: Int,
+        reviewedLoaderContext: ReviewedLoaderContext? = null,
     ): ModuleReference = ModuleReference(
         kind = kind,
         specifier = specifier,
-        reviewContext = source.substring(maxOf(0, start - 512), start),
+        reviewedLoaderContext = reviewedLoaderContext,
     )
+
+    private fun reviewedDynamicImportContext(index: Int): ReviewedLoaderContext? {
+        val blockOpen = enclosingBlockOpen(index)
+        if (blockOpen != null) {
+            val blockPrefix = tokens.subList(blockOpen + 1, index)
+            if (blockPrefix.matchesExactly(NODE_BLOCK_BODY_PREFIX)) {
+                if (matchesBefore(blockOpen, NODE_NAMED_IF_PREFIX) ||
+                    matchesBefore(blockOpen, NODE_DIRECT_IF_PREFIX)
+                ) {
+                    return ReviewedLoaderContext.NodeBlock
+                }
+            }
+            if (blockPrefix.matchesExactly(DENO_BLOCK_BODY_PREFIX) &&
+                matchesBefore(blockOpen, DENO_IF_PREFIX)
+            ) {
+                return ReviewedLoaderContext.DenoBlock
+            }
+            if (blockPrefix.matchesExactly(SKIKO_DEAD_BLOCK_BODY_PREFIX) &&
+                matchesBefore(blockOpen, SKIKO_DEAD_IF_PREFIX)
+            ) {
+                return ReviewedLoaderContext.SkikoDeadBlock
+            }
+        }
+        return if (matchesBefore(index, NODE_TERNARY_PREFIX)) {
+            ReviewedLoaderContext.NodeTernary
+        } else {
+            null
+        }
+    }
+
+    private fun enclosingBlockOpen(index: Int): Int? {
+        var depth = 0
+        for (candidateIndex in index - 1 downTo 0) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.TemplateBoundary -> if (candidate.opening) return null
+                is JsToken.Punctuation -> when (candidate.value) {
+                    "}" -> depth++
+                    "{" -> if (depth == 0) return candidateIndex else depth--
+                }
+
+                else -> Unit
+            }
+        }
+        return null
+    }
+
+    private fun matchesBefore(
+        endExclusive: Int,
+        expected: List<JsTokenShape>,
+    ): Boolean {
+        val start = endExclusive - expected.size
+        if (start < 0) return false
+        return tokens.subList(start, endExclusive).matchesExactly(expected)
+    }
+
+    companion object {
+        private val NODE_NAMED_IF_PREFIX = listOf(
+            identifier("if"),
+            punctuation("("),
+            identifier("isNodeJs"),
+            punctuation(")"),
+        )
+        private val NODE_DIRECT_IF_PREFIX = listOf(
+            identifier("if"),
+            punctuation("("),
+            identifier("typeof"),
+            identifier("process"),
+            punctuation("!"),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("undefined"),
+            punctuation("&"),
+            punctuation("&"),
+            identifier("process"),
+            punctuation("."),
+            identifier("release"),
+            punctuation("."),
+            identifier("name"),
+            punctuation("="),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("node"),
+            punctuation(")"),
+        )
+        private val NODE_BLOCK_BODY_PREFIX = listOf(
+            identifier("const"),
+            identifier("module"),
+            punctuation("="),
+            identifier("await"),
+        )
+        private val DENO_IF_PREFIX = listOf(
+            identifier("if"),
+            punctuation("("),
+            identifier("isDeno"),
+            punctuation(")"),
+        )
+        private val DENO_BLOCK_BODY_PREFIX = listOf(
+            identifier("const"),
+            identifier("path"),
+            punctuation("="),
+            identifier("await"),
+        )
+        private val SKIKO_DEAD_IF_PREFIX = listOf(
+            identifier("if"),
+            punctuation("("),
+            identifier("false"),
+            punctuation(")"),
+        )
+        private val SKIKO_DEAD_BLOCK_BODY_PREFIX = listOf(
+            identifier("const"),
+            punctuation("{"),
+            identifier("createRequire"),
+            punctuation(":"),
+            identifier("createRequire"),
+            punctuation("}"),
+            punctuation("="),
+            identifier("await"),
+        )
+        private val NODE_TERNARY_PREFIX = listOf(
+            identifier("globalThis"),
+            punctuation("."),
+            identifier("module"),
+            punctuation("="),
+            punctuation("("),
+            identifier("typeof"),
+            identifier("process"),
+            punctuation("!"),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("undefined"),
+            punctuation(")"),
+            punctuation("&"),
+            punctuation("&"),
+            punctuation("("),
+            identifier("process"),
+            punctuation("."),
+            identifier("release"),
+            punctuation("."),
+            identifier("name"),
+            punctuation("="),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("node"),
+            punctuation(")"),
+            punctuation("?"),
+            identifier("await"),
+        )
+        private val SKIKO_DIRECTORY_URL_PREFIX = listOf(
+            identifier("scriptDirectory"),
+            punctuation("="),
+            identifier("require"),
+            punctuation("("),
+            stringLiteral("url"),
+            punctuation(")"),
+            punctuation("."),
+            identifier("fileURLToPath"),
+            punctuation("("),
+        )
+    }
 }
 
 private sealed interface JsToken {
@@ -683,77 +844,175 @@ private sealed interface JsToken {
     data class StringLiteral(val value: String, override val start: Int) : JsToken
 
     data class Punctuation(val value: String, override val start: Int) : JsToken
+
+    data class TemplateBoundary(
+        val opening: Boolean,
+        override val start: Int,
+    ) : JsToken
 }
 
-private fun tokenize(source: String): List<JsToken> {
-    val tokens = mutableListOf<JsToken>()
-    var index = 0
-    while (index < source.length) {
-        val character = source[index]
-        when {
-            character.isWhitespace() -> index++
-            character == '/' && source.getOrNull(index + 1) == '/' -> {
+private sealed interface JsTokenShape {
+    val value: String
+
+    data class Identifier(override val value: String) : JsTokenShape
+
+    data class StringLiteral(override val value: String) : JsTokenShape
+
+    data class Punctuation(override val value: String) : JsTokenShape
+}
+
+private fun identifier(value: String): JsTokenShape = JsTokenShape.Identifier(value)
+
+private fun stringLiteral(value: String): JsTokenShape = JsTokenShape.StringLiteral(value)
+
+private fun punctuation(value: String): JsTokenShape = JsTokenShape.Punctuation(value)
+
+private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean =
+    size == expected.size && indices.all { index ->
+        when (val token = this[index]) {
+            is JsToken.Identifier ->
+                expected[index] == JsTokenShape.Identifier(token.value)
+
+            is JsToken.StringLiteral ->
+                expected[index] == JsTokenShape.StringLiteral(token.value)
+
+            is JsToken.Punctuation ->
+                expected[index] == JsTokenShape.Punctuation(token.value)
+
+            is JsToken.TemplateBoundary -> false
+        }
+    }
+
+private fun tokenize(source: String): List<JsToken> = JsTokenizer(source).tokenize()
+
+private class JsTokenizer(private val source: String) {
+    private val tokens = mutableListOf<JsToken>()
+    private var index = 0
+
+    fun tokenize(): List<JsToken> {
+        scanCode(inTemplateSubstitution = false)
+        return tokens
+    }
+
+    private fun scanCode(inTemplateSubstitution: Boolean) {
+        var braceDepth = 0
+        while (index < source.length) {
+            val character = source[index]
+            when {
+                character.isWhitespace() -> index++
+                character == '/' && source.getOrNull(index + 1) == '/' -> scanLineComment()
+                character == '/' && source.getOrNull(index + 1) == '*' -> scanBlockComment()
+                character == '/' && inTemplateSubstitution ->
+                    throw IllegalArgumentException(
+                        "Unreviewed slash syntax inside JavaScript template substitution",
+                    )
+
+                character == '\'' || character == '"' -> scanString()
+                character == '`' -> scanTemplate()
+                character == '{' -> {
+                    tokens += JsToken.Punctuation(character.toString(), index)
+                    braceDepth++
+                    index++
+                }
+
+                character == '}' && inTemplateSubstitution && braceDepth == 0 -> {
+                    tokens += JsToken.TemplateBoundary(opening = false, start = index)
+                    index++
+                    return
+                }
+
+                character == '}' -> {
+                    tokens += JsToken.Punctuation(character.toString(), index)
+                    braceDepth--
+                    index++
+                }
+
+                character.isLetter() || character == '_' || character == '$' ->
+                    scanIdentifier()
+
+                else -> {
+                    tokens += JsToken.Punctuation(character.toString(), index)
+                    index++
+                }
+            }
+        }
+        require(!inTemplateSubstitution) {
+            "Unterminated JavaScript template substitution"
+        }
+    }
+
+    private fun scanLineComment() {
+        index += 2
+        while (index < source.length && source[index] != '\n') index++
+    }
+
+    private fun scanBlockComment() {
+        val end = source.indexOf("*/", index + 2)
+        require(end >= 0) { "Unterminated JavaScript block comment" }
+        index = end + 2
+    }
+
+    private fun scanString() {
+        val start = index
+        val quote = source[index]
+        index++
+        val value = StringBuilder()
+        while (index < source.length && source[index] != quote) {
+            require(source[index] != '\n' && source[index] != '\r') {
+                "Unterminated JavaScript string literal"
+            }
+            if (source[index] == '\\') {
+                require(index + 1 < source.length) {
+                    "Unterminated JavaScript string escape"
+                }
+                value.append(source[index + 1])
                 index += 2
-                while (index < source.length && source[index] != '\n') index++
-            }
-
-            character == '/' && source.getOrNull(index + 1) == '*' -> {
-                val end = source.indexOf("*/", index + 2)
-                require(end >= 0) { "Unterminated JavaScript block comment" }
-                index = end + 2
-            }
-
-            character == '\'' || character == '"' -> {
-                val start = index
-                val quote = character
-                index++
-                val value = StringBuilder()
-                while (index < source.length && source[index] != quote) {
-                    require(source[index] != '\n' && source[index] != '\r') {
-                        "Unterminated JavaScript string literal"
-                    }
-                    if (source[index] == '\\') {
-                        require(index + 1 < source.length) {
-                            "Unterminated JavaScript string escape"
-                        }
-                        value.append(source[index + 1])
-                        index += 2
-                    } else {
-                        value.append(source[index])
-                        index++
-                    }
-                }
-                require(index < source.length) { "Unterminated JavaScript string literal" }
-                index++
-                tokens += JsToken.StringLiteral(value.toString(), start)
-            }
-
-            character == '`' -> {
-                index++
-                while (index < source.length && source[index] != '`') {
-                    if (source[index] == '\\') index++
-                    index++
-                }
-                require(index < source.length) { "Unterminated JavaScript template literal" }
-                index++
-            }
-
-            character.isLetter() || character == '_' || character == '$' -> {
-                val start = index
-                index++
-                while (index < source.length &&
-                    (source[index].isLetterOrDigit() || source[index] == '_' || source[index] == '$')
-                ) {
-                    index++
-                }
-                tokens += JsToken.Identifier(source.substring(start, index), start)
-            }
-
-            else -> {
-                tokens += JsToken.Punctuation(character.toString(), index)
+            } else {
+                value.append(source[index])
                 index++
             }
         }
+        require(index < source.length) { "Unterminated JavaScript string literal" }
+        index++
+        tokens += JsToken.StringLiteral(value.toString(), start)
     }
-    return tokens
+
+    private fun scanTemplate() {
+        index++
+        while (index < source.length) {
+            when {
+                source[index] == '\\' -> {
+                    require(index + 1 < source.length) {
+                        "Unterminated JavaScript template escape"
+                    }
+                    index += 2
+                }
+
+                source[index] == '`' -> {
+                    index++
+                    return
+                }
+
+                source[index] == '$' && source.getOrNull(index + 1) == '{' -> {
+                    tokens += JsToken.TemplateBoundary(opening = true, start = index)
+                    index += 2
+                    scanCode(inTemplateSubstitution = true)
+                }
+
+                else -> index++
+            }
+        }
+        throw IllegalArgumentException("Unterminated JavaScript template literal")
+    }
+
+    private fun scanIdentifier() {
+        val start = index
+        index++
+        while (index < source.length &&
+            (source[index].isLetterOrDigit() || source[index] == '_' || source[index] == '$')
+        ) {
+            index++
+        }
+        tokens += JsToken.Identifier(source.substring(start, index), start)
+    }
 }
