@@ -38,6 +38,7 @@ The previous global-impersonation proposal is rejected and is not a stop gate to
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartBootstrapTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRecoveryRetirementTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartGateCleanupTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartLiveTestEnvironment.kt`
 - Create: `docs/debug-dashboard/gates/0b-stalwart.md`
 
 - [ ] Write the failing fixture audit first. It must reject any image other than `stalwartlabs/stalwart:v0.16.14`, an enterprise license, non-loopback publication, `impersonate`, a mount of repository `stalwart-data/`, a missing readiness healthcheck, or scratch state outside ignored `debug-dashboard/.runtime/stalwart-gate0b/`.
@@ -52,6 +53,8 @@ debug-dashboard/.runtime/stalwart-gate0b/recovery-handoff
 ```
 
 Both are beneath owner-only directories and mode `0600`. `StalwartBootstrapTest` generates the management key and two ordinary passwords and writes them to mode-`0600` `debug-dashboard/.runtime/stalwart-gate0b/fixture-secrets`, which later JVM invocations locate only through `STALWART_GATE_FIXTURE_SECRETS_FILE`. The environment carries a path, never a secret; no secret appears in argv, Compose output, or test evidence.
+
+- [ ] Make every selected `*LiveTest` and the restart prepare/reconcile tests use `StalwartLiveTestEnvironment`. A live class requires `STALWART_LIVE_TESTS=1`, an explicit loopback `STALWART_BASE_URL`, and the handoff paths required by its fixture; it performs a bounded readiness probe before the first test. Missing configuration or an unreachable endpoint fails the selected suite—it never uses a JUnit assumption, silently skips, or falls back to another Stalwart instance.
 
 - [ ] Implement only the typed registry/JMAP calls needed to discover `/.well-known/jmap`, expand the returned `apiUrl`, and create/query registry objects. Add a test that fails if a legacy `/api/principal` path is requested.
 
@@ -338,14 +341,14 @@ These Gate-owned internal state/result types carry no browser DTO and no secret;
 
 ```bash
 cd debug-dashboard
+export STALWART_LIVE_TESTS=1
+export STALWART_BASE_URL=http://127.0.0.1:18443
 export STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets"
 export STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store"
 ./kotlin test \
   --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccessServiceTest'
 
-STALWART_LIVE_TESTS=1 \
-STALWART_BASE_URL=http://127.0.0.1:18443 \
 ./kotlin test \
   --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessLifecycleLiveTest'
@@ -391,15 +394,41 @@ STALWART_GATE_CLEANUP=1 \
 
 Expected: the resolved target is exactly the gate-owned runtime directory, all fixture secret/store files are removed, and repository `stalwart-data/` plus production credential paths are untouched. Request a new design decision; do not start migration or Gate 0C.
 
-## Task 5: Pin the v0.16.14 filesystem/runtime model
+## Task 5: Capture the v0.15 source, then pin the v0.16.14 filesystem/runtime model
 
 **Files:**
 
+- Create: `scripts/capture_stalwart_v015.py`
+- Create: `tests/test_capture_stalwart_v015.py`
 - Modify: `docker-compose.yml`
 - Create: `stalwart/config.json`
 - Delete: `stalwart/config.toml`
 - Modify: `.gitignore`
 - Create: `docs/stalwart-v016-migration.md`
+
+- [ ] Before editing `docker-compose.yml` or deleting `stalwart/config.toml`, write stdlib-only tests and `capture_stalwart_v015.py`. The capture command must:
+
+  1. require the current service to report v0.15.x;
+  2. record its resolved image reference, immutable image ID/digest, resolved Compose service, TOML digest, and data manifest;
+  3. stop Stalwart and copy the complete stopped `stalwart-data/` plus TOML into a timestamped ignored backup;
+  4. write a mode-`0600`, digest-bound source receipt and a pinned runnable rollback definition inside that backup;
+  5. boot a copy on another loopback port and require version plus management-read success; and
+  6. leave the real source stopped.
+
+  The command refuses symlinks, broad paths, a running copy operation, an unpinned rollback image, or a partial backup. The v0.16 edits below cannot begin until `debug-dashboard/.runtime/stalwart-migration/latest-source.json` points to a verified capture. This ordering is mandatory even when implementation resumes from a later commit; if an existing store has no valid source receipt, stop rather than booting it with v0.16.
+
+  Run this capture checkpoint while the main Compose file and TOML are still v0.15:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_capture_stalwart_v015.py' -v
+python3 scripts/capture_stalwart_v015.py capture --source-service stalwart
+python3 scripts/capture_stalwart_v015.py prove-rollback \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
+python3 scripts/capture_stalwart_v015.py verify \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
+```
+
+Expected checkpoint: the stopped source, full backup, receipt, and independently runnable rollback copy all verify. Only now modify the main runtime.
 
 - [ ] Replace `latest`, `/opt/stalwart`, TOML, and `ADMIN_SECRET` with the tested image/runtime:
 
@@ -430,17 +459,19 @@ Use the tagged image's UID/GID 2000 ownership requirement. The initial `stalwart
 - [ ] Run:
 
 ```bash
+python3 scripts/capture_stalwart_v015.py verify \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 docker compose config --quiet
 docker compose config --images
 ```
 
-Expected: only v0.16.14, loopback publication, and the reviewed paths.
+Expected: the source receipt proves a complete, independently runnable v0.15 backup before the main Compose/config edit; the edited model contains only v0.16.14, loopback publication, and reviewed paths.
 
 - [ ] Commit:
 
 ```bash
-git add docker-compose.yml stalwart/config.json stalwart/config.toml .gitignore docs/stalwart-v016-migration.md
-git commit -m "chore: pin Stalwart v0.16.14 runtime"
+git add scripts/capture_stalwart_v015.py tests/test_capture_stalwart_v015.py docker-compose.yml stalwart/config.json stalwart/config.toml .gitignore docs/stalwart-v016-migration.md
+git commit -m "chore: capture v0.15 and pin Stalwart v0.16.14"
 ```
 
 ## Task 6: Back up, dry-run, migrate, and prove rollback
@@ -450,14 +481,13 @@ git commit -m "chore: pin Stalwart v0.16.14 runtime"
 - Create: `docker-compose.stalwart-migration.yml`
 - Create: `scripts/stalwart_v016.py`
 - Create: `scripts/bootstrap_stalwart_v016.py`
-- Create: `scripts/backup_stalwart_v016.py`
 - Create: `tests/test_stalwart_v016.py`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMigrationLiveTest.kt`
 - Modify: `docs/stalwart-v016-migration.md`
 
-- [ ] Write stdlib-only tests for fixed repository paths, owner-only secret/backup files, list-form subprocesses, pinned images, and refusal to operate while the source store is running. Reuse `scripts/lib.py` where its API remains valid. Prove default Stalwart backups/migration exports exclude `debug-dashboard/.runtime/stalwart/`, `.runtime/keys/`, quarantine, lock files, and the entire gate secret/store handoff.
+- [ ] Write stdlib-only tests for fixed repository paths, owner-only secret/backup files, list-form subprocesses, pinned images, and refusal to operate while either source or target store is running at an unsafe phase. Reuse `scripts/lib.py` where its API remains valid. Prove migration exports exclude `debug-dashboard/.runtime/stalwart/`, `.runtime/keys/`, quarantine, lock files, and the entire gate secret/store handoff.
 
-- [ ] Before touching real state, prove the running binary is v0.15.x, capture image ID/digest/config/data manifest, stop Stalwart, and copy the complete stopped data plus TOML into a timestamped ignored backup. Never edit RocksDB keys.
+- [ ] Load and re-verify Task 5's `latest-source.json`, backup digests, stopped-source marker, captured v0.15 image, and pinned rollback definition before touching real state. Do not try to reconstruct the source from the now-v0.16 main Compose file. A missing, stale, partial, or mismatched receipt is a hard stop. Never edit RocksDB keys.
 
 - [ ] Obtain the tagged migration script from this exact source and checksum:
 
@@ -478,8 +508,10 @@ Use it to dump v0.15 settings/principals and convert `/opt/stalwart` paths to `/
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_stalwart_v016.py' -v
-python3 scripts/stalwart_v016.py inspect --source-service stalwart
-python3 scripts/backup_stalwart_v016.py create --service stalwart
+python3 scripts/capture_stalwart_v015.py verify \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
+python3 scripts/capture_stalwart_v015.py prove-rollback \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 mkdir -p debug-dashboard/.runtime/stalwart-migration
 chmod 0700 debug-dashboard/.runtime/stalwart-migration
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -489,12 +521,10 @@ echo "008a490b4c3c60572806958e1960749ecdddf263316683017003797b9c34ca1c  debug-da
   | shasum -a 256 --check
 python3 scripts/stalwart_v016.py dry-run \
   --script debug-dashboard/.runtime/stalwart-migration/migrate_v016.py \
-  --backup-receipt debug-dashboard/.runtime/stalwart-migration/latest-backup.json
+  --source-receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 sed -n '1,240p' debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
 python3 scripts/stalwart_v016.py mark-reviewed \
   --report debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
-python3 scripts/stalwart_v016.py prove-rollback \
-  --backup-receipt debug-dashboard/.runtime/stalwart-migration/latest-backup.json
 docker compose -f docker-compose.yml -f docker-compose.stalwart-migration.yml config --quiet
 python3 scripts/stalwart_v016.py apply \
   --script debug-dashboard/.runtime/stalwart-migration/migrate_v016.py \
@@ -502,13 +532,14 @@ python3 scripts/stalwart_v016.py apply \
 python3 scripts/stalwart_v016.py retire-recovery
 ```
 
-Expected: unit tests pass; inspection reports v0.15 source; backup, dry-run, review, rollback, and apply each emit a safe receipt path; checksum says `OK`; migration override validates; normal v0.16.14 restart succeeds; retired recovery authentication fails. No command prints a credential.
+Expected: unit tests pass; the Task 5 source capture re-verifies as v0.15 and rollback-capable; dry-run, review, and apply each emit a safe receipt path; checksum says `OK`; migration override validates; normal v0.16.14 restart succeeds; retired recovery authentication fails. No command prints a credential.
 
 - [ ] Run `StalwartMigrationLiveTest` after normal restart:
 
 ```bash
 cd debug-dashboard
 STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
 ./kotlin test \
   --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMigrationLiveTest'
@@ -519,7 +550,7 @@ Expected: the pre-migration manifest matches live v0.16 Accounts; internal Passw
 - [ ] Commit:
 
 ```bash
-git add docker-compose.stalwart-migration.yml scripts/stalwart_v016.py scripts/bootstrap_stalwart_v016.py scripts/backup_stalwart_v016.py tests/test_stalwart_v016.py debug-dashboard/dashboard-server docs/stalwart-v016-migration.md
+git add docker-compose.stalwart-migration.yml scripts/stalwart_v016.py scripts/bootstrap_stalwart_v016.py tests/test_stalwart_v016.py debug-dashboard/dashboard-server docs/stalwart-v016-migration.md
 git commit -m "feat: migrate Stalwart state to v0.16.14"
 ```
 
@@ -558,8 +589,10 @@ The first is a mode-`0600` secret value; the second contains only immutable prot
 cd debug-dashboard
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.StalwartRuntimeSecretLoaderTest'
 STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRuntimeCredentialLiveTest'
 STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRoutingLiveTest'
 cd ..
 git add stalwart debug-dashboard/dashboard-server docs/stalwart-v016-migration.md
@@ -591,12 +624,28 @@ Expected: loader, credential, and routing tests pass; the unenrolled recipient c
 
 - [ ] Match `DestroyAccount` Task client-side by account fields. Map only Pending/Retry/Failed; observed then absent confirms cleanup, never observed remains `unverified`, and observed Failed makes the operation `reconciliationRequired`. Do not invent a succeeded Task state.
 
-- [ ] Run every gate and provider regression:
+- [ ] Run the Task 8 live contracts and the credential-provider regression:
 
 ```bash
 cd debug-dashboard
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.*'
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.credential.*'
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.credential.*'
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartManagementLiveTest'
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailLiveTest'
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:8443 \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartDeletionLiveTest'
 cd ..
 docker compose config --quiet
 ```
@@ -637,14 +686,43 @@ Expected: pass with safe evidence and no secret value printed.
 ```bash
 python3 -m unittest discover -s tests -p 'test_stalwart_v016.py' -v
 python3 -m unittest discover -s tests -p 'test_reset_stalwart_v016.py' -v
+python3 scripts/capture_stalwart_v015.py verify \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
+python3 scripts/capture_stalwart_v015.py prove-rollback \
+  --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 docker compose config --quiet
 if rg -n 'stalwartlabs/stalwart:latest|/opt/stalwart|/api/principal|ADMIN_SECRET|management%operator|ordinary%operator' \
   docker-compose.yml stalwart scripts README.md CLAUDE.md .ai; then
   exit 1
 fi
 cd debug-dashboard
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.*'
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.*'
+export STALWART_LIVE_TESTS=1
+export STALWART_BASE_URL=http://127.0.0.1:18443
+export STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets"
+export STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store"
+for fixture_class in \
+  StalwartPermissionMatrixLiveTest \
+  StalwartAppPasswordSemanticsLiveTest \
+  StalwartMailAccessLifecycleLiveTest; do
+  ./kotlin test \
+    --include-module dashboard-server \
+    --include-classes "mail.sandbox.dashboard.server.gate.stalwart.$fixture_class"
+done
+export STALWART_BASE_URL=http://127.0.0.1:8443
+unset STALWART_GATE_FIXTURE_SECRETS_FILE
+unset STALWART_GATE_CREDENTIAL_ROOT
+for runtime_class in \
+  StalwartMigrationLiveTest \
+  StalwartRuntimeCredentialLiveTest \
+  StalwartRoutingLiveTest \
+  StalwartManagementLiveTest \
+  StalwartMailLiveTest \
+  StalwartDeletionLiveTest; do
+  ./kotlin test \
+    --include-module dashboard-server \
+    --include-classes "mail.sandbox.dashboard.server.gate.stalwart.$runtime_class"
+done
 ```
 
 Expected: all checks pass and the stale-reference search prints nothing.

@@ -199,7 +199,11 @@ Review the bounded logs for correct lookup outcomes and no secret values.
 - Create: `config/operator/dovecot.conf`
 - Modify: `docker-compose.yml`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorProbe.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStore.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorConfigTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStoreTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorStartupLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironment.kt`
 
 - [ ] Add a second `dovecot-operator` service using the exact same pinned image. It:
 
@@ -208,7 +212,8 @@ Review the bounded logs for correct lookup outcomes and no secret values.
   - starts from the standalone `config/operator/dovecot.conf`;
   - runs IMAP only;
   - publishes only `127.0.0.1:2993:31993`;
-  - joins only a dedicated `operator-ingress` internal network with no other service.
+  - joins only a dedicated `operator-ingress` internal network with no other service; and
+  - has a bounded healthcheck that proves the `imap-login` service is running.
 
 The ordinary `dovecot` service never mounts or loads the master credential directory/passdb.
 
@@ -248,23 +253,41 @@ Also configure mail/namespace/TLS/stdout logging explicitly and omit OAuth, POP3
 
 - [ ] Reserve gitignored raw-secret slots `debug-dashboard/.runtime/secrets/dovecot-operator-a` and `dovecot-operator-b`, plus an atomic `dovecot-operator-active` reference containing only `a` or `b`; every file is mode `0600` and never mounted into a container. Put only the active slot's ARGON2ID hash in `debug-dashboard/.runtime/dovecot-operator/master-users` at steady state. The gate process reads the active slot through a symlink-rejecting fixed-path loader and clears transient in-memory copies after use.
 
+- [ ] Implement the credential store's fixed-path/mode/symlink/atomic-write checks now, with a unit test. Its initial bootstrap creates slot A, hashes through the stdin-only path, atomically writes the one-entry `master-users`, and writes the matching active reference before the operator service starts. Task 6 extends this same store with rotation; it must not introduce a second writer.
+
 - [ ] Write configuration tests that fail if the primary config contains a master passdb, the operator enables POP3/LMTP, either protected master appears in the user registry, an unknown master identity appears in the master file, the operator joins the default network, or its host bind is not exact loopback.
+
+- [ ] Make every selected Dovecot `*LiveTest` use `DovecotLiveTestEnvironment`. It requires `DOVECOT_LIVE_TESTS=1` and bounded readiness of the exact fixed loopback endpoints; missing configuration or an unavailable ordinary/operator/Postfix/OAuth service fails the selected suite rather than skipping.
+
+- [ ] After the configuration checks, recreate the complete ordinary Compose topology—not only one-off containers—and wait for health. `DovecotOperatorStartupLiveTest` creates an eligible disposable target through `EligibilityFileCli`, performs a TLS master login plus mailbox list through `127.0.0.1:2993`, and verifies the ordinary Dovecot, Postfix, and OAuth endpoints are reachable. Task 6 cannot start until this proof passes.
 
 - [ ] Run:
 
 ```bash
+cd debug-dashboard
+./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest'
+./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorCredentialStoreTest'
+cd ..
 docker compose config --quiet
 docker compose run --rm dovecot doveconf -n
 docker compose run --rm dovecot-operator doveconf -n
+docker compose up -d --build --force-recreate --wait
+docker compose ps
+docker compose exec -T dovecot doveadm service status imap-login
+docker compose exec -T dovecot-operator doveadm service status imap-login
+cd debug-dashboard
+DOVECOT_LIVE_TESTS=1 \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorStartupLiveTest'
 ```
 
-Expected: primary has no master passdb; operator has one master passdb, exactly one steady-state protected identity, and an eligibility-backed target lookup.
+Expected: primary has no master passdb; operator has one master passdb, exactly one steady-state protected identity, and an eligibility-backed target lookup. The recreated full stack is healthy and a real operator login succeeds before Task 6.
 
 ## Task 6: Prove network isolation and stage–probe–switch–revoke rotation
 
 **Files:**
 
-- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStore.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotIsolationLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorRotationLiveTest.kt`
 - Modify: `docs/debug-dashboard/gates/0c-dovecot.md`
@@ -300,8 +323,13 @@ Before the active-reference switch, recovery removes an abandoned staged slot. A
 - [ ] Run:
 
 ```bash
+docker compose ps
+docker compose exec -T dovecot doveadm service status imap-login
+docker compose exec -T dovecot-operator doveadm service status imap-login
 cd debug-dashboard
+DOVECOT_LIVE_TESTS=1 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotIsolationLiveTest'
+DOVECOT_LIVE_TESTS=1 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorRotationLiveTest'
 ```
 
@@ -325,6 +353,8 @@ Expected: the isolation matrix and every rotation/crash-recovery case pass.
 - [ ] Run:
 
 ```bash
+cd debug-dashboard
+DOVECOT_LIVE_TESTS=1 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotMailLiveTest'
 ```
 
@@ -382,6 +412,7 @@ Assert retained Maildir data remains inert and delivery does not recreate/re-ena
 ```bash
 python3 -m unittest oauth2-mock/test_server.py
 cd debug-dashboard
+DOVECOT_LIVE_TESTS=1 \
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.*LiveTest'
 cd ..
 docker compose config --quiet
