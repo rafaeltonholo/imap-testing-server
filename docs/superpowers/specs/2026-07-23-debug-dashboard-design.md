@@ -190,7 +190,7 @@ The registry is a projection of live provider state, not a second authoritative 
 
 Protected administration or service identities are marked as protected and cannot be edited or deleted through ordinary account workflows.
 
-The encrypted credential snapshot is not account authority. It can only mark a live Stalwart provider instance as `ready`, `enrollmentRequired`, `recoveryRequired`, or temporarily `rotating`. Records are keyed by immutable Stalwart Account ID, never attached by email address alone, and are never created for protected identities.
+The encrypted credential snapshot is not account authority. An Account record may mark a live Stalwart provider instance as `ready`, `enrollmentRequired`, `recoveryRequired`, temporarily `rotating`, or `removalPending`; store-level validation may supersede every Account with global `storeUnavailable`. Records are keyed by immutable Stalwart Account ID, never attached by email address alone, and are never created for protected identities.
 
 ### 6.2 Capability profiles
 
