@@ -538,6 +538,11 @@ private enum class ReviewedLoaderContext {
     SkikoDirectoryUrl,
 }
 
+private enum class NamedEnvironmentPredicate {
+    Node,
+    Deno,
+}
+
 private class ModuleReferenceScanner(private val source: String) {
     private val tokens = tokenize(source)
 
@@ -681,14 +686,22 @@ private class ModuleReferenceScanner(private val source: String) {
         if (blockOpen != null) {
             val blockPrefix = tokens.subList(blockOpen + 1, index)
             if (blockPrefix.matchesExactly(NODE_BLOCK_BODY_PREFIX)) {
-                if (matchesBefore(blockOpen, NODE_NAMED_IF_PREFIX) ||
+                if (
+                    (
+                        matchesBefore(blockOpen, NODE_NAMED_IF_PREFIX) &&
+                            isReviewedNamedPredicateUse(
+                                NamedEnvironmentPredicate.Node,
+                                blockOpen,
+                            )
+                        ) ||
                     matchesBefore(blockOpen, NODE_DIRECT_IF_PREFIX)
                 ) {
                     return ReviewedLoaderContext.NodeBlock
                 }
             }
             if (blockPrefix.matchesExactly(DENO_BLOCK_BODY_PREFIX) &&
-                matchesBefore(blockOpen, DENO_IF_PREFIX)
+                matchesBefore(blockOpen, DENO_IF_PREFIX) &&
+                isReviewedNamedPredicateUse(NamedEnvironmentPredicate.Deno, blockOpen)
             ) {
                 return ReviewedLoaderContext.DenoBlock
             }
@@ -721,6 +734,188 @@ private class ModuleReferenceScanner(private val source: String) {
         return null
     }
 
+    private fun isReviewedNamedPredicateUse(
+        predicate: NamedEnvironmentPredicate,
+        useIndex: Int,
+    ): Boolean {
+        val nodeDeclaration = uniqueCanonicalNodeDeclaration() ?: return false
+        if (!isUnchangedBinding("isNodeJs", nodeDeclaration + 1)) return false
+        if (nodeDeclaration >= useIndex || hasAmbiguousSlashBefore(useIndex)) return false
+        if (predicate == NamedEnvironmentPredicate.Node) return true
+
+        val denoDeclaration = uniqueCanonicalDenoDeclaration() ?: return false
+        return denoDeclaration < useIndex &&
+            isUnchangedBinding("isDeno", denoDeclaration + 1)
+    }
+
+    private fun uniqueCanonicalNodeDeclaration(): Int? =
+        uniqueModuleLevelMatch { start ->
+            matchesAt(start, NODE_DECLARATION) &&
+                matchesAt(start + NODE_DECLARATION.size, DENO_DECLARATION)
+        }
+
+    private fun uniqueCanonicalDenoDeclaration(): Int? =
+        uniqueModuleLevelMatch { start ->
+            if (!matchesAt(start, DENO_DECLARATION)) return@uniqueModuleLevelMatch false
+            val follower = start + DENO_DECLARATION.size
+            matchesAt(follower, GENERATED_DENO_FOLLOWER)
+        }
+
+    private fun uniqueModuleLevelMatch(predicate: (Int) -> Boolean): Int? {
+        var match: Int? = null
+        for (index in tokens.indices) {
+            if (!isModuleLevel(index) || !predicate(index)) continue
+            if (match != null) return null
+            match = index
+        }
+        return match
+    }
+
+    private fun isModuleLevel(index: Int): Boolean {
+        var braceDepth = 0
+        var templateDepth = 0
+        for (candidate in tokens.subList(0, index)) {
+            when (candidate) {
+                is JsToken.TemplateBoundary -> {
+                    templateDepth += if (candidate.opening) 1 else -1
+                }
+
+                is JsToken.Punctuation -> if (templateDepth == 0) {
+                    when (candidate.value) {
+                        "{" -> braceDepth++
+                        "}" -> braceDepth--
+                    }
+                }
+
+                else -> Unit
+            }
+        }
+        return braceDepth == 0 && templateDepth == 0
+    }
+
+    private fun isUnchangedBinding(
+        name: String,
+        canonicalNameIndex: Int,
+    ): Boolean = tokens.indices.none { index ->
+        index != canonicalNameIndex &&
+            (tokens[index] as? JsToken.Identifier)?.value == name &&
+            (
+                isBindingDeclaration(index) ||
+                    isFunctionParameter(index) ||
+                    isAssignmentOrUpdate(index)
+                )
+    }
+
+    private fun isBindingDeclaration(index: Int): Boolean {
+        val previous = tokens.getOrNull(index - 1)
+        if (previous is JsToken.Identifier &&
+            previous.value in setOf("const", "let", "var", "function", "class", "import")
+        ) {
+            return true
+        }
+        if (previous !is JsToken.Punctuation ||
+            previous.value !in setOf("{", "[", ":", ",")
+        ) {
+            return false
+        }
+        for (candidateIndex in index - 2 downTo maxOf(0, index - 64)) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.Identifier ->
+                    if (candidate.value in setOf("const", "let", "var", "import")) return true
+
+                is JsToken.Punctuation ->
+                    if (candidate.value in setOf("=", ";", ")")) return false
+
+                is JsToken.TemplateBoundary -> return false
+                else -> Unit
+            }
+        }
+        return false
+    }
+
+    private fun isFunctionParameter(index: Int): Boolean {
+        if (matchesAt(index + 1, listOf(punctuation("="), punctuation(">")))) {
+            return true
+        }
+        val open = enclosingParenthesisOpen(index) ?: return false
+        val close = matchingParenthesisClose(open) ?: return false
+        val beforeOpen = tokens.getOrNull(open - 1)
+        val beforeBeforeOpen = tokens.getOrNull(open - 2)
+        if (beforeOpen is JsToken.Identifier &&
+            beforeOpen.value in setOf("function", "catch")
+        ) {
+            return true
+        }
+        if (beforeOpen is JsToken.Identifier &&
+            beforeBeforeOpen is JsToken.Identifier &&
+            beforeBeforeOpen.value == "function"
+        ) {
+            return true
+        }
+        if (matchesAt(close + 1, listOf(punctuation("="), punctuation(">")))) {
+            return true
+        }
+        val followsWithBody =
+            (tokens.getOrNull(close + 1) as? JsToken.Punctuation)?.value == "{"
+        val isControlCondition =
+            beforeOpen is JsToken.Identifier &&
+                beforeOpen.value in setOf("if", "for", "while", "switch", "with")
+        return followsWithBody && beforeOpen is JsToken.Identifier && !isControlCondition
+    }
+
+    private fun enclosingParenthesisOpen(index: Int): Int? {
+        var depth = 0
+        for (candidateIndex in index - 1 downTo 0) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.TemplateBoundary -> if (candidate.opening) return null
+                is JsToken.Punctuation -> when (candidate.value) {
+                    ")" -> depth++
+                    "(" -> if (depth == 0) return candidateIndex else depth--
+                }
+
+                else -> Unit
+            }
+        }
+        return null
+    }
+
+    private fun matchingParenthesisClose(open: Int): Int? {
+        var depth = 0
+        for (candidateIndex in open + 1 until tokens.size) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.TemplateBoundary -> if (!candidate.opening) return null
+                is JsToken.Punctuation -> when (candidate.value) {
+                    "(" -> depth++
+                    ")" -> if (depth == 0) return candidateIndex else depth--
+                }
+
+                else -> Unit
+            }
+        }
+        return null
+    }
+
+    private fun isAssignmentOrUpdate(index: Int): Boolean {
+        val next = (tokens.getOrNull(index + 1) as? JsToken.Punctuation)?.value
+        val nextTwo = (tokens.getOrNull(index + 2) as? JsToken.Punctuation)?.value
+        val nextThree = (tokens.getOrNull(index + 3) as? JsToken.Punctuation)?.value
+        if (next == "=" && nextTwo != "=") return true
+        if (next in setOf("+", "-") && nextTwo == next) return true
+        if (next in setOf("+", "-", "*", "/", "%", "&", "|", "^", "?") &&
+            (nextTwo == "=" || nextThree == "=")
+        ) {
+            return true
+        }
+        val previous = (tokens.getOrNull(index - 1) as? JsToken.Punctuation)?.value
+        val previousTwo = (tokens.getOrNull(index - 2) as? JsToken.Punctuation)?.value
+        return previous in setOf("+", "-") && previousTwo == previous
+    }
+
+    private fun hasAmbiguousSlashBefore(useIndex: Int): Boolean =
+        tokens.subList(0, useIndex).any { token ->
+            token is JsToken.Punctuation && token.value == "/"
+        }
+
     private fun matchesBefore(
         endExclusive: Int,
         expected: List<JsTokenShape>,
@@ -730,7 +925,64 @@ private class ModuleReferenceScanner(private val source: String) {
         return tokens.subList(start, endExclusive).matchesExactly(expected)
     }
 
+    private fun matchesAt(
+        start: Int,
+        expected: List<JsTokenShape>,
+    ): Boolean {
+        if (start < 0 || start + expected.size > tokens.size) return false
+        return tokens.subList(start, start + expected.size).matchesExactly(expected)
+    }
+
     companion object {
+        private val NODE_DECLARATION = listOf(
+            identifier("const"),
+            identifier("isNodeJs"),
+            punctuation("="),
+            punctuation("("),
+            identifier("typeof"),
+            identifier("process"),
+            punctuation("!"),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("undefined"),
+            punctuation(")"),
+            punctuation("&"),
+            punctuation("&"),
+            punctuation("("),
+            identifier("process"),
+            punctuation("."),
+            identifier("release"),
+            punctuation("."),
+            identifier("name"),
+            punctuation("="),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("node"),
+            punctuation(")"),
+            punctuation(";"),
+        )
+        private val DENO_DECLARATION = listOf(
+            identifier("const"),
+            identifier("isDeno"),
+            punctuation("="),
+            punctuation("!"),
+            identifier("isNodeJs"),
+            punctuation("&"),
+            punctuation("&"),
+            punctuation("("),
+            identifier("typeof"),
+            identifier("Deno"),
+            punctuation("!"),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("undefined"),
+            punctuation(")"),
+        )
+        private val GENERATED_DENO_FOLLOWER = listOf(
+            identifier("const"),
+            identifier("isStandaloneJsVM"),
+            punctuation("="),
+        )
         private val NODE_NAMED_IF_PREFIX = listOf(
             identifier("if"),
             punctuation("("),

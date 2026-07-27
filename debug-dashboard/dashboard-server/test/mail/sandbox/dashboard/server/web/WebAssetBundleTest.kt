@@ -120,6 +120,112 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsChangedGeneratedEnvironmentPredicateBindings() {
+        val canonicalNode =
+            "const isNodeJs = (typeof process !== 'undefined') && " +
+                "(process.release.name === 'node');"
+        val canonicalDeno =
+            "const isDeno = !isNodeJs && (typeof Deno !== 'undefined')"
+        val mutations: Map<String, (String) -> String> = mapOf(
+            "constant Node predicate" to { source ->
+                source.replace(canonicalNode, "const isNodeJs = true;")
+            },
+            "reassigned Node predicate" to { source ->
+                source +
+                    """
+
+                    isNodeJs = true
+                    if (isNodeJs) {
+                        const module = await import('node:module')
+                    }
+                    """.trimIndent()
+            },
+            "reassigned Deno predicate" to { source ->
+                source +
+                    """
+
+                    isDeno = true
+                    if (isDeno) {
+                        const path = await import('https://deno.land/std/path/mod.ts')
+                    }
+                    """.trimIndent()
+            },
+            "altered Deno predicate" to { source ->
+                source.replace(
+                    canonicalDeno,
+                    "const isDeno = typeof Deno !== 'undefined'",
+                )
+            },
+        )
+
+        mutations.forEach { (label, mutate) ->
+            withFixture { fixture ->
+                val original = fixture.entry.readText()
+                assertTrue(canonicalNode in original && canonicalDeno in original)
+                fixture.entry.writeText(mutate(original))
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsShadowedGeneratedEnvironmentPredicateBindings() {
+        val shadowedLoaders = mapOf(
+            "Node parameter" to
+                """
+                async function loadNode(isNodeJs) {
+                    if (isNodeJs) {
+                        const module = await import('node:module')
+                    }
+                }
+                """.trimIndent(),
+            "Node local" to
+                """
+                {
+                    const isNodeJs = true
+                    if (isNodeJs) {
+                        const module = await import('node:module')
+                    }
+                }
+                """.trimIndent(),
+            "Deno parameter" to
+                """
+                async function loadDeno(isDeno) {
+                    if (isDeno) {
+                        const path = await import('https://deno.land/std/path/mod.ts')
+                    }
+                }
+                """.trimIndent(),
+            "Deno local" to
+                """
+                {
+                    const isDeno = true
+                    if (isDeno) {
+                        const path = await import('https://deno.land/std/path/mod.ts')
+                    }
+                }
+                """.trimIndent(),
+        )
+
+        shadowedLoaders.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
     fun ignoresImportAndUrlDecoysInsideCommentsStringsAndTemplates() {
         withFixture { fixture ->
             fixture.entry.writeText(
@@ -515,6 +621,7 @@ internal fun withFixture(block: (WebBundleFixture) -> Unit) {
 
         const isNodeJs = (typeof process !== 'undefined') && (process.release.name === 'node');
         const isDeno = !isNodeJs && (typeof Deno !== 'undefined')
+        const isStandaloneJsVM = !isDeno && !isNodeJs
         if (isNodeJs) {
           const module = await import(/* webpackIgnore: true */'node:module');
         }
