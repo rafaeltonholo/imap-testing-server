@@ -1,0 +1,29 @@
+services:
+  stalwart-data-owner:
+    image: stalwartlabs/stalwart:v0.16.14
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 2000:2000 /var/lib/stalwart && chmod 0700 /var/lib/stalwart"]
+    volumes:
+      - ./:/etc/stalwart:ro
+      - ../../../.runtime/stalwart-gate0b/data:/var/lib/stalwart
+
+  stalwart:
+    image: stalwartlabs/stalwart:v0.16.14
+    user: "2000:2000"
+    depends_on:
+      stalwart-data-owner:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:18443:8080"
+    environment:
+      STALWART_PUBLIC_URL: http://127.0.0.1:18443
+    volumes:
+      - ./:/etc/stalwart:ro
+      - ../../../.runtime/stalwart-gate0b/data:/var/lib/stalwart
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s

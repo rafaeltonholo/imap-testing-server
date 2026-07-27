@@ -1,0 +1,7 @@
+services:
+  stalwart:
+    env_file:
+      - ${STALWART_GATE_RECOVERY_ENV_FILE:?required}
+    environment:
+      STALWART_RECOVERY_MODE: "1"
+      STALWART_RECOVERY_MODE_PORT: "8080"

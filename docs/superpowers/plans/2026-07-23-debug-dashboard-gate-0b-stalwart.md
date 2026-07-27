@@ -34,10 +34,14 @@ The previous global-impersonation proposal is rejected and is not a stop gate to
 - Create: `debug-dashboard/dashboard-server/testResources/stalwart-gate0b/config.json`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/stalwart/GateJmapClient.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/stalwart/GateBootstrap.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/GateJmapClientTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartFixtureSecretTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartFixturePrepareLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartBootstrapTest.kt`
-- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRecoveryRetirementTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartBootstrapLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRecoveryRetirementLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartGateCleanupTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartGateCleanupLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartLiveTestEnvironment.kt`
 - Create: `docs/debug-dashboard/gates/0b-stalwart.md`
 
@@ -45,18 +49,18 @@ The previous global-impersonation proposal is rejected and is not a stop gate to
 
 - [ ] Create the base fixture with only `127.0.0.1:18443:8080`, a real readiness healthcheck, and gate-owned scratch state. Keep every `STALWART_RECOVERY_*` variable out of the base file.
 
-- [ ] Add a recovery override containing only `STALWART_RECOVERY_MODE=1`, `STALWART_RECOVERY_MODE_PORT=8080`, and the required `STALWART_GATE_RECOVERY_ENV_FILE`. `StalwartFixtureSecretTest` creates:
+- [ ] Add a recovery override containing only `STALWART_RECOVERY_MODE=1`, `STALWART_RECOVERY_MODE_PORT=8080`, and the required `STALWART_GATE_RECOVERY_ENV_FILE`. `StalwartFixturePrepareLiveTest` creates:
 
 ```text
 debug-dashboard/.runtime/stalwart-gate0b/recovery.env
 debug-dashboard/.runtime/stalwart-gate0b/recovery-handoff
 ```
 
-Both are beneath owner-only directories and mode `0600`. `StalwartBootstrapTest` generates the management key and two ordinary passwords and writes them to mode-`0600` `debug-dashboard/.runtime/stalwart-gate0b/fixture-secrets`, which later JVM invocations locate only through `STALWART_GATE_FIXTURE_SECRETS_FILE`. The environment carries a path, never a secret; no secret appears in argv, Compose output, or test evidence.
+Both are beneath owner-only directories and mode `0600`. `StalwartBootstrapLiveTest` generates the management key and two ordinary passwords and writes them to mode-`0600` `debug-dashboard/.runtime/stalwart-gate0b/fixture-secrets`, which later JVM invocations locate only through `STALWART_GATE_FIXTURE_SECRETS_FILE`. The environment carries a path, never a secret; no secret appears in argv, Compose output, or test evidence.
 
-- [ ] Make every selected `*LiveTest` and the restart prepare/reconcile tests use `StalwartLiveTestEnvironment`. A live class requires `STALWART_LIVE_TESTS=1`, an explicit loopback `STALWART_BASE_URL`, and the handoff paths required by its fixture; it performs a bounded readiness probe before the first test. Missing configuration or an unreachable endpoint fails the selected suite—it never uses a JUnit assumption, silently skips, or falls back to another Stalwart instance.
+- [ ] Make every opt-in operation an unconditional class whose name ends in `LiveTest`. Exact class selection is the authorization boundary: prepare requires only exact `STALWART_GATE_PREPARE=1`, cleanup requires only exact `STALWART_GATE_CLEANUP=1`, and networked live classes require `STALWART_LIVE_TESTS=1`, an explicit loopback `STALWART_BASE_URL`, and the fixed handoff path. Missing or conflicting configuration, a raw selected class without environment, or an unreachable endpoint fails the selected suite—it never returns early, uses a JUnit assumption, silently skips, or falls back to another Stalwart instance. Canonical offline and full-suite commands use exactly one exclusion: `mail.sandbox.dashboard.server.gate.stalwart.*LiveTest`.
 
-- [ ] Implement only the typed registry/JMAP calls needed to discover `/.well-known/jmap`, expand the returned `apiUrl`, and create/query registry objects. Add a test that fails if a legacy `/api/principal` path is requested.
+- [ ] Implement only the typed registry/JMAP calls needed to discover `/.well-known/jmap`, expand the returned `apiUrl`, and create/query registry objects. Accept only the exact `http://127.0.0.1:18443/jmap/` endpoint with no userinfo, query, or fragment. Malformed-but-valid JSON fields/tuples and response-body read failures must become typed, redacted gate failures. Add a test that fails if a legacy `/api/principal` path is requested.
 
 - [ ] Bootstrap the scratch store in this order:
 
@@ -93,10 +97,24 @@ Add `sysLogGet` and `sysLogQuery` only when the disposable fixture enables struc
 
 ```bash
 cd debug-dashboard
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.*' \
+  --exclude-classes 'mail.sandbox.dashboard.server.gate.stalwart.*LiveTest'
+
+DASHBOARD_WEB_ASSETS="$PWD/build/tasks/_dashboard-web_linkWasmJs" \
+DASHBOARD_WEB_RESOURCES="$PWD/build/artifacts/PreparedComposeResourcesDirArtifact/dashboard-webcommon" \
+DASHBOARD_WEB_ENTRY="dashboard-web.mjs" \
+./kotlin test \
+  --include-module dashboard-contract \
+  --include-module dashboard-server \
+  --include-module dashboard-web \
+  --exclude-classes 'mail.sandbox.dashboard.server.gate.stalwart.*LiveTest'
+
 STALWART_GATE_PREPARE=1 \
 ./kotlin test \
   --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartFixtureSecretTest'
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartFixturePrepareLiveTest'
 cd ..
 export STALWART_GATE_RECOVERY_ENV_FILE="$PWD/debug-dashboard/.runtime/stalwart-gate0b/recovery.env"
 docker compose -p mail-sandbox-stalwart-gate \
@@ -109,7 +127,7 @@ STALWART_BASE_URL=http://127.0.0.1:18443 \
 STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
 ./kotlin test \
   --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartBootstrapTest'
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartBootstrapLiveTest'
 cd ..
 docker compose -p mail-sandbox-stalwart-gate \
   -f debug-dashboard/dashboard-server/testResources/stalwart-gate0b/compose.yml \
@@ -129,7 +147,7 @@ STALWART_BASE_URL=http://127.0.0.1:18443 \
 STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
 ./kotlin test \
   --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRecoveryRetirementTest'
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRecoveryRetirementLiveTest'
 ```
 
 Expected: the `rg` command prints nothing; all assertions pass, recovery is retired, and no ordinary mail AppPassword exists yet.
@@ -137,7 +155,9 @@ Expected: the `rg` command prints nothing; all assertions pass, recovery is reti
 - [ ] Commit:
 
 ```bash
-git add debug-dashboard/dashboard-server docs/debug-dashboard/gates/0b-stalwart.md
+git add debug-dashboard/dashboard-server \
+  docs/debug-dashboard/gates/0b-stalwart.md \
+  docs/superpowers/plans/2026-07-23-debug-dashboard-gate-0b-stalwart.md
 git commit -m "test: bootstrap scoped Stalwart gate fixture"
 ```
 
@@ -150,12 +170,11 @@ git commit -m "test: bootstrap scoped Stalwart gate fixture"
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartAppPasswordSemanticsLiveTest.kt`
 - Modify: `docs/debug-dashboard/gates/0b-stalwart.md`
 
-- [ ] Start with this explicit AppPassword Replace allowlist:
+- [ ] Start with this source-derived AppPassword Replace allowlist:
 
 ```kotlin
 val dashboardMailPermissions = setOf(
     "authenticate",
-    "emailSend",
     "jmapMailboxGet",
     "jmapMailboxCreate",
     "jmapMailboxUpdate",
@@ -173,9 +192,25 @@ val dashboardMailPermissions = setOf(
 )
 ```
 
-The live method matrix is authoritative. If one required method reports a missing permission, add only its exact named permission after a focused negative test proves the need and record the final set in the gate report. Never switch to `Inherit`, a wildcard, or unrelated `changes/queryChanges` methods. Fetch every created AppPassword object and assert effective mode `Replace` plus the exact final list.
+The live method matrix is authoritative. Pinned-source inspection predicts that
+JMAP `EmailSubmission/set` does not need `emailSend`, while SMTP AUTH does.
+Prove JMAP submission succeeds without `emailSend` and paired SMTP AUTH fails
+before accepting the narrower list. If one required JMAP method reports a
+missing permission, add only its exact named permission after a focused negative
+test proves the need and record the final set in the gate report. Never switch
+to `Inherit`, a wildcard, or unrelated `changes/queryChanges` methods. Fetch
+every created AppPassword object and assert declarative mode `Replace` plus the
+exact final list, then verify the credential's effective scope through
+`/api/account`.
 
-- [ ] Write the failing semantics test before the client. Authenticated as the exact ordinary Account with its normal password, create `x:AppPassword` with description `mail-sandbox/debug-dashboard/<store-uuid>/<generation>`. Assert the server generates the secret, returns it only in `created`, does not return it from later get/query, does not permit secret update, and permits two simultaneous credentials for bounded rotation.
+- [ ] Before creating any AppPassword, run the management and stripped-credential
+  raw HTTP `/jmap/upload/{accountId}` and download permission negatives.
+  Pinned-source inspection predicts those endpoints may bypass
+  `jmapBlobUpload`/`jmapBlobGet` and even upload membership checks. If either
+  scoped credential can perform a forbidden blob operation, record `STOP` and
+  do not continue the gate.
+
+- [ ] Write the failing semantics test before the client. Authenticated as the exact ordinary Account with its normal password, create `x:AppPassword` with description `mail-sandbox/debug-dashboard/<store-uuid>/<generation>`. Assert the server generates the secret, returns its plaintext only in `created`, returns only the non-recoverable `"****"` sentinel from later exact-ID get, does not permit secret update, and permits two simultaneous credentials for bounded rotation. Query IDs first and get only those exact IDs; get-all mixes credential types into `notFound`.
 
 - [ ] Prove the created AppPassword directly authenticates only its owning Account and can execute the exact mailbox/Email/blob/Identity/submission calls in the allowlist. Prove cross-account username/credential combinations fail.
 
@@ -389,7 +424,7 @@ cd debug-dashboard
 STALWART_GATE_CLEANUP=1 \
 ./kotlin test \
   --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartGateCleanupTest'
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartGateCleanupLiveTest'
 ```
 
 Expected: the resolved target is exactly the gate-owned runtime directory, all fixture secret/store files are removed, and repository `stalwart-data/` plus production credential paths are untouched. Request a new design decision; do not start migration or Gate 0C.
@@ -742,7 +777,7 @@ cd debug-dashboard
 STALWART_GATE_CLEANUP=1 \
 ./kotlin test \
   --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartGateCleanupTest'
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartGateCleanupLiveTest'
 ```
 
 Expected: the project is down and the validated gate runtime is absent. Do not pass `-v` unless the resolved volume is gate-owned and checked first.
