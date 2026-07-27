@@ -237,5 +237,9 @@ __pycache__/
 
 mails/debugging/*
 
+.m2.cache/
+
 # AI stuff
 .claude/settings.local.json
+.superpowers/brainstorm/
+
