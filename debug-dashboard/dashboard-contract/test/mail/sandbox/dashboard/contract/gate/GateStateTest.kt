@@ -128,6 +128,42 @@ class GateStateTest {
     }
 
     @Test
+    fun duplicateOrdinarySequenceDuringResyncPreservesResyncAndReconnect() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val reconnecting = reduceGateState(current, GateAction.SseReconnectScheduled)
+        val resyncing = reduceGateState(reconnecting, GateAction.SseResyncStarted)
+        val duplicate = reduceGateState(
+            resyncing,
+            GateAction.SseSequenceReceived(12L),
+        )
+
+        assertEquals(12L, duplicate.sseSequence)
+        assertEquals(SseSyncStatus.Resyncing, duplicate.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Reconnecting, duplicate.sseConnectionStatus)
+    }
+
+    @Test
+    fun regressiveOrdinarySequenceDuringResyncPreservesResyncAndReconnect() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val reconnecting = reduceGateState(current, GateAction.SseReconnectScheduled)
+        val resyncing = reduceGateState(reconnecting, GateAction.SseResyncStarted)
+        val regressive = reduceGateState(
+            resyncing,
+            GateAction.SseSequenceReceived(11L),
+        )
+
+        assertEquals(12L, regressive.sseSequence)
+        assertEquals(SseSyncStatus.Resyncing, regressive.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Reconnecting, regressive.sseConnectionStatus)
+    }
+
+    @Test
     fun resyncCompletionAcceptsEqualCursorAndReturnsToCurrent() {
         val current = reduceGateState(
             GateState(),

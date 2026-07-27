@@ -272,18 +272,22 @@ invalid/regressive completion test already passed. After separating ordinary
 receipt from explicit resync completion, those 15 tests passed. A final guard
 RED then executed 16 tests and failed only because completion outside
 `Resyncing` advanced the cursor from 12 to 20. After enforcing the active
-resync precondition, the final GREEN run executed 16/16 JVM tests (13 gate
-tests and the three existing contract tests) with zero skipped or failed.
+resync precondition, those 16 tests passed. A re-review RED then executed 18
+tests and failed only the duplicate and regressive ordinary-receipt cases,
+which changed active `Resyncing` state to `Stale`. After making active resync
+sticky for every ordinary receipt, the final GREEN run executed 18/18 JVM
+tests (15 gate tests and the three existing contract tests) with zero skipped
+or failed.
 
 A new empty build directory made the final shared Wasm proof independent of
 the repository build cache:
 
 ```text
-mktemp -d /private/tmp/gate0a-task3-final-review-link.XXXXXX
-/private/tmp/gate0a-task3-final-review-link.UvQbZG
+mktemp -d /private/tmp/gate0a-task3-resync-link.XXXXXX
+/private/tmp/gate0a-task3-resync-link.8tTTyi
 
 ./kotlin task \
-  --build-dir=/private/tmp/gate0a-task3-final-review-link.UvQbZG \
+  --build-dir=/private/tmp/gate0a-task3-resync-link.8tTTyi \
   :dashboard-contract:linkWasmJsTest
 ```
 
@@ -377,7 +381,7 @@ build/tasks/_dashboard-web_linkWasmJs/
 
 | Filename | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `dashboard-web.wasm` | 8,453,166 | `b9e40d4a7f642b59fd559fb8f589d19b42a493fee5f9324792d6e790a88c1bc9` |
+| `dashboard-web.wasm` | 8,453,189 | `68d78641bb476163a7a69faa9e4a605805cd3550c16971233e2677b3c7cbe990` |
 | `dashboard-web.mjs` | 2,833 | `cb4cb2d848a3f7c7959fe7d1b70ce5be34eb999db4d640858e09cbac413c2917` |
 | `dashboard-web.import-object.mjs` | 30,042 | `5651da31cf4f09e9a17a4e6b2dcdab181d0769c9ddaaa4b908dbbfbb33d3927e` |
 | `dashboard-web.js-builtins.mjs` | 2,095 | `a370c66f8031ae3a8d5718123a7fb1aeed4f43caca681181ef69b512321d5b94` |

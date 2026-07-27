@@ -92,6 +92,8 @@ private fun GateState.receiveSequence(sequence: Long): GateState {
                 SseSyncStatus.Resyncing -> SseSyncStatus.Resyncing
             },
         )
+    } else if (sseSyncStatus == SseSyncStatus.Resyncing) {
+        this
     } else {
         copy(sseSyncStatus = SseSyncStatus.Stale)
     }
