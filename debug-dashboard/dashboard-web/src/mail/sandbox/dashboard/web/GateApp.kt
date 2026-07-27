@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -102,8 +103,10 @@ internal fun GateApp(modifier: Modifier = Modifier) {
                 state = reduceGateState(state, action)
             },
             onRouteSelected = { route ->
-                window.history.pushState(null, "", route.path)
-                state = reduceGateState(state, GateAction.RouteSelected(route.path))
+                if (route != state.route) {
+                    window.history.pushState(null, "", route.path)
+                    state = reduceGateState(state, GateAction.RouteSelected(route.path))
+                }
             },
             modifier = modifier,
         )
@@ -190,14 +193,20 @@ private fun GateSurface(
                             OutlinedButton(
                                 onClick = { onRouteSelected(GateRoute.Overview) },
                                 border = BorderStroke(1.dp, InstrumentGraphite),
+                                modifier = Modifier.semantics {
+                                    selected = state.route == GateRoute.Overview
+                                },
                             ) {
-                                Text("/")
+                                Text("Overview")
                             }
                             OutlinedButton(
                                 onClick = { onRouteSelected(GateRoute.Details) },
                                 border = BorderStroke(1.dp, InstrumentGraphite),
+                                modifier = Modifier.semantics {
+                                    selected = state.route == GateRoute.Details
+                                },
                             ) {
-                                Text("/gate/details")
+                                Text("Gate details")
                             }
                         }
                         Spacer(Modifier.height(12.dp))

@@ -264,19 +264,26 @@ ERROR: Kotlin compilation failed with 73 errors (see above)
 
 After the minimum reducer was implemented, the same command exited 0. A
 follow-up RED for truthful initial SSE state exited 1 on the missing
-`SseSyncStatus.Pending`; after adding that one state, the final GREEN run
-executed 10/10 JVM tests (seven gate tests and the three existing contract
-tests) with zero skipped or failed.
+`SseSyncStatus.Pending`. A later review RED executed 15 tests and failed the
+four targeted transition cases: newer ordinary receipt cleared `Stale`,
+ordinary receipt cleared `Resyncing`, equal-cursor completion stayed `Stale`,
+and completion replaced `Reconnecting` with `Connected`. The new
+invalid/regressive completion test already passed. After separating ordinary
+receipt from explicit resync completion, those 15 tests passed. A final guard
+RED then executed 16 tests and failed only because completion outside
+`Resyncing` advanced the cursor from 12 to 20. After enforcing the active
+resync precondition, the final GREEN run executed 16/16 JVM tests (13 gate
+tests and the three existing contract tests) with zero skipped or failed.
 
 A new empty build directory made the final shared Wasm proof independent of
 the repository build cache:
 
 ```text
-mktemp -d /private/tmp/gate0a-task3-final-link.XXXXXX
-/private/tmp/gate0a-task3-final-link.YGIsOx
+mktemp -d /private/tmp/gate0a-task3-final-review-link.XXXXXX
+/private/tmp/gate0a-task3-final-review-link.UvQbZG
 
 ./kotlin task \
-  --build-dir=/private/tmp/gate0a-task3-final-link.YGIsOx \
+  --build-dir=/private/tmp/gate0a-task3-final-review-link.UvQbZG \
   :dashboard-contract:linkWasmJsTest
 ```
 
@@ -289,7 +296,9 @@ Wasm test runtime passed.
 `dashboard-web` now has a real `ComposeViewport(document.body!!)` entry point,
 an explicit `ExperimentalComposeUiApi` opt-in, and a small Material gate
 surface. The UI uses the shared reducer for route and activation state,
-pushes `/` and `/gate/details` through browser history, and renders:
+exposes `Overview` and `Gate details` controls with selected semantics, pushes
+only inactive `/` and `/gate/details` selections through browser history, and
+renders:
 
 - Compose heading semantics for `Mail Flight Recorder` (heading intent, not a
   claim that the canvas text is a native DOM `h1`);
@@ -368,7 +377,7 @@ build/tasks/_dashboard-web_linkWasmJs/
 
 | Filename | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `dashboard-web.wasm` | 8,449,717 | `84ed2b509f3892bb1317edb8a1d38f003821154a02a58e25ea8053c4e2feda1a` |
+| `dashboard-web.wasm` | 8,453,166 | `b9e40d4a7f642b59fd559fb8f589d19b42a493fee5f9324792d6e790a88c1bc9` |
 | `dashboard-web.mjs` | 2,833 | `cb4cb2d848a3f7c7959fe7d1b70ce5be34eb999db4d640858e09cbac413c2917` |
 | `dashboard-web.import-object.mjs` | 30,042 | `5651da31cf4f09e9a17a4e6b2dcdab181d0769c9ddaaa4b908dbbfbb33d3927e` |
 | `dashboard-web.js-builtins.mjs` | 2,095 | `a370c66f8031ae3a8d5718123a7fb1aeed4f43caca681181ef69b512321d5b94` |

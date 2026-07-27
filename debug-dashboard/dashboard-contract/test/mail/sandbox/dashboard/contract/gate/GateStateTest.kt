@@ -91,6 +91,116 @@ class GateStateTest {
     }
 
     @Test
+    fun newerOrdinarySequenceAdvancesCursorButKeepsStaleState() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val stale = reduceGateState(
+            current,
+            GateAction.SseSequenceReceived(12L),
+        )
+        val advanced = reduceGateState(
+            stale,
+            GateAction.SseSequenceReceived(13L),
+        )
+
+        assertEquals(13L, advanced.sseSequence)
+        assertEquals(SseSyncStatus.Stale, advanced.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Connected, advanced.sseConnectionStatus)
+    }
+
+    @Test
+    fun ordinarySequenceDuringResyncKeepsResyncingState() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val resyncing = reduceGateState(current, GateAction.SseResyncStarted)
+        val advanced = reduceGateState(
+            resyncing,
+            GateAction.SseSequenceReceived(13L),
+        )
+
+        assertEquals(13L, advanced.sseSequence)
+        assertEquals(SseSyncStatus.Resyncing, advanced.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Connected, advanced.sseConnectionStatus)
+    }
+
+    @Test
+    fun resyncCompletionAcceptsEqualCursorAndReturnsToCurrent() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val resyncing = reduceGateState(current, GateAction.SseResyncStarted)
+        val completed = reduceGateState(
+            resyncing,
+            GateAction.SseResyncCompleted(12L),
+        )
+
+        assertEquals(12L, completed.sseSequence)
+        assertEquals(SseSyncStatus.Current, completed.sseSyncStatus)
+    }
+
+    @Test
+    fun resyncCompletionPreservesReconnectingState() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val reconnecting = reduceGateState(current, GateAction.SseReconnectScheduled)
+        val resyncing = reduceGateState(reconnecting, GateAction.SseResyncStarted)
+        val completed = reduceGateState(
+            resyncing,
+            GateAction.SseResyncCompleted(20L),
+        )
+
+        assertEquals(20L, completed.sseSequence)
+        assertEquals(SseSyncStatus.Current, completed.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Reconnecting, completed.sseConnectionStatus)
+    }
+
+    @Test
+    fun resyncCompletionWithoutActiveResyncMarksStaleWithoutChangingTransport() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val reconnecting = reduceGateState(current, GateAction.SseReconnectScheduled)
+        val completed = reduceGateState(
+            reconnecting,
+            GateAction.SseResyncCompleted(20L),
+        )
+
+        assertEquals(12L, completed.sseSequence)
+        assertEquals(SseSyncStatus.Stale, completed.sseSyncStatus)
+        assertEquals(SseConnectionStatus.Reconnecting, completed.sseConnectionStatus)
+    }
+
+    @Test
+    fun invalidAndRegressiveResyncCompletionMarkStaleWithoutMovingCursor() {
+        val current = reduceGateState(
+            GateState(),
+            GateAction.SseSequenceReceived(12L),
+        )
+        val resyncing = reduceGateState(current, GateAction.SseResyncStarted)
+        val invalid = reduceGateState(
+            resyncing,
+            GateAction.SseResyncCompleted(0L),
+        )
+        val regressive = reduceGateState(
+            resyncing,
+            GateAction.SseResyncCompleted(11L),
+        )
+
+        assertEquals(12L, invalid.sseSequence)
+        assertEquals(SseSyncStatus.Stale, invalid.sseSyncStatus)
+        assertEquals(12L, regressive.sseSequence)
+        assertEquals(SseSyncStatus.Stale, regressive.sseSyncStatus)
+    }
+
+    @Test
     fun staleSequenceCanEnterResyncAndResumeAtANewerSequence() {
         val current = reduceGateState(
             GateState(),

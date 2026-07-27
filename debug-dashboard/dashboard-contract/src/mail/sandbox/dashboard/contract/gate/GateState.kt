@@ -67,22 +67,45 @@ fun reduceGateState(state: GateState, action: GateAction): GateState = when (act
     GateAction.ApiProbeStarted -> state.copy(apiProbeStatus = ApiProbeStatus.Probing)
     GateAction.ApiProbeSucceeded -> state.copy(apiProbeStatus = ApiProbeStatus.Ready)
     GateAction.SseConnected -> state.copy(sseConnectionStatus = SseConnectionStatus.Connected)
-    is GateAction.SseSequenceReceived -> state.advanceSequence(action.sequence)
+    is GateAction.SseSequenceReceived -> state.receiveSequence(action.sequence)
     GateAction.SseReconnectScheduled -> {
         state.copy(sseConnectionStatus = SseConnectionStatus.Reconnecting)
     }
 
     GateAction.SseResyncStarted -> state.copy(sseSyncStatus = SseSyncStatus.Resyncing)
-    is GateAction.SseResyncCompleted -> state.advanceSequence(action.sequence)
+    is GateAction.SseResyncCompleted -> state.completeResync(action.sequence)
     GateAction.IncrementProof -> state.copy(activationCount = state.activationCount + 1)
 }
 
-private fun GateState.advanceSequence(sequence: Long): GateState {
-    val isMonotonic = sequence > 0L && (sseSequence == null || sequence > sseSequence)
-    return if (isMonotonic) {
+private fun GateState.receiveSequence(sequence: Long): GateState {
+    val isStrictlyNewer = sequence > 0L && (sseSequence == null || sequence > sseSequence)
+    return if (isStrictlyNewer) {
         copy(
             sseSequence = sequence,
             sseConnectionStatus = SseConnectionStatus.Connected,
+            sseSyncStatus = when (sseSyncStatus) {
+                SseSyncStatus.Pending,
+                SseSyncStatus.Current,
+                -> SseSyncStatus.Current
+
+                SseSyncStatus.Stale -> SseSyncStatus.Stale
+                SseSyncStatus.Resyncing -> SseSyncStatus.Resyncing
+            },
+        )
+    } else {
+        copy(sseSyncStatus = SseSyncStatus.Stale)
+    }
+}
+
+private fun GateState.completeResync(sequence: Long): GateState {
+    if (sseSyncStatus != SseSyncStatus.Resyncing) {
+        return copy(sseSyncStatus = SseSyncStatus.Stale)
+    }
+
+    val isNonRegressive = sequence > 0L && (sseSequence == null || sequence >= sseSequence)
+    return if (isNonRegressive) {
+        copy(
+            sseSequence = sequence,
             sseSyncStatus = SseSyncStatus.Current,
         )
     } else {
