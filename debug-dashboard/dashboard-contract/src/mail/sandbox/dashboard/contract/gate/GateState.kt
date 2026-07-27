@@ -1,0 +1,91 @@
+package mail.sandbox.dashboard.contract.gate
+
+enum class GateRoute(val path: String) {
+    Overview("/"),
+    Details("/gate/details"),
+    ;
+
+    companion object {
+        fun fromPath(path: String): GateRoute? = entries.firstOrNull { it.path == path }
+    }
+}
+
+enum class ApiProbeStatus {
+    Pending,
+    Probing,
+    Ready,
+}
+
+enum class SseConnectionStatus {
+    Disconnected,
+    Connected,
+    Reconnecting,
+}
+
+enum class SseSyncStatus {
+    Pending,
+    Current,
+    Stale,
+    Resyncing,
+}
+
+data class GateState(
+    val route: GateRoute = GateRoute.Overview,
+    val apiProbeStatus: ApiProbeStatus = ApiProbeStatus.Pending,
+    val sseSequence: Long? = null,
+    val sseConnectionStatus: SseConnectionStatus = SseConnectionStatus.Disconnected,
+    val sseSyncStatus: SseSyncStatus = SseSyncStatus.Pending,
+    val activationCount: Int = 0,
+)
+
+sealed interface GateAction {
+    data class RouteSelected(val path: String) : GateAction
+
+    data object ApiProbeStarted : GateAction
+
+    data object ApiProbeSucceeded : GateAction
+
+    data object SseConnected : GateAction
+
+    data class SseSequenceReceived(val sequence: Long) : GateAction
+
+    data object SseReconnectScheduled : GateAction
+
+    data object SseResyncStarted : GateAction
+
+    data class SseResyncCompleted(val sequence: Long) : GateAction
+
+    data object IncrementProof : GateAction
+}
+
+fun reduceGateState(state: GateState, action: GateAction): GateState = when (action) {
+    is GateAction.RouteSelected -> {
+        val route = GateRoute.fromPath(action.path)
+        if (route == null) state else state.copy(route = route)
+    }
+
+    GateAction.ApiProbeStarted -> state.copy(apiProbeStatus = ApiProbeStatus.Probing)
+    GateAction.ApiProbeSucceeded -> state.copy(apiProbeStatus = ApiProbeStatus.Ready)
+    GateAction.SseConnected -> state.copy(sseConnectionStatus = SseConnectionStatus.Connected)
+    is GateAction.SseSequenceReceived -> state.advanceSequence(action.sequence)
+    GateAction.SseReconnectScheduled -> {
+        state.copy(sseConnectionStatus = SseConnectionStatus.Reconnecting)
+    }
+
+    GateAction.SseResyncStarted -> state.copy(sseSyncStatus = SseSyncStatus.Resyncing)
+    is GateAction.SseResyncCompleted -> state.advanceSequence(action.sequence)
+    GateAction.IncrementProof -> state.copy(activationCount = state.activationCount + 1)
+}
+
+private fun GateState.advanceSequence(sequence: Long): GateState {
+    val isMonotonic = sequence > 0L && (sseSequence == null || sequence > sseSequence)
+    return if (isMonotonic) {
+        copy(
+            sseSequence = sequence,
+            sseConnectionStatus = SseConnectionStatus.Connected,
+            sseSyncStatus = SseSyncStatus.Current,
+        )
+    } else {
+        copy(sseSyncStatus = SseSyncStatus.Stale)
+    }
+}
