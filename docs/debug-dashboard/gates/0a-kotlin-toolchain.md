@@ -99,12 +99,16 @@ with:
 ERROR: Please specify the module(s) to inspect with --module, or use --all-modules to inspect all modules
 ```
 
-The reproducible non-interactive validation commands are therefore:
+From the repository root, the reproducible non-interactive validation commands
+are therefore:
 
 ```bash
-./kotlin show modules
-./kotlin show settings --all-modules
-./kotlin show dependencies --all-modules --include-tests
+(
+  cd debug-dashboard
+  ./kotlin show modules
+  ./kotlin show settings --all-modules
+  ./kotlin show dependencies --all-modules --include-tests
+)
 ```
 
 ## Effective reviewed versions
@@ -200,8 +204,12 @@ The temporary source was then removed. The committed Task 1 scaffold remains
 source-free; a full build of that exact state will continue to hit the
 0.11.1 empty-app edge case until a later task adds the real Wasm entry point.
 
-The tracked-file alternate-stack scan completed with no output:
+From the repository root, the alternate-stack scan of tracked and non-ignored
+worktree files completed with no output. It checks the Git index plus untracked
+files that are not ignored, so only ignored output such as Toolchain linker
+artifacts is omitted:
 
 ```bash
-git ls-files . | rg '(^|/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(js|mjs|ts|tsx)$'
+git ls-files --cached --others --exclude-standard . \
+  | rg '(^|/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradlew(\.bat)?|gradle\.properties|\.npmrc|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml)$|(^|/)gradle/wrapper(/|$)|\.(js|jsx|cjs|mjs|ts|tsx|mts|cts)$'
 ```
