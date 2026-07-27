@@ -1,13 +1,14 @@
-package org.jetbrains.amper.ktor
+package mail.sandbox.dashboard.server
 
-import io.ktor.server.application.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
+import io.ktor.server.application.Application
+import io.ktor.server.routing.routing
+import mail.sandbox.dashboard.server.gate.gateRoutes
+import mail.sandbox.dashboard.server.web.WebAssetBundle
+import mail.sandbox.dashboard.server.web.webRoutes
 
-fun Application.configureRouting() {
+fun Application.configureRouting(webAssets: WebAssetBundle) {
     routing {
-        get("/") {
-            call.respondText("Hello World!")
-        }
+        gateRoutes()
+        webRoutes(webAssets)
     }
 }

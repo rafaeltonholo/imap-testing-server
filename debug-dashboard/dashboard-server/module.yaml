@@ -3,17 +3,22 @@ product: jvm/app
 settings:
   kotlin:
     version: 2.3.21
+    serialization:
+      format: json
   ktor:
     enabled: true
     version: 3.4.3
   jvm:
-    mainClass: org.jetbrains.amper.ktor.ApplicationKt
+    mainClass: mail.sandbox.dashboard.server.ApplicationKt
 
 dependencies:
   - ../dashboard-contract
   - $ktor.server.core
   - $ktor.server.netty
   - $ktor.server.config.yaml
+  - $kotlin.serialization.json
+  - org.jetbrains.skiko:skiko-js-wasm-runtime:0.9.37.4
+  - org.webjars.npm:js-joda__core:3.2.0
   - ch.qos.logback:logback-classic:1.5.18
 
 test-dependencies:
