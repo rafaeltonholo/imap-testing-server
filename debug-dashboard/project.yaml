@@ -1,0 +1,4 @@
+modules:
+  - dashboard-contract
+  - dashboard-server
+  - dashboard-web

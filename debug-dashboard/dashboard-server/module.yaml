@@ -1,0 +1,21 @@
+product: jvm/app
+
+settings:
+  kotlin:
+    version: 2.3.21
+  ktor:
+    enabled: true
+    version: 3.4.3
+  jvm:
+    mainClass: org.jetbrains.amper.ktor.ApplicationKt
+
+dependencies:
+  - ../dashboard-contract
+  - $ktor.server.core
+  - $ktor.server.netty
+  - $ktor.server.config.yaml
+  - ch.qos.logback:logback-classic:1.5.18
+
+test-dependencies:
+  - $ktor.server.testHost
+  - org.seleniumhq.selenium:selenium-java:4.46.0

@@ -1,0 +1,12 @@
+product:
+  type: kmp/lib
+  platforms: [jvm, wasmJs]
+
+dependencies:
+  - $kotlin.serialization.json
+
+settings:
+  kotlin:
+    version: 2.3.21
+    serialization:
+      format: json
