@@ -34,6 +34,7 @@ internal class CredentialStorePaths private constructor(
     val key: Path,
     val lock: Path,
     val quarantine: Path,
+    val quarantineTransaction: Path,
     internal val trustedRoot: Path,
 ) {
     companion object {
@@ -90,6 +91,8 @@ internal class CredentialStorePaths private constructor(
                 key = runtimeRoot.resolve("keys/stalwart-app-passwords.v1.key"),
                 lock = stalwartDirectory.resolve("app-passwords.v1.lock"),
                 quarantine = stalwartDirectory.resolve("quarantine"),
+                quarantineTransaction =
+                    stalwartDirectory.resolve("app-passwords.v1.quarantine-transaction"),
                 trustedRoot = trustedRoot,
             )
         }
@@ -102,6 +105,8 @@ internal enum class CredentialStoreCommitPoint {
     BeforeFailIfExistsPublish,
     AfterFailIfExistsPublish,
     AfterQuarantineSourceDelete,
+    BeforeQuarantineDestinationPreflight,
+    AfterQuarantineLinkVisible,
 }
 
 internal fun interface CredentialStoreCommitObserver {
@@ -123,6 +128,7 @@ internal class FileStalwartCredentialStore(
         checkOpen()
         return try {
             withStableLock {
+                requireNoQuarantineTransaction()
                 cleanupRecognizedTemporaryFiles()
                 CredentialStoreLoadResult.Available(readOrInitializeSnapshot())
             }
@@ -139,12 +145,14 @@ internal class FileStalwartCredentialStore(
         require(expectedRevision >= 0 && expectedRevision != Long.MAX_VALUE) {
             "Expected credential-store revision is invalid"
         }
-        validateRecordMap(records)
+        validateRecordMap(records, authenticatedStoreId = null)
         return try {
             withStableLock {
+                requireNoQuarantineTransaction()
                 cleanupRecognizedTemporaryFiles()
                 val current = readExistingSnapshot()
                 try {
+                    validateRecordMap(records, current.storeId)
                     if (current.revision != expectedRevision) {
                         return@withStableLock CredentialStoreWriteResult.RevisionMismatch(
                             actualRevision = current.revision,
@@ -194,7 +202,11 @@ internal class FileStalwartCredentialStore(
         checkOpen()
         return try {
             withStableLock {
+                val pendingTransaction = readQuarantineTransactionIfPresent()
                 cleanupRecognizedTemporaryFiles()
+                if (pendingTransaction != null) {
+                    return@withStableLock executeQuarantineTransaction(pendingTransaction)
+                }
                 when (inspectPair()) {
                     StorePair.Absent -> CredentialStoreQuarantineResult.StoreAvailable
                     StorePair.Complete -> {
@@ -243,6 +255,7 @@ internal class FileStalwartCredentialStore(
         }
 
     private fun readExistingSnapshot(): StalwartCredentialSnapshot {
+        requireNoQuarantineTransaction()
         if (inspectPair() != StorePair.Complete) throw StoreUnavailableException()
         requireSecureRegularFile(paths.key)
         requireSecureRegularFile(paths.ciphertext)
@@ -258,6 +271,7 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun initializeEmptyStore() {
+        requireNoQuarantineTransaction()
         if (inspectPair() != StorePair.Absent) throw StoreUnavailableException()
         val keyBytes = ByteArray(KEY_BYTES).also(secureRandom::nextBytes)
         val storeId = newStoreId()
@@ -297,8 +311,8 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun inspectPair(): StorePair {
-        val keyExists = Files.exists(paths.key, LinkOption.NOFOLLOW_LINKS)
-        val ciphertextExists = Files.exists(paths.ciphertext, LinkOption.NOFOLLOW_LINKS)
+        val keyExists = knownPathExists(paths.key)
+        val ciphertextExists = knownPathExists(paths.ciphertext)
         return when {
             !keyExists && !ciphertextExists -> StorePair.Absent
             keyExists && ciphertextExists -> StorePair.Complete
@@ -320,7 +334,10 @@ internal class FileStalwartCredentialStore(
         }
     }
 
-    private fun validateRecordMap(records: Map<String, StalwartCredentialRecord>) {
+    private fun validateRecordMap(
+        records: Map<String, StalwartCredentialRecord>,
+        authenticatedStoreId: UUID?,
+    ) {
         require(records.size <= MAX_RECORDS) { "Credential record count is invalid" }
         val ownedSecrets = IdentityHashMap<SecretBytes, Unit>()
         records.forEach { (key, record) ->
@@ -331,11 +348,11 @@ internal class FileStalwartCredentialStore(
             validateString(record.addressAtCapture)
             record.active?.let { generation ->
                 claimSecretOwnership(ownedSecrets, generation)
-                validateGeneration(generation)
+                validateGeneration(generation, authenticatedStoreId)
             }
             record.other?.let { generation ->
                 claimSecretOwnership(ownedSecrets, generation)
-                validateGeneration(generation)
+                validateGeneration(generation, authenticatedStoreId)
             }
         }
     }
@@ -350,11 +367,20 @@ internal class FileStalwartCredentialStore(
         ownedSecrets[generation.secret] = Unit
     }
 
-    private fun validateGeneration(generation: CredentialGeneration) {
+    private fun validateGeneration(
+        generation: CredentialGeneration,
+        authenticatedStoreId: UUID?,
+    ) {
         validateString(generation.credentialId)
         validateString(generation.description)
-        require(generation.description.startsWith(RESERVED_DESCRIPTION_PREFIX)) {
-            "Credential description is outside the reserved namespace"
+        if (authenticatedStoreId != null) {
+            val expectedDescription =
+                "$RESERVED_DESCRIPTION_ROOT$authenticatedStoreId/${generation.generation}"
+            if (generation.description != expectedDescription) {
+                throw StoreInputException(
+                    "Credential description does not match authenticated store identity",
+                )
+            }
         }
         generation.secret.read { secret ->
             require(secret.isNotEmpty() && secret.size <= MAX_SECRET_BYTES) {
@@ -376,7 +402,7 @@ internal class FileStalwartCredentialStore(
         records: Map<String, StalwartCredentialRecord>,
     ): ByteArray {
         require(revision >= 0) { "Credential-store revision is invalid" }
-        validateRecordMap(records)
+        validateRecordMap(records, storeId)
         val nonce = ByteArray(NONCE_BYTES).also(secureRandom::nextBytes)
         val header = encodeHeader(storeId, nonce)
         val payload = encodePayload(revision, records)
@@ -637,7 +663,11 @@ internal class FileStalwartCredentialStore(
                 }
             }
             if (buffer.hasRemaining()) throw StoreUnavailableException()
-            validateRecordMap(records)
+            try {
+                validateRecordMap(records, storeId)
+            } catch (invalid: StoreInputException) {
+                throw StoreUnavailableException(invalid)
+            }
             return StalwartCredentialSnapshot(storeId, revision, records)
         } catch (failure: Throwable) {
             records.values.forEach(StalwartCredentialRecord::close)
@@ -804,14 +834,17 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun ensureSecureFile(path: Path) {
+        var created = false
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
             try {
                 createFile(path)
+                created = true
             } catch (_: FileAlreadyExistsException) {
                 // Validate the concurrently created entry below.
             }
         }
         requireSecureRegularFile(path)
+        if (created) fsyncDirectory(path.parent)
     }
 
     private fun requireSecureRegularFile(path: Path) {
@@ -865,6 +898,7 @@ internal class FileStalwartCredentialStore(
         bytes: ByteArray,
         replaceExisting: Boolean,
         observeCommit: Boolean,
+        observeFailIfExistsPublish: Boolean = true,
     ) {
         val temporary = createUniqueTemporary(target)
         FileChannel.open(
@@ -900,6 +934,7 @@ internal class FileStalwartCredentialStore(
             publishHardLinkWithoutOverwrite(
                 source = temporary,
                 destination = target,
+                observePublish = observeFailIfExistsPublish,
             )
         }
         fsyncDirectory(target.parent)
@@ -909,13 +944,18 @@ internal class FileStalwartCredentialStore(
     private fun publishHardLinkWithoutOverwrite(
         source: Path,
         destination: Path,
+        observePublish: Boolean,
     ) {
-        notifyCommit(CredentialStoreCommitPoint.BeforeFailIfExistsPublish, destination)
+        if (observePublish) {
+            notifyCommit(CredentialStoreCommitPoint.BeforeFailIfExistsPublish, destination)
+        }
         Files.createLink(destination, source)
         fsyncDirectory(destination.parent)
         if (!Files.isSameFile(source, destination)) throw StoreUnavailableException()
         requireSecureRegularFile(destination)
-        notifyCommit(CredentialStoreCommitPoint.AfterFailIfExistsPublish, destination)
+        if (observePublish) {
+            notifyCommit(CredentialStoreCommitPoint.AfterFailIfExistsPublish, destination)
+        }
         Files.delete(source)
         fsyncDirectory(source.parent)
     }
@@ -949,6 +989,7 @@ internal class FileStalwartCredentialStore(
     private fun cleanupRecognizedTemporaryFiles() {
         cleanupRecognizedTemporaryFiles(paths.ciphertext)
         cleanupRecognizedTemporaryFiles(paths.key)
+        cleanupRecognizedTemporaryFiles(paths.quarantineTransaction)
     }
 
     private fun cleanupRecognizedTemporaryFiles(target: Path) {
@@ -1028,48 +1069,304 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun quarantineExistingPair(): CredentialStoreQuarantineResult {
-        val sources = listOf(paths.key, paths.ciphertext)
-            .filter { Files.exists(it, LinkOption.NOFOLLOW_LINKS) }
-        if (sources.isEmpty()) return CredentialStoreQuarantineResult.StoreAvailable
-        sources.forEach(::requireQuarantinableRegularFile)
+        val sourceMask = currentQuarantineSourceMask()
+        if (sourceMask == 0) return CredentialStoreQuarantineResult.StoreAvailable
         ensureSecureDirectory(paths.quarantine)
 
-        val quarantineId = UUID.randomUUID()
-        val destinations = sources.associateWith { source ->
-            paths.quarantine.resolve(
-                "${source.fileName}.quarantined-$quarantineId",
-            )
+        val transaction = QuarantineTransaction(
+            id = newStoreId(),
+            sourceMask = sourceMask,
+        )
+        preflightNewQuarantineTransaction(transaction)
+        writeQuarantineTransaction(transaction)
+        return executeQuarantineTransaction(transaction)
+    }
+
+    private fun currentQuarantineSourceMask(): Int {
+        var mask = 0
+        if (knownPathExists(paths.key)) {
+            mask = mask or QUARANTINE_KEY_MASK
         }
-        val published = mutableListOf<Path>()
+        if (knownPathExists(paths.ciphertext)) {
+            mask = mask or QUARANTINE_CIPHERTEXT_MASK
+        }
+        return mask
+    }
+
+    private fun preflightNewQuarantineTransaction(
+        transaction: QuarantineTransaction,
+    ) {
+        if (!Files.notExists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS)) {
+            throw StoreUnavailableException()
+        }
+        allQuarantineEntries(transaction.id).forEach { entry ->
+            val participates = transaction.includes(entry.sourceMask)
+            val sourceExists = knownPathExists(entry.source)
+            if (participates) {
+                if (!sourceExists) throw StoreUnavailableException()
+                requireQuarantinableRegularFile(entry.source)
+            } else if (sourceExists) {
+                throw StoreUnavailableException()
+            }
+
+            notifyCommit(
+                CredentialStoreCommitPoint.BeforeQuarantineDestinationPreflight,
+                entry.destination,
+            )
+            if (!Files.notExists(entry.destination, LinkOption.NOFOLLOW_LINKS)) {
+                throw StoreUnavailableException()
+            }
+        }
+    }
+
+    private fun writeQuarantineTransaction(transaction: QuarantineTransaction) {
+        val encoded = encodeQuarantineTransaction(transaction)
         try {
-            destinations.forEach { (source, destination) ->
-                notifyCommit(
-                    CredentialStoreCommitPoint.BeforeFailIfExistsPublish,
-                    destination,
-                )
-                Files.createLink(destination, source)
-                published.add(destination)
-                fsyncDirectory(paths.quarantine)
-                if (!Files.isSameFile(source, destination)) {
+            writeAtomically(
+                target = paths.quarantineTransaction,
+                bytes = encoded,
+                replaceExisting = false,
+                observeCommit = false,
+                observeFailIfExistsPublish = false,
+            )
+            val persisted = readQuarantineTransactionIfPresent()
+            if (persisted != transaction) throw StoreUnavailableException()
+        } finally {
+            encoded.fill(0)
+        }
+    }
+
+    private fun executeQuarantineTransaction(
+        transaction: QuarantineTransaction,
+    ): CredentialStoreQuarantineResult {
+        requireSecureDirectory(paths.quarantine)
+        val allEntries = allQuarantineEntries(transaction.id)
+        val entries = allEntries.filter { transaction.includes(it.sourceMask) }
+        try {
+            preflightPendingQuarantineTransaction(transaction, allEntries)
+
+            entries.filter { knownPathExists(it.source) }
+                .forEach { entry ->
+                    setOwnerOnlyFile(entry.source)
+                }
+            entries.filter { knownPathExists(it.source) }
+                .forEach { entry ->
+                    requireSecureRegularFile(entry.source)
+                    forceSecureRegularFile(entry.source)
+                }
+            entries.filter { knownPathExists(it.source) }
+                .map { it.source.parent }
+                .distinct()
+                .forEach(::fsyncDirectory)
+
+            entries.forEach { entry ->
+                val sourceExists = knownPathExists(entry.source)
+                val destinationExists = knownPathExists(entry.destination)
+                var publishedNow = false
+                if (sourceExists && !destinationExists) {
+                    notifyCommit(
+                        CredentialStoreCommitPoint.BeforeFailIfExistsPublish,
+                        entry.destination,
+                    )
+                    Files.createLink(entry.destination, entry.source)
+                    publishedNow = true
+                    notifyCommit(
+                        CredentialStoreCommitPoint.AfterQuarantineLinkVisible,
+                        entry.destination,
+                    )
+                }
+                requireSecureRegularFile(entry.destination)
+                if (
+                    knownPathExists(entry.source) &&
+                    !Files.isSameFile(entry.source, entry.destination)
+                ) {
                     throw StoreUnavailableException()
                 }
-                setOwnerOnlyFile(destination)
-                requireSecureRegularFile(destination)
-                notifyCommit(
-                    CredentialStoreCommitPoint.AfterFailIfExistsPublish,
-                    destination,
-                )
-                Files.delete(source)
-                fsyncDirectory(source.parent)
+                fsyncDirectory(paths.quarantine)
+                if (publishedNow) {
+                    notifyCommit(
+                        CredentialStoreCommitPoint.AfterFailIfExistsPublish,
+                        entry.destination,
+                    )
+                }
+            }
+
+            entries.forEach { entry ->
+                requireSecureRegularFile(entry.destination)
+                if (
+                    knownPathExists(entry.source) &&
+                    !Files.isSameFile(entry.source, entry.destination)
+                ) {
+                    throw StoreUnavailableException()
+                }
+            }
+            fsyncDirectory(paths.quarantine)
+
+            entries.forEach { entry ->
+                if (!knownPathExists(entry.source)) {
+                    return@forEach
+                }
+                if (!Files.isSameFile(entry.source, entry.destination)) {
+                    throw StoreUnavailableException()
+                }
+                Files.delete(entry.source)
+                fsyncDirectory(entry.source.parent)
                 notifyCommit(
                     CredentialStoreCommitPoint.AfterQuarantineSourceDelete,
-                    destination,
+                    entry.destination,
                 )
             }
+
+            verifyCompletedQuarantineTransaction(transaction, allEntries)
+            val persisted = readQuarantineTransactionIfPresent()
+            if (persisted != transaction) throw StoreUnavailableException()
+            Files.delete(paths.quarantineTransaction)
+            fsyncDirectory(paths.quarantineTransaction.parent)
         } catch (failure: Exception) {
-            throw PartialQuarantineException(published.toList(), failure)
+            throw PartialQuarantineException(
+                validatedPublishedDestinations(entries),
+                failure,
+            )
         }
-        return CredentialStoreQuarantineResult.Quarantined(published)
+        return CredentialStoreQuarantineResult.Quarantined(
+            entries.map(QuarantineEntry::destination),
+        )
+    }
+
+    private fun preflightPendingQuarantineTransaction(
+        transaction: QuarantineTransaction,
+        allEntries: List<QuarantineEntry>,
+    ) {
+        allEntries.forEach { entry ->
+            val participates = transaction.includes(entry.sourceMask)
+            val sourceExists = knownPathExists(entry.source)
+            val destinationExists = knownPathExists(entry.destination)
+            if (!participates) {
+                if (sourceExists || destinationExists) throw StoreUnavailableException()
+                return@forEach
+            }
+            if (!sourceExists && !destinationExists) throw StoreUnavailableException()
+            if (sourceExists) requireQuarantinableRegularFile(entry.source)
+            if (destinationExists) requireSecureRegularFile(entry.destination)
+            if (
+                sourceExists &&
+                destinationExists &&
+                !Files.isSameFile(entry.source, entry.destination)
+            ) {
+                throw StoreUnavailableException()
+            }
+        }
+    }
+
+    private fun verifyCompletedQuarantineTransaction(
+        transaction: QuarantineTransaction,
+        allEntries: List<QuarantineEntry>,
+    ) {
+        allEntries.forEach { entry ->
+            if (!transaction.includes(entry.sourceMask)) {
+                if (
+                    knownPathExists(entry.source) ||
+                    knownPathExists(entry.destination)
+                ) {
+                    throw StoreUnavailableException()
+                }
+                return@forEach
+            }
+            if (knownPathExists(entry.source)) {
+                throw StoreUnavailableException()
+            }
+            requireSecureRegularFile(entry.destination)
+        }
+        fsyncDirectory(paths.quarantine)
+        allEntries.filter { transaction.includes(it.sourceMask) }
+            .map { it.source.parent }
+            .distinct()
+            .forEach(::fsyncDirectory)
+    }
+
+    private fun allQuarantineEntries(transactionId: UUID): List<QuarantineEntry> =
+        listOf(
+            QuarantineEntry(
+                sourceMask = QUARANTINE_KEY_MASK,
+                source = paths.key,
+                destination = quarantineDestination(paths.key, transactionId),
+            ),
+            QuarantineEntry(
+                sourceMask = QUARANTINE_CIPHERTEXT_MASK,
+                source = paths.ciphertext,
+                destination = quarantineDestination(paths.ciphertext, transactionId),
+            ),
+        )
+
+    private fun quarantineDestination(
+        source: Path,
+        transactionId: UUID,
+    ): Path =
+        paths.quarantine.resolve(
+            "${source.fileName}.quarantined-$transactionId",
+        )
+
+    private fun requireNoQuarantineTransaction() {
+        if (Files.notExists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS)) return
+        if (!Files.exists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS)) {
+            throw StoreUnavailableException()
+        }
+        requireSecureRegularFile(paths.quarantineTransaction)
+        throw StoreUnavailableException()
+    }
+
+    private fun readQuarantineTransactionIfPresent(): QuarantineTransaction? {
+        if (Files.notExists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS)) {
+            return null
+        }
+        if (!Files.exists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS)) {
+            throw StoreUnavailableException()
+        }
+        requireSecureRegularFile(paths.quarantineTransaction)
+        val encoded = readSecureBytes(
+            paths.quarantineTransaction,
+            QUARANTINE_MARKER_BYTES,
+        )
+        return try {
+            decodeQuarantineTransaction(encoded)
+        } finally {
+            encoded.fill(0)
+        }
+    }
+
+    private fun encodeQuarantineTransaction(
+        transaction: QuarantineTransaction,
+    ): ByteArray =
+        ByteBuffer.allocate(QUARANTINE_MARKER_BYTES)
+            .put(QUARANTINE_MARKER_MAGIC)
+            .put(QUARANTINE_MARKER_VERSION)
+            .putLong(transaction.id.mostSignificantBits)
+            .putLong(transaction.id.leastSignificantBits)
+            .put(transaction.sourceMask.toByte())
+            .array()
+
+    private fun decodeQuarantineTransaction(encoded: ByteArray): QuarantineTransaction {
+        if (encoded.size != QUARANTINE_MARKER_BYTES) throw StoreUnavailableException()
+        val buffer = ByteBuffer.wrap(encoded)
+        val magic = ByteArray(QUARANTINE_MARKER_MAGIC.size)
+        buffer.get(magic)
+        if (!magic.contentEquals(QUARANTINE_MARKER_MAGIC)) {
+            throw StoreUnavailableException()
+        }
+        if (buffer.get() != QUARANTINE_MARKER_VERSION) {
+            throw StoreUnavailableException()
+        }
+        val id = UUID(buffer.long, buffer.long)
+        if (id == ZERO_UUID) throw StoreUnavailableException()
+        val sourceMask = buffer.get().toInt() and 0xff
+        if (
+            sourceMask == 0 ||
+            sourceMask and QUARANTINE_VALID_SOURCE_MASK != sourceMask ||
+            buffer.hasRemaining()
+        ) {
+            throw StoreUnavailableException()
+        }
+        return QuarantineTransaction(id, sourceMask)
     }
 
     private fun requireQuarantinableRegularFile(path: Path) {
@@ -1079,6 +1376,45 @@ internal class FileStalwartCredentialStore(
         ) {
             throw StoreUnavailableException()
         }
+    }
+
+    private fun forceSecureRegularFile(path: Path) {
+        requireSecureRegularFile(path)
+        FileChannel.open(
+            path,
+            StandardOpenOption.WRITE,
+            LinkOption.NOFOLLOW_LINKS,
+        ).use { channel ->
+            channel.force(true)
+        }
+        requireSecureRegularFile(path)
+    }
+
+    private fun validatedPublishedDestinations(
+        entries: List<QuarantineEntry>,
+    ): List<Path> =
+        buildList {
+            entries.forEach { entry ->
+                try {
+                    if (!knownPathExists(entry.destination)) return@forEach
+                    requireSecureRegularFile(entry.destination)
+                    if (
+                        knownPathExists(entry.source) &&
+                        !Files.isSameFile(entry.source, entry.destination)
+                    ) {
+                        return@forEach
+                    }
+                    add(entry.destination)
+                } catch (_: Exception) {
+                    // Report only destinations whose ownership and identity are proven.
+                }
+            }
+        }
+
+    private fun knownPathExists(path: Path): Boolean = when {
+        Files.exists(path, LinkOption.NOFOLLOW_LINKS) -> true
+        Files.notExists(path, LinkOption.NOFOLLOW_LINKS) -> false
+        else -> throw StoreUnavailableException()
     }
 
     private fun setOwnerOnlyFile(path: Path) {
@@ -1169,6 +1505,19 @@ internal class FileStalwartCredentialStore(
         }
     }
 
+    private data class QuarantineTransaction(
+        val id: UUID,
+        val sourceMask: Int,
+    ) {
+        fun includes(mask: Int): Boolean = sourceMask and mask != 0
+    }
+
+    private data class QuarantineEntry(
+        val sourceMask: Int,
+        val source: Path,
+        val destination: Path,
+    )
+
     private enum class StorePair {
         Absent,
         Complete,
@@ -1207,7 +1556,7 @@ internal class FileStalwartCredentialStore(
         private val FORMAT_IDENTITY =
             "mail-sandbox/stalwart-app-passwords-envelope/v1"
                 .toByteArray(StandardCharsets.US_ASCII)
-        private const val RESERVED_DESCRIPTION_PREFIX = "mail-sandbox/debug-dashboard/"
+        private const val RESERVED_DESCRIPTION_ROOT = "mail-sandbox/debug-dashboard/"
         private const val MAX_RECORDS = 10_000
         private const val MAX_STRING_BYTES = 1 shl 20
         private const val MAX_SECRET_BYTES = 1 shl 20
@@ -1219,6 +1568,14 @@ internal class FileStalwartCredentialStore(
         private const val TEMPORARY_MARKER = ".tmp-"
         private const val ABSENT: Byte = 0
         private const val PRESENT: Byte = 1
+        private val QUARANTINE_MARKER_MAGIC =
+            "MSQTXN01".toByteArray(StandardCharsets.US_ASCII)
+        private const val QUARANTINE_MARKER_VERSION: Byte = 1
+        private const val QUARANTINE_MARKER_BYTES = 8 + 1 + 16 + 1
+        private const val QUARANTINE_KEY_MASK = 1
+        private const val QUARANTINE_CIPHERTEXT_MASK = 1 shl 1
+        private const val QUARANTINE_VALID_SOURCE_MASK =
+            QUARANTINE_KEY_MASK or QUARANTINE_CIPHERTEXT_MASK
         private val DIRECTORY_PERMISSIONS: Set<PosixFilePermission> =
             PosixFilePermissions.fromString("rwx------")
         private val FILE_PERMISSIONS: Set<PosixFilePermission> =

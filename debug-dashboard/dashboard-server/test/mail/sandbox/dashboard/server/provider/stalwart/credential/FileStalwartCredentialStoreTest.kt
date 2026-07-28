@@ -50,6 +50,12 @@ class FileStalwartCredentialStoreTest {
                 canonicalRoot.resolve(".runtime/stalwart/app-passwords.v1.lock"),
                 paths.lock,
             )
+            assertEquals(
+                canonicalRoot.resolve(
+                    ".runtime/stalwart/app-passwords.v1.quarantine-transaction",
+                ),
+                paths.quarantineTransaction,
+            )
 
             FileStalwartCredentialStore(paths).use { store ->
                 val available = assertIs<CredentialStoreLoadResult.Available>(store.load())
@@ -95,14 +101,14 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun validFilesDecryptTheExactSnapshotAndUseFreshHeaderNonces() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val activeOwned = SECRET_ACTIVE.copyOf()
             val otherOwned = SECRET_OTHER.copyOf()
             val firstRecord = record(
                 accountId = "account-immutable-1",
                 address = "first@local.test",
-                active = generation(7, activeOwned),
-                other = generation(8, otherOwned),
+                active = generation(storeId, 7, activeOwned),
+                other = generation(storeId, 8, otherOwned),
                 phase = CredentialPhase.Staged,
             )
 
@@ -132,8 +138,8 @@ class FileStalwartCredentialStoreTest {
             val secondRecord = record(
                 accountId = "account-immutable-1",
                 address = "first@local.test",
-                active = generation(8, SECRET_OTHER.copyOf()),
-                other = generation(7, SECRET_ACTIVE.copyOf()),
+                active = generation(storeId, 8, SECRET_OTHER.copyOf()),
+                other = generation(storeId, 7, SECRET_ACTIVE.copyOf()),
                 phase = CredentialPhase.Retiring,
             )
             assertIs<CredentialStoreWriteResult.Written>(
@@ -154,6 +160,35 @@ class FileStalwartCredentialStoreTest {
             secondRecord.close()
             assertClearedRedacted(activeOwned)
             assertClearedRedacted(otherOwned)
+        }
+    }
+
+    @Test
+    fun replacementRejectsAnyDescriptionOutsideTheExactStoreGenerationIdentity() {
+        withStore { paths, store, storeId ->
+            val mismatched = CredentialGeneration(
+                credentialId = "credential-7",
+                description = "mail-sandbox/debug-dashboard/$storeId/8",
+                generation = 7,
+                secret = SecretBytes.takeOwnership(byteArrayOf(7)),
+            )
+            val record = record(
+                accountId = "account-description-mismatch",
+                address = "mismatch@local.test",
+                active = mismatched,
+            )
+            val before = Files.readAllBytes(paths.ciphertext)
+
+            assertFailsWith<IllegalArgumentException> {
+                store.replace(0, mapOf(record.accountId to record))
+            }
+
+            assertBytesEqualRedacted(
+                before,
+                Files.readAllBytes(paths.ciphertext),
+                "description identity mismatch",
+            )
+            record.close()
         }
     }
 
@@ -259,7 +294,7 @@ class FileStalwartCredentialStoreTest {
         assertTrue(removalWithoutActive.message.orEmpty().contains("active", ignoreCase = true))
 
         listOf(CredentialPhase.Staged, CredentialPhase.Retiring).forEach { phase ->
-            val active = generation(1, byteArrayOf(1))
+            val active = generation(TEST_STORE_ID, 1, byteArrayOf(1))
             assertFailsWith<IllegalArgumentException> {
                 StalwartCredentialRecord.takeOwnership(
                     accountId = "account",
@@ -271,8 +306,8 @@ class FileStalwartCredentialStoreTest {
             }
             assertFailsWith<IllegalStateException> { active.secret.copyForUse() }
         }
-        val active = generation(1, byteArrayOf(1))
-        val other = generation(2, byteArrayOf(2))
+        val active = generation(TEST_STORE_ID, 1, byteArrayOf(1))
+        val other = generation(TEST_STORE_ID, 2, byteArrayOf(2))
         assertFailsWith<IllegalArgumentException> {
             StalwartCredentialRecord.takeOwnership(
                 accountId = "account",
@@ -351,7 +386,7 @@ class FileStalwartCredentialStoreTest {
         )
 
         mutations.forEach { (label, mutateStore) ->
-            withStore { paths, store ->
+            withStore { paths, store, _ ->
                 store.close()
                 mutateStore(paths)
                 val before = captureExistingRegularBytes(paths)
@@ -359,6 +394,10 @@ class FileStalwartCredentialStoreTest {
                 FileStalwartCredentialStore(paths).use { reopened ->
                     assertIs<CredentialStoreLoadResult.StoreUnavailable>(
                         reopened.load(),
+                        label,
+                    )
+                    assertIs<CredentialStoreWriteResult.StoreUnavailable>(
+                        reopened.replace(1, emptyMap()),
                         label,
                     )
                 }
@@ -370,16 +409,16 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun authenticatedMalformedPayloadsAreUnavailableAndNeverRewritten() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val first = record(
                 "account-aaa",
                 "first@local.test",
-                generation(1, byteArrayOf(1)),
+                generation(storeId, 1, byteArrayOf(1)),
             )
             val second = record(
                 "account-bbb",
                 "second@local.test",
-                generation(2, byteArrayOf(2)),
+                generation(storeId, 2, byteArrayOf(2)),
             )
             assertIs<CredentialStoreWriteResult.Written>(
                 store.replace(
@@ -410,6 +449,14 @@ class FileStalwartCredentialStoreTest {
                         this[payloadRecords(this).first().phaseOffset] = 1
                     }
                 },
+                "description identity mismatch" to { payload ->
+                    payload.apply {
+                        val range = requireNotNull(
+                            payloadRecords(this).first().activeDescriptionRange,
+                        )
+                        this[range.last] = '9'.code.toByte()
+                    }
+                },
                 "duplicate Account ID" to { payload ->
                     payload.apply {
                         val records = payloadRecords(this)
@@ -437,6 +484,10 @@ class FileStalwartCredentialStoreTest {
                         reopened.load(),
                         label,
                     )
+                    assertIs<CredentialStoreWriteResult.StoreUnavailable>(
+                        reopened.replace(1, emptyMap()),
+                        label,
+                    )
                 }
 
                 assertBytesEqualRedacted(
@@ -453,7 +504,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun unreadableUnsafeSymbolicAndNonRegularPathsAreUnavailableWithoutMutation() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             if (supportsPosix(paths.key)) {
                 val before = Files.readAllBytes(paths.key)
@@ -472,7 +523,7 @@ class FileStalwartCredentialStoreTest {
             }
         }
 
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             if (supportsPosix(paths.ciphertext)) {
                 Files.setPosixFilePermissions(
@@ -514,7 +565,7 @@ class FileStalwartCredentialStoreTest {
             assertTrue(Files.list(realRuntime).use { !it.findAny().isPresent })
         }
 
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             val original = Files.readAllBytes(paths.key)
             val realKey = paths.key.resolveSibling("real-key")
@@ -530,9 +581,17 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun concurrentWritersSerializeAndRejectTheStaleRevision() {
-        withStore { paths, store ->
-            val first = record("account-one", "same@local.test", generation(1, byteArrayOf(1)))
-            val second = record("account-two", "same@local.test", generation(1, byteArrayOf(2)))
+        withStore { paths, store, storeId ->
+            val first = record(
+                "account-one",
+                "same@local.test",
+                generation(storeId, 1, byteArrayOf(1)),
+            )
+            val second = record(
+                "account-two",
+                "same@local.test",
+                generation(storeId, 1, byteArrayOf(2)),
+            )
             val start = CountDownLatch(1)
             val executor = Executors.newFixedThreadPool(2)
             val stores = listOf(
@@ -574,9 +633,17 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun interruptedReplaceShapesPreserveTheCommittedSnapshotAndCleanAbandonedTemps() {
-        withStore { paths, store ->
-            val first = record("account-one", "one@local.test", generation(1, byteArrayOf(1)))
-            val second = record("account-two", "two@local.test", generation(2, byteArrayOf(2)))
+        withStore { paths, store, storeId ->
+            val first = record(
+                "account-one",
+                "one@local.test",
+                generation(storeId, 1, byteArrayOf(1)),
+            )
+            val second = record(
+                "account-two",
+                "two@local.test",
+                generation(storeId, 2, byteArrayOf(2)),
+            )
             assertIs<CredentialStoreWriteResult.Written>(
                 store.replace(0, mapOf(first.accountId to first)),
             )
@@ -615,7 +682,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun abandonedCleanupLeavesUnrecognizedSimilarFilesUntouched() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             val unrelated = paths.ciphertext.resolveSibling(
                 "${paths.ciphertext.fileName}.tmp-not-a-generated-store-uuid",
@@ -636,13 +703,15 @@ class FileStalwartCredentialStoreTest {
     fun injectedFaultsProveThePreAndPostReplaceDurabilityBoundaries() {
         withRoot { root ->
             val paths = CredentialStorePaths.testing(root.resolve("runtime"))
+            lateinit var storeId: UUID
             FileStalwartCredentialStore(paths).use { initial ->
                 val loaded = assertIs<CredentialStoreLoadResult.Available>(initial.load())
+                storeId = loaded.snapshot.storeId
                 loaded.snapshot.close()
                 val first = record(
                     "account-one",
                     "one@local.test",
-                    generation(1, byteArrayOf(1)),
+                    generation(storeId, 1, byteArrayOf(1)),
                 )
                 assertIs<CredentialStoreWriteResult.Written>(
                     initial.replace(0, mapOf(first.accountId to first)),
@@ -660,7 +729,7 @@ class FileStalwartCredentialStoreTest {
             val second = record(
                 "account-two",
                 "two@local.test",
-                generation(2, byteArrayOf(2)),
+                generation(storeId, 2, byteArrayOf(2)),
             )
             assertEquals(
                 beforeFault,
@@ -711,11 +780,11 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun revisionMismatchAndAccountAddressReuseNeverOverwriteOrReattachByAddress() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val original = record(
                 "deleted-account-id",
                 "reused@local.test",
-                generation(1, byteArrayOf(1)),
+                generation(storeId, 1, byteArrayOf(1)),
             )
             assertIs<CredentialStoreWriteResult.Written>(
                 store.replace(0, mapOf(original.accountId to original)),
@@ -724,7 +793,7 @@ class FileStalwartCredentialStoreTest {
             val mismatch = record(
                 "other-account-id",
                 "other@local.test",
-                generation(2, byteArrayOf(2)),
+                generation(storeId, 2, byteArrayOf(2)),
             )
             assertEquals(
                 CredentialStoreWriteResult.RevisionMismatch(actualRevision = 1),
@@ -739,7 +808,7 @@ class FileStalwartCredentialStoreTest {
             val replacement = record(
                 "new-account-id",
                 "reused@local.test",
-                generation(3, byteArrayOf(3)),
+                generation(storeId, 3, byteArrayOf(3)),
             )
             assertIs<CredentialStoreWriteResult.Written>(
                 store.replace(1, mapOf(replacement.accountId to replacement)),
@@ -764,11 +833,11 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun changingTheAddressCapturedForAnExistingAccountIdRequiresExplicitRemoval() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val original = record(
                 "immutable-account-id",
                 "first@local.test",
-                generation(1, byteArrayOf(1)),
+                generation(storeId, 1, byteArrayOf(1)),
             )
             assertIs<CredentialStoreWriteResult.Written>(
                 store.replace(0, mapOf(original.accountId to original)),
@@ -776,7 +845,7 @@ class FileStalwartCredentialStoreTest {
             val changed = record(
                 "immutable-account-id",
                 "second@local.test",
-                generation(2, byteArrayOf(2)),
+                generation(storeId, 2, byteArrayOf(2)),
             )
             val before = Files.readAllBytes(paths.ciphertext)
             val failure = assertFailsWith<IllegalArgumentException> {
@@ -801,7 +870,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun invalidOrOverflowingExpectedRevisionsAreRejectedWithoutMutation() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             val before = Files.readAllBytes(paths.ciphertext)
             listOf(-1L, Long.MAX_VALUE).forEach { invalid ->
                 assertFailsWith<IllegalArgumentException> {
@@ -818,7 +887,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun theLastDecodableRevisionCannotAdvanceIntoTheReservedOverflowValue() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             val nearOverflow = authenticatedEnvelope(paths) { payload ->
                 payload.apply {
@@ -849,13 +918,13 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun plaintextCanaryIsExcludedFromCiphertextNamesExceptionsLogsAndDiagnostics() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val canaryText = "app_plaintext_canary_never_emit"
             val canary = canaryText.toByteArray()
             val record = record(
                 "account-canary",
                 "canary@local.test",
-                generation(9, canary.copyOf()),
+                generation(storeId, 9, canary.copyOf()),
             )
             val capturedOut = ByteArrayOutputStream()
             val capturedErr = ByteArrayOutputStream()
@@ -901,7 +970,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun explicitQuarantineMovesOnlyUnusableMaterialWithoutOverwriteOrDiscard() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             mutate(paths.ciphertext) { bytes ->
                 bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
@@ -939,7 +1008,7 @@ class FileStalwartCredentialStoreTest {
             assertEquals(3, Files.list(paths.quarantine).use { stream -> stream.count() })
         }
 
-        withStore { _, store ->
+        withStore { _, store, _ ->
             assertIs<CredentialStoreQuarantineResult.StoreAvailable>(
                 store.quarantineUnavailable(),
             )
@@ -948,7 +1017,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun quarantineHardLinkPublicationNeverOverwritesARacingDestination() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             mutate(paths.ciphertext) { bytes ->
                 bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
@@ -997,8 +1066,347 @@ class FileStalwartCredentialStoreTest {
     }
 
     @Test
+    fun quarantinePreflightsTheSecondDestinationBeforePublishingTheFirst() {
+        withStore { paths, store, _ ->
+            store.close()
+            mutate(paths.ciphertext) { bytes ->
+                bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+            }
+            val originals = mapOf(
+                paths.key to Files.readAllBytes(paths.key),
+                paths.ciphertext to Files.readAllBytes(paths.ciphertext),
+            )
+            val sentinelBytes = byteArrayOf(7, 8, 9)
+            lateinit var collidingDestination: Path
+            val preflightStore = FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, target ->
+                    if (
+                        point == CredentialStoreCommitPoint.BeforeQuarantineDestinationPreflight &&
+                        target.fileName.toString().startsWith(
+                            paths.ciphertext.fileName.toString(),
+                        )
+                    ) {
+                        collidingDestination = target
+                        Files.write(target, sentinelBytes)
+                        setOwnerOnlyFile(target)
+                    }
+                },
+            )
+
+            preflightStore.use {
+                assertIs<CredentialStoreQuarantineResult.StoreUnavailable>(
+                    it.quarantineUnavailable(),
+                )
+            }
+
+            originals.forEach { (source, expected) ->
+                assertTrue(Files.exists(source, LinkOption.NOFOLLOW_LINKS))
+                assertBytesEqualRedacted(
+                    expected,
+                    Files.readAllBytes(source),
+                    "source after second-destination preflight collision",
+                )
+            }
+            assertFalse(
+                Files.exists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS),
+            )
+            assertBytesEqualRedacted(
+                sentinelBytes,
+                Files.readAllBytes(collidingDestination),
+                "preflight destination sentinel",
+            )
+            assertEquals(
+                listOf(collidingDestination),
+                Files.list(paths.quarantine).use { it.sorted().toList() },
+            )
+        }
+    }
+
+    @Test
+    fun explicitQuarantineNormalizesUnsafeSourcesBeforeAnyLinkBecomesVisible() {
+        withStore { paths, store, storeId ->
+            if (!supportsPosix(paths.key)) return@withStore
+            val canaryRecord = record(
+                accountId = "account-quarantine-canary",
+                address = "quarantine-canary@local.test",
+                active = generation(storeId, 9, SECRET_ACTIVE.copyOf()),
+            )
+            assertIs<CredentialStoreWriteResult.Written>(
+                store.replace(0, mapOf(canaryRecord.accountId to canaryRecord)),
+            )
+            canaryRecord.close()
+            store.close()
+            mutate(paths.ciphertext) { bytes ->
+                bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+            }
+            Files.setPosixFilePermissions(
+                paths.key,
+                PosixFilePermissions.fromString("rw-r--r--"),
+            )
+            FileStalwartCredentialStore(paths).use { unavailable ->
+                assertIs<CredentialStoreLoadResult.StoreUnavailable>(unavailable.load())
+            }
+            assertEquals(
+                PosixFilePermissions.fromString("rw-r--r--"),
+                Files.getPosixFilePermissions(paths.key, LinkOption.NOFOLLOW_LINKS),
+            )
+
+            lateinit var visibleDestination: Path
+            val crash = SimulatedCrash()
+            val interrupted = FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, target ->
+                    if (point == CredentialStoreCommitPoint.AfterQuarantineLinkVisible) {
+                        visibleDestination = target
+                        assertOwnerOnlyFile(target)
+                        throw crash
+                    }
+                },
+            )
+
+            interrupted.use {
+                assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
+                    it.quarantineUnavailable(),
+                )
+            }
+
+            assertOwnerOnlyFile(paths.quarantineTransaction)
+            assertOwnerOnlyFile(visibleDestination)
+            assertFalse(
+                Files.readAllBytes(paths.quarantineTransaction)
+                    .containsSubsequence(SECRET_ACTIVE),
+            )
+            Files.list(paths.quarantine).use { entries ->
+                entries.filter {
+                    Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS)
+                }.forEach(::assertOwnerOnlyFile)
+            }
+        }
+    }
+
+    @Test
+    fun malformedMarkerFailsClosedBeforeTemporaryCleanupOrStoreInspection() {
+        withStore { paths, store, _ ->
+            store.close()
+            val abandoned = abandonedSnapshot(
+                paths,
+                Files.readAllBytes(paths.ciphertext),
+            )
+            val malformed = byteArrayOf(1, 2, 3)
+            Files.write(paths.quarantineTransaction, malformed)
+            setOwnerOnlyFile(paths.quarantineTransaction)
+            val before = captureExistingRegularBytes(paths)
+
+            FileStalwartCredentialStore(paths).use { restarted ->
+                assertIs<CredentialStoreLoadResult.StoreUnavailable>(restarted.load())
+            }
+            assertTrue(Files.exists(abandoned, LinkOption.NOFOLLOW_LINKS))
+            assertExistingRegularBytesUnchanged(before, "malformed quarantine marker")
+
+            FileStalwartCredentialStore(paths).use { recovery ->
+                assertIs<CredentialStoreQuarantineResult.StoreUnavailable>(
+                    recovery.quarantineUnavailable(),
+                )
+            }
+            assertTrue(Files.exists(paths.key, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(paths.ciphertext, LinkOption.NOFOLLOW_LINKS))
+            assertBytesEqualRedacted(
+                malformed,
+                Files.readAllBytes(paths.quarantineTransaction),
+                "malformed quarantine marker",
+            )
+        }
+    }
+
+    @Test
+    fun resumeFailsClosedWhenBothAPlannedSourceAndDestinationAreMissing() {
+        withStore { paths, store, _ ->
+            store.close()
+            mutate(paths.ciphertext) { bytes ->
+                bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+            }
+            val crash = SimulatedCrash()
+            val interrupted = FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, _ ->
+                    if (point == CredentialStoreCommitPoint.AfterFailIfExistsPublish) {
+                        throw crash
+                    }
+                },
+            )
+            val partial = interrupted.use {
+                assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
+                    it.quarantineUnavailable(),
+                )
+            }
+            assertOwnerOnlyFile(paths.quarantineTransaction)
+            assertEquals(QUARANTINE_MARKER_BYTES.toLong(), Files.size(paths.quarantineTransaction))
+            val destination = partial.files.single()
+            val source = if (Files.isSameFile(destination, paths.key)) {
+                paths.key
+            } else {
+                paths.ciphertext
+            }
+            Files.delete(source)
+            Files.delete(destination)
+
+            FileStalwartCredentialStore(paths).use { recovery ->
+                assertIs<CredentialStoreQuarantineResult.StoreUnavailable>(
+                    recovery.quarantineUnavailable(),
+                )
+            }
+
+            assertOwnerOnlyFile(paths.quarantineTransaction)
+            assertFalse(Files.exists(source, LinkOption.NOFOLLOW_LINKS))
+            assertFalse(Files.exists(destination, LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun resumedPartialFailureReportsDestinationsPublishedByAnEarlierAttempt() {
+        withStore { paths, store, _ ->
+            store.close()
+            mutate(paths.ciphertext) { bytes ->
+                bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+            }
+            var firstPublication = true
+            val firstCrash = SimulatedCrash()
+            val firstAttempt = FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, _ ->
+                    if (
+                        point == CredentialStoreCommitPoint.AfterFailIfExistsPublish &&
+                        firstPublication
+                    ) {
+                        firstPublication = false
+                        throw firstCrash
+                    }
+                },
+            )
+            val firstPartial = firstAttempt.use {
+                assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
+                    it.quarantineUnavailable(),
+                )
+            }
+            assertEquals(1, firstPartial.files.size)
+
+            val resumeCrash = SimulatedCrash()
+            val resumedAttempt = FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, _ ->
+                    if (point == CredentialStoreCommitPoint.BeforeFailIfExistsPublish) {
+                        throw resumeCrash
+                    }
+                },
+            )
+            val resumedPartial = resumedAttempt.use {
+                assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
+                    it.quarantineUnavailable(),
+                )
+            }
+
+            assertEquals(firstPartial.files, resumedPartial.files)
+            resumedPartial.files.forEach(::assertOwnerOnlyFile)
+            assertOwnerOnlyFile(paths.quarantineTransaction)
+        }
+    }
+
+    @Test
+    fun quarantineMarkerBlocksInitializationUntilEveryInterruptedBoundaryIsReconciled() {
+        val boundaries = listOf(
+            QuarantineBoundary(
+                point = CredentialStoreCommitPoint.AfterFailIfExistsPublish,
+                occurrence = 1,
+            ),
+            QuarantineBoundary(
+                point = CredentialStoreCommitPoint.AfterQuarantineSourceDelete,
+                occurrence = 1,
+            ),
+            QuarantineBoundary(
+                point = CredentialStoreCommitPoint.AfterFailIfExistsPublish,
+                occurrence = 2,
+            ),
+            QuarantineBoundary(
+                point = CredentialStoreCommitPoint.AfterQuarantineSourceDelete,
+                occurrence = 2,
+            ),
+        )
+
+        boundaries.forEach { boundary ->
+            withStore { paths, store, _ ->
+                store.close()
+                mutate(paths.ciphertext) { bytes ->
+                    bytes[lastIndex(bytes)] =
+                        (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+                }
+                var occurrences = 0
+                val crash = SimulatedCrash()
+                val interrupted = FileStalwartCredentialStore(
+                    paths = paths,
+                    commitObserver = CredentialStoreCommitObserver { point, _ ->
+                        if (point == boundary.point && ++occurrences == boundary.occurrence) {
+                            throw crash
+                        }
+                    },
+                )
+
+                interrupted.use {
+                    assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
+                        it.quarantineUnavailable(),
+                    )
+                }
+                assertOwnerOnlyFile(paths.quarantineTransaction)
+                val fixedPathExistenceBeforeLoad = listOf(
+                    paths.key,
+                    paths.ciphertext,
+                ).associateWith {
+                    Files.exists(it, LinkOption.NOFOLLOW_LINKS)
+                }
+
+                FileStalwartCredentialStore(paths).use { restarted ->
+                    assertIs<CredentialStoreLoadResult.StoreUnavailable>(restarted.load())
+                    assertIs<CredentialStoreWriteResult.StoreUnavailable>(
+                        restarted.replace(0, emptyMap()),
+                    )
+                }
+                fixedPathExistenceBeforeLoad.forEach { (path, existed) ->
+                    assertEquals(
+                        existed,
+                        Files.exists(path, LinkOption.NOFOLLOW_LINKS),
+                        "normal access changed a marked quarantine transaction",
+                    )
+                }
+
+                FileStalwartCredentialStore(paths).use { recovery ->
+                    val quarantined =
+                        assertIs<CredentialStoreQuarantineResult.Quarantined>(
+                            recovery.quarantineUnavailable(),
+                        )
+                    assertEquals(2, quarantined.files.size)
+                    quarantined.files.forEach(::assertOwnerOnlyFile)
+                }
+                assertFalse(
+                    Files.exists(paths.quarantineTransaction, LinkOption.NOFOLLOW_LINKS),
+                )
+                assertFalse(Files.exists(paths.key, LinkOption.NOFOLLOW_LINKS))
+                assertFalse(Files.exists(paths.ciphertext, LinkOption.NOFOLLOW_LINKS))
+
+                FileStalwartCredentialStore(paths).use { fresh ->
+                    val available =
+                        assertIs<CredentialStoreLoadResult.Available>(fresh.load())
+                    available.snapshot.use { snapshot ->
+                        assertEquals(0L, snapshot.revision)
+                        assertTrue(snapshot.records.isEmpty())
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun quarantinePreservesThePublishedDuplicateWhenInterruptedBeforeSourceDeletion() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             mutate(paths.ciphertext) { bytes ->
                 bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
@@ -1039,7 +1447,7 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun quarantinePreservesEveryByteWhenInterruptedAfterTheFirstSourceDeletion() {
-        withStore { paths, store ->
+        withStore { paths, store, _ ->
             store.close()
             mutate(paths.ciphertext) { bytes ->
                 bytes[lastIndex(bytes)] = (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
@@ -1060,12 +1468,15 @@ class FileStalwartCredentialStoreTest {
                 },
             )
 
+            lateinit var publishedFiles: List<Path>
             interrupted.use {
                 val partial =
                     assertIs<CredentialStoreQuarantineResult.PartiallyQuarantined>(
                         it.quarantineUnavailable(),
                     )
-                assertEquals(listOf(published), partial.files)
+                publishedFiles = partial.files
+                assertEquals(2, publishedFiles.size)
+                assertTrue(published in publishedFiles)
             }
 
             val remainingSources = originals.keys.filter {
@@ -1084,9 +1495,9 @@ class FileStalwartCredentialStoreTest {
                 Files.readAllBytes(remainingSource),
                 "remaining quarantine source",
             )
-            assertOwnerOnlyFile(published)
+            publishedFiles.forEach(::assertOwnerOnlyFile)
             assertEquals(
-                listOf(published),
+                publishedFiles.sorted(),
                 Files.list(paths.quarantine).use { it.sorted().toList() },
             )
         }
@@ -1094,11 +1505,11 @@ class FileStalwartCredentialStoreTest {
 
     @Test
     fun aRecordMapWhoseKeyDisagreesWithItsImmutableAccountIdIsRejectedBeforeWrite() {
-        withStore { paths, store ->
+        withStore { paths, store, storeId ->
             val record = record(
                 "immutable-account-id",
                 "account@local.test",
-                generation(1, byteArrayOf(1)),
+                generation(storeId, 1, byteArrayOf(1)),
             )
             val before = Files.readAllBytes(paths.ciphertext)
             val failure = assertFailsWith<IllegalArgumentException> {
@@ -1115,14 +1526,15 @@ class FileStalwartCredentialStoreTest {
     }
 
     private fun withStore(
-        block: (CredentialStorePaths, FileStalwartCredentialStore) -> Unit,
+        block: (CredentialStorePaths, FileStalwartCredentialStore, UUID) -> Unit,
     ) {
         withRoot { root ->
             val paths = CredentialStorePaths.testing(root.resolve("runtime"))
             FileStalwartCredentialStore(paths).use { store ->
                 val loaded = assertIs<CredentialStoreLoadResult.Available>(store.load())
+                val storeId = loaded.snapshot.storeId
                 loaded.snapshot.close()
-                block(paths, store)
+                block(paths, store, storeId)
             }
         }
     }
@@ -1157,11 +1569,12 @@ class FileStalwartCredentialStoreTest {
     )
 
     private fun generation(
+        storeId: UUID,
         number: Long,
         ownedSecret: ByteArray,
     ): CredentialGeneration = CredentialGeneration(
         credentialId = "credential-$number",
-        description = "mail-sandbox/debug-dashboard/store/generation-$number",
+        description = "mail-sandbox/debug-dashboard/$storeId/$number",
         generation = number,
         secret = SecretBytes.takeOwnership(ownedSecret),
     )
@@ -1316,22 +1729,31 @@ class FileStalwartCredentialStoreTest {
                 buffer.position(buffer.position() + addressLength)
                 val phaseOffset = buffer.position()
                 buffer.get()
-                skipPayloadGeneration(buffer)
-                skipPayloadGeneration(buffer)
-                add(PayloadRecordOffsets(accountRange, phaseOffset))
+                val activeDescriptionRange = payloadGenerationDescriptionRange(buffer)
+                payloadGenerationDescriptionRange(buffer)
+                add(
+                    PayloadRecordOffsets(
+                        accountIdRange = accountRange,
+                        phaseOffset = phaseOffset,
+                        activeDescriptionRange = activeDescriptionRange,
+                    ),
+                )
             }
         }
     }
 
-    private fun skipPayloadGeneration(buffer: ByteBuffer) {
-        if (buffer.get().toInt() == 0) return
-        repeat(2) {
-            val length = buffer.int
-            buffer.position(buffer.position() + length)
-        }
+    private fun payloadGenerationDescriptionRange(buffer: ByteBuffer): IntRange? {
+        if (buffer.get().toInt() == 0) return null
+        val credentialIdLength = buffer.int
+        buffer.position(buffer.position() + credentialIdLength)
+        val descriptionLength = buffer.int
+        val descriptionRange =
+            buffer.position() until buffer.position() + descriptionLength
+        buffer.position(descriptionRange.last + 1)
         buffer.long
         val secretLength = buffer.int
         buffer.position(buffer.position() + secretLength)
+        return descriptionRange
     }
 
     private fun mutate(path: Path, mutation: (ByteArray) -> Unit) {
@@ -1406,8 +1828,10 @@ class FileStalwartCredentialStoreTest {
         const val STORE_ID_OFFSET = 9
         const val NONCE_OFFSET = 25
         const val ENVELOPE_HEADER_SIZE = 37
+        const val QUARANTINE_MARKER_BYTES = 26
         val SECRET_ACTIVE = "app_active_plaintext_canary".toByteArray()
         val SECRET_OTHER = "app_other_plaintext_canary".toByteArray()
+        val TEST_STORE_ID: UUID = UUID.fromString("f6244372-af65-4779-a97b-7f73a8bb79f3")
     }
 
     private class SimulatedCrash : RuntimeException("simulated durability interruption")
@@ -1415,5 +1839,11 @@ class FileStalwartCredentialStoreTest {
     private data class PayloadRecordOffsets(
         val accountIdRange: IntRange,
         val phaseOffset: Int,
+        val activeDescriptionRange: IntRange?,
+    )
+
+    private data class QuarantineBoundary(
+        val point: CredentialStoreCommitPoint,
+        val occurrence: Int,
     )
 }
