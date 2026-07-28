@@ -107,6 +107,9 @@ internal enum class CredentialStoreCommitPoint {
     AfterQuarantineSourceDelete,
     BeforeQuarantineDestinationPreflight,
     AfterQuarantineLinkVisible,
+    AfterCreatedDirectoryDurable,
+    AfterCreatedStableLockDurable,
+    BeforeQuarantineTransactionPublish,
 }
 
 internal fun interface CredentialStoreCommitObserver {
@@ -807,14 +810,26 @@ internal class FileStalwartCredentialStore(
         ) {
             throw StoreUnavailableException()
         }
+        var requiresDurability = false
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            requiresDurability = true
             try {
                 createDirectory(path)
             } catch (_: FileAlreadyExistsException) {
-                // Validate the concurrently created entry below.
+                // Validate and make the concurrently created entry durable below.
             }
         }
         requireSecureDirectory(path)
+        if (requiresDurability) {
+            fsyncDirectory(path)
+            requireSecureDirectory(path)
+            fsyncDirectory(parent)
+            requireSecureDirectory(path)
+            notifyCommit(
+                CredentialStoreCommitPoint.AfterCreatedDirectoryDurable,
+                path,
+            )
+        }
     }
 
     private fun requireSecureDirectory(path: Path) {
@@ -834,17 +849,25 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun ensureSecureFile(path: Path) {
-        var created = false
+        var requiresDurability = false
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            requiresDurability = true
             try {
                 createFile(path)
-                created = true
             } catch (_: FileAlreadyExistsException) {
-                // Validate the concurrently created entry below.
+                // Validate and make the concurrently created entry durable below.
             }
         }
         requireSecureRegularFile(path)
-        if (created) fsyncDirectory(path.parent)
+        if (requiresDurability) {
+            forceSecureRegularFile(path)
+            fsyncDirectory(path.parent)
+            requireSecureRegularFile(path)
+            notifyCommit(
+                CredentialStoreCommitPoint.AfterCreatedStableLockDurable,
+                path,
+            )
+        }
     }
 
     private fun requireSecureRegularFile(path: Path) {
@@ -1122,6 +1145,10 @@ internal class FileStalwartCredentialStore(
     private fun writeQuarantineTransaction(transaction: QuarantineTransaction) {
         val encoded = encodeQuarantineTransaction(transaction)
         try {
+            notifyCommit(
+                CredentialStoreCommitPoint.BeforeQuarantineTransactionPublish,
+                paths.quarantineTransaction,
+            )
             writeAtomically(
                 target = paths.quarantineTransaction,
                 bytes = encoded,

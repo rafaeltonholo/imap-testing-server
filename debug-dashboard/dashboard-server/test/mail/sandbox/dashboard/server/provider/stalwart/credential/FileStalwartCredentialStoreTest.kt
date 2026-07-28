@@ -78,6 +78,86 @@ class FileStalwartCredentialStoreTest {
     }
 
     @Test
+    fun newStorageEntriesAreDurableBeforeStoreAndMarkerPublication() {
+        withRoot { root ->
+            val paths = CredentialStorePaths.testing(root.resolve("runtime"))
+            val events =
+                mutableListOf<Pair<CredentialStoreCommitPoint, Path>>()
+            FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, target ->
+                    events += point to target
+                },
+            ).use { store ->
+                val loaded = assertIs<CredentialStoreLoadResult.Available>(store.load())
+                loaded.snapshot.close()
+            }
+
+            val durableDirectories = listOf(
+                paths.runtimeRoot,
+                paths.ciphertext.parent,
+                paths.key.parent,
+            )
+            val directoryIndices = durableDirectories.map { directory ->
+                events.indexOf(
+                    CredentialStoreCommitPoint.AfterCreatedDirectoryDurable to directory,
+                ).also { index ->
+                    assertTrue(index >= 0, "missing durable-directory boundary")
+                }
+            }
+            assertTrue(
+                directoryIndices.zipWithNext().all { (before, after) -> before < after },
+                "storage directories were not made durable in creation order",
+            )
+            val lockIndex = events.indexOf(
+                CredentialStoreCommitPoint.AfterCreatedStableLockDurable to paths.lock,
+            )
+            assertTrue(
+                lockIndex > directoryIndices.last(),
+                "stable lock was not durable after its parent directories",
+            )
+            listOf(paths.key, paths.ciphertext).forEach { published ->
+                val publicationIndex = events.indexOf(
+                    CredentialStoreCommitPoint.BeforeFailIfExistsPublish to published,
+                )
+                assertTrue(
+                    publicationIndex > lockIndex,
+                    "store file publication preceded directory or lock durability",
+                )
+            }
+
+            mutate(paths.ciphertext) { bytes ->
+                bytes[lastIndex(bytes)] =
+                    (bytes[lastIndex(bytes)].toInt() xor 1).toByte()
+            }
+            events.clear()
+            FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, target ->
+                    events += point to target
+                },
+            ).use { store ->
+                assertIs<CredentialStoreQuarantineResult.Quarantined>(
+                    store.quarantineUnavailable(),
+                )
+            }
+
+            val quarantineDirectoryIndex = events.indexOf(
+                CredentialStoreCommitPoint.AfterCreatedDirectoryDurable to paths.quarantine,
+            )
+            val markerPublicationIndex = events.indexOf(
+                CredentialStoreCommitPoint.BeforeQuarantineTransactionPublish to
+                    paths.quarantineTransaction,
+            )
+            assertTrue(
+                quarantineDirectoryIndex >= 0 &&
+                    markerPublicationIndex > quarantineDirectoryIndex,
+                "quarantine marker publication preceded directory durability",
+            )
+        }
+    }
+
+    @Test
     fun productionPathsRejectAProjectRootReachedThroughASymbolicAncestor() {
         withRoot { root ->
             val realParent = root.resolve("real-parent")
