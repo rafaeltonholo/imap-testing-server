@@ -1,2 +1,3 @@
 /build/
+# Local runtime state includes the encrypted Stalwart credential store and key.
 /.runtime/
