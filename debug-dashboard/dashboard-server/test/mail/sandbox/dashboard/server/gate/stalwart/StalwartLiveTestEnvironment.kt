@@ -7,6 +7,7 @@ import io.ktor.client.request.get
 import java.net.URI
 import java.nio.file.Path
 import kotlinx.coroutines.delay
+import mail.sandbox.dashboard.server.provider.stalwart.credential.CredentialStorePaths
 
 internal object StalwartGateActionSelection {
     private val liveEnvironmentKeys = setOf(
@@ -19,7 +20,13 @@ internal object StalwartGateActionSelection {
         "STALWART_GATE_CLEANUP",
         "STALWART_GATE_PHASE",
     )
-    private val gateEnvironmentKeys = liveEnvironmentKeys + actionEnvironmentKeys
+    private val mailAccessEnvironmentKeys = setOf(
+        "STALWART_GATE_CREDENTIAL_ROOT",
+        "STALWART_GATE_RESTART_PHASE",
+    )
+    private val gateEnvironmentKeys =
+        liveEnvironmentKeys + actionEnvironmentKeys +
+            mailAccessEnvironmentKeys
 
     fun requirePrepare(environment: Map<String, String> = System.getenv()) {
         requireExactAction(
@@ -54,6 +61,80 @@ internal object StalwartGateActionSelection {
             (gateEnvironmentKeys - selectedKey).none(environment::containsKey),
         ) {
             "Selected gate action has conflicting gate environment"
+        }
+    }
+}
+
+internal enum class StalwartMailAccessRestartPhase(
+    val environmentValue: String,
+) {
+    Staged("staged"),
+    Retiring("retiring"),
+    RemovalPending("removal-pending"),
+}
+
+internal data class StalwartMailAccessLiveEnvironment(
+    val live: StalwartLiveTestEnvironment,
+    val credentialPaths: CredentialStorePaths,
+    val restartPhase: StalwartMailAccessRestartPhase?,
+) {
+    companion object {
+        fun lifecycle(
+            environment: Map<String, String> = System.getenv(),
+            projectRoot: Path,
+        ): StalwartMailAccessLiveEnvironment {
+            require(!environment.containsKey("STALWART_GATE_RESTART_PHASE")) {
+                "Lifecycle live gate forbids a restart phase"
+            }
+            return load(
+                environment = environment,
+                projectRoot = projectRoot,
+                restartPhase = null,
+            )
+        }
+
+        fun restart(
+            environment: Map<String, String> = System.getenv(),
+            projectRoot: Path,
+        ): StalwartMailAccessLiveEnvironment {
+            val value = environment["STALWART_GATE_RESTART_PHASE"]
+                ?: throw IllegalArgumentException(
+                    "STALWART_GATE_RESTART_PHASE is required",
+                )
+            val phase = StalwartMailAccessRestartPhase.entries.singleOrNull {
+                it.environmentValue == value
+            } ?: throw IllegalArgumentException(
+                "STALWART_GATE_RESTART_PHASE is invalid",
+            )
+            return load(
+                environment = environment,
+                projectRoot = projectRoot,
+                restartPhase = phase,
+            )
+        }
+
+        private fun load(
+            environment: Map<String, String>,
+            projectRoot: Path,
+            restartPhase: StalwartMailAccessRestartPhase?,
+        ): StalwartMailAccessLiveEnvironment {
+            val configuredRoot = environment["STALWART_GATE_CREDENTIAL_ROOT"]
+                ?.takeIf(String::isNotBlank)
+                ?.let(Path::of)
+                ?: throw IllegalArgumentException(
+                    "STALWART_GATE_CREDENTIAL_ROOT is required",
+                )
+            return StalwartMailAccessLiveEnvironment(
+                live = StalwartLiveTestEnvironment.load(
+                    environment = environment,
+                    projectRoot = projectRoot,
+                ),
+                credentialPaths = CredentialStorePaths.gate0bTesting(
+                    dashboardProjectRoot = projectRoot,
+                    configuredRoot = configuredRoot,
+                ),
+                restartPhase = restartPhase,
+            )
         }
     }
 }

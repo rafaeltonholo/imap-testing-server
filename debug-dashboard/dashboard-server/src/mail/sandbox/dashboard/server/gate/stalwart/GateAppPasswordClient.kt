@@ -14,6 +14,8 @@ import io.ktor.http.contentType
 import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -27,6 +29,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import mail.sandbox.dashboard.server.provider.stalwart.credential.STALWART_RESERVED_DESCRIPTION_PREFIX
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialManagementRemote
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartGlobalReservedAccount
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartGlobalReservedInventory
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteMutationResult
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteRead
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartReservedCredential
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartReservedInventory
 
 internal class GateRawBlobHttpRequest(
     val method: String,
@@ -1116,6 +1126,425 @@ internal class GateManagementAppPasswordRevoker(
     private companion object {
         val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
     }
+}
+
+/**
+ * Management-key adapter for the credential lifecycle. Every mutation uses a
+ * fresh Account read, one positional batch patch, and one authoritative read.
+ */
+internal class GateStalwartCredentialManagementRemote(
+    private val registry: GateRegistryApi,
+    private val managementAccountId: String,
+    protectedAccountIds: Set<String>,
+) : StalwartCredentialManagementRemote {
+    private val protectedAccountIds = protectedAccountIds.toSet()
+    private val mutex = Mutex()
+
+    init {
+        require(
+            managementAccountId.isSafeGateId() &&
+                managementAccountId in this.protectedAccountIds &&
+                this.protectedAccountIds.all(String::isSafeGateId),
+        ) {
+            "Lifecycle management Account protection is invalid"
+        }
+    }
+
+    override suspend fun inventory(
+        accountId: String,
+    ): StalwartRemoteRead<StalwartReservedInventory> = mutex.withLock {
+        if (!accountId.isSafeGateId()) {
+            return@withLock StalwartRemoteRead.Unavailable
+        }
+        try {
+            requireManagementSession()
+            StalwartRemoteRead.Available(
+                inventoryFromAccount(fetchExactAccount(accountId)),
+            )
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            StalwartRemoteRead.Unavailable
+        }
+    }
+
+    override suspend fun globalInventory():
+        StalwartRemoteRead<StalwartGlobalReservedInventory> = mutex.withLock {
+        try {
+            requireManagementSession()
+            val ids = queryEveryAccountId()
+            val accounts = fetchExactAccounts(ids)
+            StalwartRemoteRead.Available(
+                StalwartGlobalReservedInventory(
+                    ids.map { accountId ->
+                        val account = requireNotNull(accounts[accountId])
+                        StalwartGlobalReservedAccount(
+                            accountId = accountId,
+                            protectedIdentity =
+                                accountId in protectedAccountIds,
+                            reserved = credentialEntries(account).reserved,
+                        )
+                    },
+                ),
+            )
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            StalwartRemoteRead.Unavailable
+        }
+    }
+
+    override suspend fun revokeReserved(
+        accountId: String,
+        expected: Set<StalwartReservedCredential>,
+    ): StalwartRemoteMutationResult = mutex.withLock {
+        revokeReservedLocked(accountId, expected)
+    }
+
+    private suspend fun revokeReservedLocked(
+        accountId: String,
+        expected: Set<StalwartReservedCredential>,
+    ): StalwartRemoteMutationResult {
+        if (!accountId.isSafeGateId() || expected.isEmpty()) {
+            return StalwartRemoteMutationResult.ReconciliationRequired
+        }
+        return try {
+            requireManagementSession()
+            val before = credentialEntries(fetchExactAccount(accountId))
+            val targets = mutableListOf<LifecycleCredentialEntry>()
+            for (credential in expected) {
+                val stableId = LifecycleCredentialStableId(
+                    type = APP_PASSWORD_TYPE,
+                    credentialId = credential.credentialId,
+                )
+                val target = before.entries.singleOrNull { entry ->
+                    entry.stableId == stableId &&
+                        requiredString(
+                            entry.value["description"],
+                            "Lifecycle AppPassword description was malformed",
+                        ) == credential.description
+                } ?: return StalwartRemoteMutationResult.ReconciliationRequired
+                targets += target
+            }
+            if (targets.map { it.stableId }.toSet().size != targets.size) {
+                return StalwartRemoteMutationResult.ReconciliationRequired
+            }
+
+            try {
+                val update = methodPayload(
+                    response = registry.registryUpdate(
+                        objectType = "Account",
+                        objectId = accountId,
+                        patch = buildJsonObject {
+                            targets.sortedBy { it.mapKey.toUInt() }.forEach {
+                                put("credentials/${it.mapKey}", JsonNull)
+                            }
+                        },
+                        accountId = managementAccountId,
+                    ),
+                    expectedMethod = "x:Account/set",
+                )
+                requireManagementResponseAccount(update)
+                val notUpdated =
+                    (update["notUpdated"] as? JsonObject).orEmpty()
+                val updated = (update["updated"] as? JsonObject).orEmpty()
+                if (
+                    notUpdated.isNotEmpty() ||
+                    updated.keys != setOf(accountId)
+                ) {
+                    invalidRegistryResponse(
+                        "Lifecycle credential batch update was not exact",
+                    )
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // Dispatch may have succeeded. The single post-fetch decides.
+            }
+
+            val after = credentialEntries(fetchExactAccount(accountId))
+            val expectedAfter =
+                before.byStableId - targets.map { it.stableId }.toSet()
+            if (after.byStableId == expectedAfter) {
+                StalwartRemoteMutationResult.Verified
+            } else {
+                StalwartRemoteMutationResult.ReconciliationRequired
+            }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            StalwartRemoteMutationResult.ReconciliationRequired
+        }
+    }
+
+    private suspend fun requireManagementSession() {
+        val session = registry.discoverSession()
+        require(
+            session.primaryAccountId == managementAccountId &&
+                session.username == GateBootstrap.MANAGEMENT_ADDRESS &&
+                session.apiUrl == PINNED_JMAP_API_URL,
+        ) {
+            "Lifecycle management authenticated the wrong Account"
+        }
+    }
+
+    private suspend fun queryEveryAccountId(): List<String> {
+        val payload = methodPayload(
+            response = registry.registryQuery(
+                objectType = "Account",
+                accountId = managementAccountId,
+            ),
+            expectedMethod = "x:Account/query",
+        )
+        requireManagementResponseAccount(payload)
+        val position = requiredNativeLong(
+            payload["position"],
+            "Lifecycle Account query position was malformed",
+        )
+        val total = requiredNativeLong(
+            payload["total"],
+            "Lifecycle Account query total was malformed",
+        )
+        val ids = payload["ids"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Lifecycle Account query omitted IDs",
+            )
+        val parsed = ids.map { value ->
+            requiredString(
+                value,
+                "Lifecycle Account query ID was malformed",
+            ).also {
+                if (!it.isSafeGateId()) {
+                    invalidRegistryResponse(
+                        "Lifecycle Account query ID was invalid",
+                    )
+                }
+            }
+        }
+        if (
+            position != 0L ||
+            total != parsed.size.toLong() ||
+            parsed.size != parsed.toSet().size
+        ) {
+            invalidRegistryResponse(
+                "Lifecycle Account query was incomplete",
+            )
+        }
+        return parsed
+    }
+
+    private suspend fun fetchExactAccount(accountId: String): JsonObject =
+        fetchExactAccounts(listOf(accountId)).getValue(accountId)
+
+    private suspend fun fetchExactAccounts(
+        accountIds: List<String>,
+    ): Map<String, JsonObject> {
+        if (accountIds.isEmpty()) return emptyMap()
+        val payload = methodPayload(
+            response = registry.registryGet(
+                objectType = "Account",
+                ids = accountIds,
+                accountId = managementAccountId,
+            ),
+            expectedMethod = "x:Account/get",
+        )
+        requireManagementResponseAccount(payload)
+        if (!(payload["notFound"] as? JsonArray).orEmpty().isEmpty()) {
+            invalidRegistryResponse(
+                "Lifecycle Account inventory lost an Account",
+            )
+        }
+        val list = payload["list"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Lifecycle Account inventory omitted its list",
+            )
+        val accounts = list.map { value ->
+            val account = value as? JsonObject
+                ?: invalidRegistryResponse(
+                    "Lifecycle Account inventory entry was malformed",
+                )
+            val accountId = requiredString(
+                account["id"],
+                "Lifecycle Account inventory ID was malformed",
+            )
+            if (!accountId.isSafeGateId()) {
+                invalidRegistryResponse(
+                    "Lifecycle Account inventory ID was invalid",
+                )
+            }
+            accountId to account
+        }.toMap()
+        if (
+            accounts.size != list.size ||
+            accounts.keys != accountIds.toSet()
+        ) {
+            invalidRegistryResponse(
+                "Lifecycle Account inventory was not exact",
+            )
+        }
+        return accounts
+    }
+
+    private fun inventoryFromAccount(
+        account: JsonObject,
+    ): StalwartReservedInventory {
+        val accountId = requiredString(
+            account["id"],
+            "Lifecycle Account ID was malformed",
+        )
+        val credentials = credentialEntries(account)
+        val quotas = account["quotas"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "Lifecycle Account quotas were absent",
+            )
+        val limit = when (val value = quotas["maxAppPasswords"]) {
+            null, JsonNull -> null
+            is JsonPrimitive -> {
+                if (value.isString) {
+                    invalidRegistryResponse(
+                        "Lifecycle AppPassword quota was not native",
+                    )
+                }
+                value.longOrNull
+                    ?.takeIf { it in 1..Int.MAX_VALUE.toLong() }
+                    ?.toInt()
+                    ?: invalidRegistryResponse(
+                        "Lifecycle AppPassword quota was invalid",
+                    )
+            }
+            else -> invalidRegistryResponse(
+                "Lifecycle AppPassword quota was malformed",
+            )
+        }
+        return StalwartReservedInventory(
+            accountId = accountId,
+            reserved = credentials.reserved,
+            appPasswordCount = credentials.appPasswordCount,
+            appPasswordLimit = limit,
+        )
+    }
+
+    private fun credentialEntries(
+        account: JsonObject,
+    ): LifecycleCredentialEntries {
+        val credentials = account["credentials"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "Lifecycle Account credentials were absent",
+            )
+        var appPasswordCount = 0
+        val reserved = mutableListOf<StalwartReservedCredential>()
+        val entries = credentials.map { (mapKey, value) ->
+            if (mapKey.toUIntOrNull() == null) {
+                invalidRegistryResponse(
+                    "Lifecycle credential position was malformed",
+                )
+            }
+            val credential = value as? JsonObject
+                ?: invalidRegistryResponse(
+                    "Lifecycle credential was malformed",
+                )
+            val stableId = LifecycleCredentialStableId(
+                type = requiredString(
+                    credential["@type"],
+                    "Lifecycle credential type was malformed",
+                ),
+                credentialId = requiredString(
+                    credential["credentialId"],
+                    "Lifecycle credential ID was malformed",
+                ),
+            )
+            if (!stableId.credentialId.isSafeGateId()) {
+                invalidRegistryResponse(
+                    "Lifecycle credential ID was invalid",
+                )
+            }
+            if (stableId.type == APP_PASSWORD_TYPE) {
+                appPasswordCount += 1
+                val description = requiredString(
+                    credential["description"],
+                    "Lifecycle AppPassword description was malformed",
+                )
+                if (
+                    description.startsWith(
+                        STALWART_RESERVED_DESCRIPTION_PREFIX,
+                    )
+                ) {
+                    reserved += StalwartReservedCredential(
+                        credentialId = stableId.credentialId,
+                        description = description,
+                    )
+                }
+            }
+            LifecycleCredentialEntry(
+                mapKey = mapKey,
+                stableId = stableId,
+                value = credential,
+            )
+        }
+        val byStableId = entries.associate { it.stableId to it.value }
+        if (byStableId.size != entries.size) {
+            invalidRegistryResponse(
+                "Lifecycle Account contained duplicate credential IDs",
+            )
+        }
+        return LifecycleCredentialEntries(
+            entries = entries,
+            byStableId = byStableId,
+            reserved = reserved,
+            appPasswordCount = appPasswordCount,
+        )
+    }
+
+    private fun requireManagementResponseAccount(payload: JsonObject) {
+        if (
+            requiredString(
+                payload["accountId"],
+                "Lifecycle management response Account ID was malformed",
+            ) != managementAccountId
+        ) {
+            invalidRegistryResponse(
+                "Lifecycle management response used the wrong Account",
+            )
+        }
+    }
+
+    private data class LifecycleCredentialStableId(
+        val type: String,
+        val credentialId: String,
+    )
+
+    private data class LifecycleCredentialEntry(
+        val mapKey: String,
+        val stableId: LifecycleCredentialStableId,
+        val value: JsonObject,
+    )
+
+    private data class LifecycleCredentialEntries(
+        val entries: List<LifecycleCredentialEntry>,
+        val byStableId: Map<LifecycleCredentialStableId, JsonObject>,
+        val reserved: List<StalwartReservedCredential>,
+        val appPasswordCount: Int,
+    )
+
+    private companion object {
+        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
+        const val APP_PASSWORD_TYPE = "AppPassword"
+    }
+}
+
+private fun requiredNativeLong(
+    value: JsonElement?,
+    message: String,
+): Long {
+    val primitive = value as? JsonPrimitive
+    if (
+        primitive == null ||
+        primitive.isString ||
+        primitive.longOrNull == null
+    ) {
+        invalidRegistryResponse(message)
+    }
+    return requireNotNull(primitive.longOrNull)
 }
 
 private fun String.isSafeGateId(): Boolean =

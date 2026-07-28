@@ -348,8 +348,8 @@ git commit -m "feat: add encrypted Stalwart credential store"
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/credential/StalwartMailAccessService.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/provider/stalwart/credential/StalwartMailAccessServiceTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailAccessLifecycleLiveTest.kt`
-- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailAccessRestartPrepareTest.kt`
-- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailAccessRestartReconcileTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailAccessRestartPrepareLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailAccessRestartReconcileLiveTest.kt`
 - Modify: `docs/debug-dashboard/gates/0b-stalwart.md`
 
 - [ ] Write the pure/fake-remote state tests first. Cover:
@@ -411,11 +411,11 @@ for phase in staged retiring removal-pending; do
   STALWART_GATE_RESTART_PHASE="$phase" \
   ./kotlin test \
     --include-module dashboard-server \
-    --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartPrepareTest'
+    --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartPrepareLiveTest'
   STALWART_GATE_RESTART_PHASE="$phase" \
   ./kotlin test \
     --include-module dashboard-server \
-    --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartReconcileTest'
+    --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartReconcileLiveTest'
 done
 ```
 

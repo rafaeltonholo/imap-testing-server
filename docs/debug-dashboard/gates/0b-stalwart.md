@@ -188,6 +188,85 @@ Current Task 2 evidence on `2026-07-28` is:
 - selected AppPassword semantics proof: `1/1`;
 - selected permission-matrix and quota-restoration proof: `1/1`.
 
+## Task 4 mail credential lifecycle decision
+
+The dashboard-owned mail credential lifecycle is now closed over immutable
+Stalwart Account IDs and the encrypted Task 3 store. An ordinary Account starts
+at `enrollmentRequired`; only one exactly matching, directly authenticated
+`Active` generation projects `ready`. Unknown, malformed, revoked, mismatched,
+or uncaptured reserved credentials fail closed to `recoveryRequired`. Durable
+`Staged` and `Retiring` records project `rotating`, a remotely removed but
+locally unerased record projects `removalPending`, and an unavailable store
+supersedes every Account state. Protected identities expose no lifecycle action.
+
+Shared mail leases acquire their reader permit before reloading and probing the
+current generation. Enrollment, repair, rotation, removal, and global reset use
+the exclusive side; a pending writer blocks new readers and drains existing
+readers for at most 30 seconds. Timeouts, interruption, cancellation, stale
+local revisions, and unavailable remote state change neither the remote
+credential list nor local lifecycle phase.
+
+Enrollment inventories first, creates one Account-owned AppPassword with the
+request-scoped normal password, durably captures its read-once secret, and then
+probes an Account-bound `Mailbox/get` with explicit Core, Mail, Submission, and
+Blob capabilities. Repair batch-removes every exact reserved credential before
+one replacement attempt. Remove verifies remote absence before persisting
+`RemovalPending` and erasing local bytes. Rotation drains leases and persists
+the exact sequence `Active` → `Staged` → `Retiring` → `Active`; it freshly
+inventories before revoking the old generation and requires an authentication
+rejection from the old secret plus successful direct mail from the successor.
+The normal password, AppPassword character/byte handoffs, probe copies, and
+lease copies all have explicit close-and-wipe ownership.
+
+The management adapter requires a complete Account query and exact Account
+gets. Each cleanup performs one fresh fetch, one positional multi-leaf patch,
+and one authoritative post-fetch while comparing the full stable credential
+map, so unrelated Password, API-key, and AppPassword objects are preserved.
+Response loss never triggers a blind retry. Global reset is available only
+after the local store proves unavailable: it enumerates all Accounts, including
+protected identities, verifies the same Account/protection set with a globally
+empty reserved inventory, quarantines the unusable pair, and accepts only a new
+revision-zero empty store with a fresh store ID.
+
+The selected lifecycle live proof exercised project → enrollment → shared lease
+and direct mail probe → rotation → external revocation → recovery → repair →
+remove → re-enrollment of both disposable ordinary Accounts → authenticated
+ciphertext corruption → explicit global reset. It passed `1/1`. The corruption
+and reset addressed only
+`debug-dashboard/.runtime/stalwart-gate0b/credential-store/`; repository
+`vmail/` and `stalwart-data/` were never addressed.
+
+Restart evidence uses two unconditional selections and therefore two fresh test
+JVMs for each phase. Prepare stops immediately after the service reports a
+genuinely durable `Staged`, `Retiring`, or `RemovalPending` commit. Reconcile
+copies the management credential into its client, immediately closes and wipes
+the bundled fixture arrays, then derives the Account ID and address from the
+persisted record. It neither retains nor authenticates with an ordinary normal
+password and uses an owner remote that fails the test if any create is
+attempted. All three prepare/reconcile pairs passed (`6/6` selections). Each
+reconcile reached its terminal `Active` or locally erased state with a zero
+create count.
+
+Lifecycle and reconcile teardown first batch-remove every globally reserved
+credential, verify the global inventory empty with the same Account/protection
+shape, close the store, and only then delete the exact validated Gate credential
+root. An independent check found that root absent after the lifecycle run and
+after every restart pair.
+
+Final Task 4 evidence on `2026-07-28` is:
+
+- focused lifecycle service contracts: `37/37`;
+- focused management adapter contracts: `28/28`;
+- focused credential-store and Gate path contracts: `40/40`;
+- focused bootstrap/live-environment contracts: `11/11`;
+- canonical offline Stalwart Gate contracts, with every `*LiveTest` excluded:
+  `68/68`;
+- production/browser-environment suite, with every Stalwart `*LiveTest`
+  excluded: `dashboard-contract` `20/20` and `dashboard-server` `170/170`;
+  `190/190` total, including the Chromium browser gate;
+- selected complete lifecycle proof: `1/1`;
+- selected restart preparation/reconciliation proofs: `6/6`.
+
 ## Fixed boundary
 
 - Image: `stalwartlabs/stalwart:v0.16.14`
@@ -292,19 +371,25 @@ forbidden.
 ## Live selection
 
 Every opt-in operation is an unconditional class ending in `LiveTest`. Selecting
-that exact class is the authorization boundary; there is no phase selector and
-no early-return path that can report a false pass. The five networked bootstrap,
-retirement, raw Blob compatibility, permission-matrix, and AppPassword-semantics
-classes require:
+that exact class is the authorization boundary; there is no early-return path
+that can report a false pass. The eight networked bootstrap, retirement, raw
+Blob compatibility, permission-matrix, AppPassword-semantics, lifecycle, and
+restart classes require:
 
 - `STALWART_LIVE_TESTS=1`
 - `STALWART_BASE_URL=http://127.0.0.1:18443`
 - the fixed absolute `STALWART_GATE_FIXTURE_SECRETS_FILE`
 
-All five networked classes perform a bounded probe of the dedicated readiness
+The lifecycle class additionally requires the exact absolute
+`STALWART_GATE_CREDENTIAL_ROOT` and forbids a restart phase. Each restart class
+requires that same root plus one exact `STALWART_GATE_RESTART_PHASE` value:
+`staged`, `retiring`, or `removal-pending`. The phase selects which complete
+prepare or reconcile test to execute; it is not an early-return skip.
+
+All eight networked classes perform a bounded probe of the dedicated readiness
 endpoint before using credentials. They do not use assumptions, alternate
-servers, or fallback URLs. All five also execute the bind-only resolved-mount
-audit before accepting live evidence. Prepare accepts only exact
+servers, or fallback URLs. All eight also execute the bind-only resolved-mount
+audit before accepting live evidence. Fixture preparation accepts only exact
 `STALWART_GATE_PREPARE=1`; cleanup accepts only exact
 `STALWART_GATE_CLEANUP=1`. Conflicting gate variables fail closed.
 
@@ -405,6 +490,37 @@ STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secret
   --include-module dashboard-server \
   --include-classes \
   'mail.sandbox.dashboard.server.gate.stalwart.StalwartAppPasswordSemanticsLiveTest'
+
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store" \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessLifecycleLiveTest'
+
+for phase in staged retiring removal-pending; do
+  STALWART_LIVE_TESTS=1 \
+  STALWART_BASE_URL=http://127.0.0.1:18443 \
+  STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+  STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store" \
+  STALWART_GATE_RESTART_PHASE="$phase" \
+  ./kotlin test \
+    --include-module dashboard-server \
+    --include-classes \
+    'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartPrepareLiveTest'
+
+  STALWART_LIVE_TESTS=1 \
+  STALWART_BASE_URL=http://127.0.0.1:18443 \
+  STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+  STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store" \
+  STALWART_GATE_RESTART_PHASE="$phase" \
+  ./kotlin test \
+    --include-module dashboard-server \
+    --include-classes \
+    'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailAccessRestartReconcileLiveTest'
+done
 ```
 
 The fresh retirement JVM requires recovery Basic authentication to fail only with

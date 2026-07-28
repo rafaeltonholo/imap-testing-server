@@ -133,6 +133,89 @@ class StalwartBootstrapTest {
     }
 
     @Test
+    fun mailAccessEnvironmentRequiresExactCredentialRootAndRestartPhase() {
+        withTemporaryProject { projectRoot ->
+            val fixtureSecrets = projectRoot.resolve(
+                ".runtime/stalwart-gate0b/fixture-secrets",
+            )
+            val credentialRoot = projectRoot.resolve(
+                ".runtime/stalwart-gate0b/credential-store",
+            )
+            val valid = mapOf(
+                "STALWART_LIVE_TESTS" to "1",
+                "STALWART_BASE_URL" to "http://127.0.0.1:18443",
+                "STALWART_GATE_FIXTURE_SECRETS_FILE" to
+                    fixtureSecrets.toString(),
+                "STALWART_GATE_CREDENTIAL_ROOT" to
+                    credentialRoot.toString(),
+            )
+
+            val lifecycle = StalwartMailAccessLiveEnvironment.lifecycle(
+                environment = valid,
+                projectRoot = projectRoot,
+            )
+            assertEquals(credentialRoot, lifecycle.credentialPaths.runtimeRoot)
+            assertEquals(null, lifecycle.restartPhase)
+
+            StalwartMailAccessRestartPhase.entries.forEach { phase ->
+                val restart = StalwartMailAccessLiveEnvironment.restart(
+                    environment = valid + (
+                        "STALWART_GATE_RESTART_PHASE" to
+                            phase.environmentValue
+                        ),
+                    projectRoot = projectRoot,
+                )
+                assertEquals(phase, restart.restartPhase)
+                assertEquals(
+                    credentialRoot,
+                    restart.credentialPaths.runtimeRoot,
+                )
+            }
+
+            listOf(
+                valid - "STALWART_GATE_CREDENTIAL_ROOT",
+                valid + (
+                    "STALWART_GATE_CREDENTIAL_ROOT" to
+                        projectRoot.resolve(".runtime").toString()
+                    ),
+                valid + ("STALWART_GATE_CREDENTIAL_ROOT" to "credential-store"),
+                valid + ("STALWART_GATE_RESTART_PHASE" to "staged"),
+            ).forEach { invalid ->
+                assertFailsWith<IllegalArgumentException> {
+                    StalwartMailAccessLiveEnvironment.lifecycle(
+                        environment = invalid,
+                        projectRoot = projectRoot,
+                    )
+                }
+            }
+
+            listOf(
+                valid,
+                valid + ("STALWART_GATE_RESTART_PHASE" to ""),
+                valid + ("STALWART_GATE_RESTART_PHASE" to "active"),
+                valid + ("STALWART_GATE_RESTART_PHASE" to "removalPending"),
+            ).forEach { invalid ->
+                assertFailsWith<IllegalArgumentException> {
+                    StalwartMailAccessLiveEnvironment.restart(
+                        environment = invalid,
+                        projectRoot = projectRoot,
+                    )
+                }
+            }
+
+            assertFailsWith<IllegalArgumentException> {
+                StalwartGateActionSelection.requirePrepare(
+                    mapOf(
+                        "STALWART_GATE_PREPARE" to "1",
+                        "STALWART_GATE_CREDENTIAL_ROOT" to
+                            credentialRoot.toString(),
+                    ),
+                )
+            }
+        }
+    }
+
+    @Test
     fun readinessIsBoundedAndUsesOnlyTheDedicatedReadyEndpoint() = runBlocking {
         val environment = StalwartLiveTestEnvironment(
             baseUrl = URI("http://127.0.0.1:18443"),
@@ -926,13 +1009,14 @@ class StalwartBootstrapTest {
     private fun withTemporaryProject(block: (Path) -> Unit) {
         val root = createTempDirectory("stalwart-gate0b-live-env-test")
         try {
+            Files.writeString(root.resolve("project.yaml"), "product: test\n")
             val runtime = root.resolve(".runtime/stalwart-gate0b")
             runtime.createDirectories()
             Files.setPosixFilePermissions(
                 runtime,
                 PosixFilePermissions.fromString("rwx------"),
             )
-            block(root)
+            block(root.toRealPath())
         } finally {
             Files.walk(root).use { entries ->
                 entries.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)

@@ -2,6 +2,9 @@ package mail.sandbox.dashboard.server.gate.stalwart
 
 import java.net.URI
 import java.util.UUID
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteMutationResult
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteRead
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartReservedCredential
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -1137,6 +1140,247 @@ class GateAppPasswordClientTest {
         }
 
     @Test
+    fun lifecycleManagementInventoryCountsAllAppPasswordsAndParsesQuota() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val targetAccountId = "account7"
+            val reserved = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getResponses = listOf(
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = targetAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "17":${appPasswordCredential(
+                                  credentialId = reserved.credentialId,
+                                  description = reserved.description,
+                              )},
+                              "49":${appPasswordCredential(
+                                  credentialId = "credential3",
+                                  description = "team-owned/unrelated",
+                              )}
+                            }
+                        """.trimIndent(),
+                        quotas = """{"maxAppPasswords":3}""",
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).inventory(targetAccountId)
+
+            val inventory =
+                assertIs<StalwartRemoteRead.Available<*>>(result).value
+            val typed = assertIs<
+                mail.sandbox.dashboard.server.provider.stalwart.credential.
+                    StalwartReservedInventory
+                >(inventory)
+            assertEquals(targetAccountId, typed.accountId)
+            assertEquals(listOf(reserved), typed.reserved)
+            assertEquals(2, typed.appPasswordCount)
+            assertEquals(3, typed.appPasswordLimit)
+            assertEquals(1, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleManagementRevokesOneExactBatchIncludingProtectedAccount() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val first = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val second = StalwartReservedCredential(
+                credentialId = "credential4",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/4",
+            )
+            val sibling = appPasswordCredential(
+                credentialId = "credential3",
+                description = "team-owned/unrelated",
+            )
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getResponses = listOf(
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = managementAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "17":${appPasswordCredential(
+                                  credentialId = first.credentialId,
+                                  description = first.description,
+                              )},
+                              "29":${appPasswordCredential(
+                                  credentialId = second.credentialId,
+                                  description = second.description,
+                              )},
+                              "49":$sibling
+                            }
+                        """.trimIndent(),
+                    ),
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = managementAccountId,
+                        credentials = """
+                            {
+                              "8":${passwordCredential()},
+                              "3":$sibling
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+                updateResponses = listOf(
+                    registryResponse(
+                        method = "x:Account/set",
+                        payload = """
+                            {
+                              "accountId":"$managementAccountId",
+                              "updated":{"$managementAccountId":null},
+                              "notUpdated":{}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).revokeReserved(
+                accountId = managementAccountId,
+                expected = setOf(first, second),
+            )
+
+            assertEquals(StalwartRemoteMutationResult.Verified, result)
+            assertEquals(
+                buildJsonObject {
+                    put("credentials/17", JsonNull)
+                    put("credentials/29", JsonNull)
+                },
+                registry.updates.single().patch,
+            )
+            assertEquals(1, registry.updates.size)
+            assertEquals(2, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleGlobalInventoryRequiresCompleteQueryAndIncludesProtected() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val ordinaryAccountId = "account7"
+            val reserved = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val completeRegistry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(managementAccountId, ordinaryAccountId),
+                        total = 2,
+                    ),
+                ),
+                getResponses = listOf(
+                    accountsGetResponse(
+                        requestAccountId = managementAccountId,
+                        accounts = listOf(
+                            accountObject(
+                                managementAccountId,
+                                """{"0":${passwordCredential()}}""",
+                            ),
+                            accountObject(
+                                ordinaryAccountId,
+                                """
+                                    {
+                                      "0":${passwordCredential()},
+                                      "17":${appPasswordCredential(
+                                          reserved.credentialId,
+                                          reserved.description,
+                                      )}
+                                    }
+                                """.trimIndent(),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            val remote = GateStalwartCredentialManagementRemote(
+                registry = completeRegistry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            )
+
+            val available =
+                assertIs<StalwartRemoteRead.Available<*>>(
+                    remote.globalInventory(),
+                )
+            val global = assertIs<
+                mail.sandbox.dashboard.server.provider.stalwart.credential.
+                    StalwartGlobalReservedInventory
+                >(available.value)
+            assertEquals(
+                listOf(managementAccountId, ordinaryAccountId),
+                global.accounts.map { it.accountId },
+            )
+            assertTrue(global.accounts.first().protectedIdentity)
+            assertEquals(listOf(reserved), global.accounts.last().reserved)
+
+            val incompleteRegistry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(managementAccountId),
+                        total = 2,
+                    ),
+                ),
+            )
+            val incomplete = GateStalwartCredentialManagementRemote(
+                registry = incompleteRegistry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).globalInventory()
+            assertIs<StalwartRemoteRead.Unavailable>(incomplete)
+            assertTrue(incompleteRegistry.gets.isEmpty())
+        }
+
+    @Test
     fun managementRevocationNeverBlindlyRetriesAfterPostFetchMismatch() =
         runBlocking {
             val managementAccountId = "management7"
@@ -1541,6 +1785,7 @@ class GateAppPasswordClientTest {
         requestAccountId: String,
         objectAccountId: String,
         credentials: String,
+        quotas: String = """{"maxAppPasswords":null}""",
     ): JsonObject =
         registryResponse(
             method = "x:Account/get",
@@ -1551,12 +1796,63 @@ class GateAppPasswordClientTest {
                   "list":[{
                     "id":"$objectAccountId",
                     "@type":"User",
-                    "credentials":$credentials
+                    "credentials":$credentials,
+                    "quotas":$quotas
                   }],
                   "notFound":[]
                 }
             """.trimIndent(),
         )
+
+    private fun accountQueryResponse(
+        requestAccountId: String,
+        ids: List<String>,
+        total: Int,
+    ): JsonObject =
+        registryResponse(
+            method = "x:Account/query",
+            payload = """
+                {
+                  "accountId":"$requestAccountId",
+                  "queryState":"account-query-state",
+                  "canCalculateChanges":false,
+                  "position":0,
+                  "ids":${Json.encodeToString(ids)},
+                  "total":$total
+                }
+            """.trimIndent(),
+        )
+
+    private fun accountsGetResponse(
+        requestAccountId: String,
+        accounts: List<JsonObject>,
+    ): JsonObject =
+        registryResponse(
+            method = "x:Account/get",
+            payload = """
+                {
+                  "accountId":"$requestAccountId",
+                  "state":"account-state",
+                  "list":${Json.encodeToString(accounts)},
+                  "notFound":[]
+                }
+            """.trimIndent(),
+        )
+
+    private fun accountObject(
+        accountId: String,
+        credentials: String,
+    ): JsonObject =
+        Json.parseToJsonElement(
+            """
+                {
+                  "id":"$accountId",
+                  "@type":"User",
+                  "credentials":$credentials,
+                  "quotas":{"maxAppPasswords":null}
+                }
+            """.trimIndent(),
+        ).jsonObject
 
     private fun passwordCredential(): String =
         """

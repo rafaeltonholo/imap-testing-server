@@ -53,6 +53,52 @@ internal class CredentialStorePaths private constructor(
             )
         }
 
+        fun gate0bTesting(
+            dashboardProjectRoot: Path,
+            configuredRoot: Path,
+        ): CredentialStorePaths {
+            val projectRoot = validateExistingRoot(dashboardProjectRoot)
+            val projectMarker = projectRoot.resolve("project.yaml")
+            require(
+                Files.isRegularFile(projectMarker, LinkOption.NOFOLLOW_LINKS) &&
+                    !Files.isSymbolicLink(projectMarker),
+            ) {
+                "The dashboard project root is invalid"
+            }
+            require(
+                configuredRoot.isAbsolute &&
+                    configuredRoot.normalize() == configuredRoot,
+            ) {
+                "The Gate 0B credential root must be absolute and normalized"
+            }
+            val expectedRoot = projectRoot.resolve(
+                ".runtime/stalwart-gate0b/credential-store",
+            )
+            require(configuredRoot == expectedRoot) {
+                "The Gate 0B credential root is invalid"
+            }
+            val expectedParent = requireNotNull(expectedRoot.parent) {
+                "The Gate 0B credential parent is absent"
+            }
+            val trustedParent = validateExistingRoot(expectedParent)
+            require(trustedParent == expectedParent) {
+                "The Gate 0B credential parent is invalid"
+            }
+            if (Files.exists(expectedRoot, LinkOption.NOFOLLOW_LINKS)) {
+                require(
+                    Files.isDirectory(expectedRoot, LinkOption.NOFOLLOW_LINKS) &&
+                        !Files.isSymbolicLink(expectedRoot) &&
+                        expectedRoot.toRealPath() == expectedRoot,
+                ) {
+                    "The Gate 0B credential root is unsafe"
+                }
+            }
+            return fromRuntimeRoot(
+                runtimeRoot = expectedRoot,
+                trustedRoot = trustedParent,
+            )
+        }
+
         fun testing(runtimeRoot: Path): CredentialStorePaths {
             val absolute = runtimeRoot.toAbsolutePath().normalize()
             val parent = requireNotNull(absolute.parent) {

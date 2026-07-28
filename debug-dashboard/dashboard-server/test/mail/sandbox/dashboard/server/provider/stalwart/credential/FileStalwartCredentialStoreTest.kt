@@ -78,6 +78,127 @@ class FileStalwartCredentialStoreTest {
     }
 
     @Test
+    fun gate0bPathsAcceptOnlyTheExactAbsentCredentialRootWithoutCreatingIt() {
+        withGateProject { dashboardRoot, gateRuntime, credentialRoot ->
+            assertFalse(Files.exists(credentialRoot, LinkOption.NOFOLLOW_LINKS))
+
+            val paths = CredentialStorePaths.gate0bTesting(
+                dashboardProjectRoot = dashboardRoot,
+                configuredRoot = credentialRoot,
+            )
+
+            assertEquals(credentialRoot, paths.runtimeRoot)
+            assertEquals(
+                credentialRoot.resolve("stalwart/app-passwords.v1.enc"),
+                paths.ciphertext,
+            )
+            assertEquals(
+                credentialRoot.resolve("keys/stalwart-app-passwords.v1.key"),
+                paths.key,
+            )
+            assertEquals(
+                credentialRoot.resolve("stalwart/app-passwords.v1.lock"),
+                paths.lock,
+            )
+            assertEquals(gateRuntime, paths.trustedRoot)
+            assertFalse(Files.exists(credentialRoot, LinkOption.NOFOLLOW_LINKS))
+        }
+    }
+
+    @Test
+    fun gate0bPathsAcceptAnExistingCanonicalCredentialRootForRestartTests() {
+        withGateProject { dashboardRoot, _, credentialRoot ->
+            Files.createDirectory(credentialRoot)
+            setOwnerOnlyDirectory(credentialRoot)
+
+            val paths = CredentialStorePaths.gate0bTesting(
+                dashboardProjectRoot = dashboardRoot,
+                configuredRoot = credentialRoot,
+            )
+
+            assertEquals(credentialRoot, paths.runtimeRoot)
+            assertEquals(credentialRoot, credentialRoot.toRealPath())
+        }
+    }
+
+    @Test
+    fun gate0bPathsRejectEveryNonExactConfiguredRootWithoutCreatingFiles() {
+        withGateProject { dashboardRoot, _, credentialRoot ->
+            val alternatives = listOf(
+                Path.of(".runtime/stalwart-gate0b/credential-store"),
+                dashboardRoot.resolve(
+                    ".runtime/stalwart-gate0b/credential-store-sibling",
+                ),
+                dashboardRoot.resolve(".runtime"),
+                dashboardRoot.resolve(
+                    ".runtime/stalwart-gate0b/escape/../credential-store",
+                ),
+            )
+            val before = captureTree(dashboardRoot)
+
+            alternatives.forEach { alternative ->
+                assertFailsWith<IllegalArgumentException>(alternative.toString()) {
+                    CredentialStorePaths.gate0bTesting(
+                        dashboardProjectRoot = dashboardRoot,
+                        configuredRoot = alternative,
+                    )
+                }
+                assertEquals(before, captureTree(dashboardRoot))
+                assertFalse(Files.exists(credentialRoot, LinkOption.NOFOLLOW_LINKS))
+            }
+        }
+    }
+
+    @Test
+    fun gate0bPathsRejectASymbolicGateParentWithoutCreatingStoreFiles() {
+        withGateProject { dashboardRoot, gateRuntime, credentialRoot ->
+            Files.delete(gateRuntime)
+            val realGateRuntime = dashboardRoot.resolve("real-gate-runtime")
+            Files.createDirectory(realGateRuntime)
+            setOwnerOnlyDirectory(realGateRuntime)
+            Files.createSymbolicLink(gateRuntime, realGateRuntime)
+            val before = captureTree(dashboardRoot)
+
+            assertFailsWith<IllegalArgumentException> {
+                CredentialStorePaths.gate0bTesting(
+                    dashboardProjectRoot = dashboardRoot,
+                    configuredRoot = credentialRoot,
+                )
+            }
+
+            assertEquals(before, captureTree(dashboardRoot))
+            assertFalse(
+                Files.exists(
+                    realGateRuntime.resolve("credential-store"),
+                    LinkOption.NOFOLLOW_LINKS,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun gate0bPathsRejectASymbolicCredentialRootWithoutFollowingIt() {
+        withGateProject { dashboardRoot, _, credentialRoot ->
+            val externalRoot = dashboardRoot.resolve("external-credential-root")
+            Files.createDirectory(externalRoot)
+            setOwnerOnlyDirectory(externalRoot)
+            Files.createSymbolicLink(credentialRoot, externalRoot)
+            val before = captureTree(dashboardRoot)
+
+            assertFailsWith<IllegalArgumentException> {
+                CredentialStorePaths.gate0bTesting(
+                    dashboardProjectRoot = dashboardRoot,
+                    configuredRoot = credentialRoot,
+                )
+            }
+
+            assertEquals(before, captureTree(dashboardRoot))
+            assertTrue(Files.isSymbolicLink(credentialRoot))
+            assertTrue(Files.list(externalRoot).use { stream -> stream.findAny().isEmpty })
+        }
+    }
+
+    @Test
     fun newStorageEntriesAreDurableBeforeStoreAndMarkerPublication() {
         withRoot { root ->
             val paths = CredentialStorePaths.testing(root.resolve("runtime"))
@@ -1740,6 +1861,34 @@ class FileStalwartCredentialStoreTest {
             deleteTree(root)
         }
     }
+
+    private fun withGateProject(
+        block: (dashboardRoot: Path, gateRuntime: Path, credentialRoot: Path) -> Unit,
+    ) {
+        withRoot { root ->
+            val dashboardRoot = root.resolve("debug-dashboard")
+            val gateRuntime = dashboardRoot.resolve(".runtime/stalwart-gate0b")
+            Files.createDirectories(gateRuntime)
+            listOf(
+                dashboardRoot,
+                dashboardRoot.resolve(".runtime"),
+                gateRuntime,
+            ).forEach(::setOwnerOnlyDirectory)
+            val projectMarker = dashboardRoot.resolve("project.yaml")
+            Files.writeString(projectMarker, "modules: []\n")
+            setOwnerOnlyFile(projectMarker)
+            block(
+                dashboardRoot.toRealPath(),
+                gateRuntime.toRealPath(),
+                gateRuntime.toRealPath().resolve("credential-store"),
+            )
+        }
+    }
+
+    private fun captureTree(root: Path): Set<Path> =
+        Files.walk(root).use { stream ->
+            stream.map(root::relativize).toList().toSet()
+        }
 
     private fun record(
         accountId: String,
