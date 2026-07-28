@@ -107,8 +107,8 @@ internal enum class CredentialStoreCommitPoint {
     AfterQuarantineSourceDelete,
     BeforeQuarantineDestinationPreflight,
     AfterQuarantineLinkVisible,
-    AfterCreatedDirectoryDurable,
-    AfterCreatedStableLockDurable,
+    AfterDirectoryDurable,
+    AfterStableLockDurable,
     BeforeQuarantineTransactionPublish,
 }
 
@@ -810,9 +810,7 @@ internal class FileStalwartCredentialStore(
         ) {
             throw StoreUnavailableException()
         }
-        var requiresDurability = false
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            requiresDurability = true
             try {
                 createDirectory(path)
             } catch (_: FileAlreadyExistsException) {
@@ -820,16 +818,14 @@ internal class FileStalwartCredentialStore(
             }
         }
         requireSecureDirectory(path)
-        if (requiresDurability) {
-            fsyncDirectory(path)
-            requireSecureDirectory(path)
-            fsyncDirectory(parent)
-            requireSecureDirectory(path)
-            notifyCommit(
-                CredentialStoreCommitPoint.AfterCreatedDirectoryDurable,
-                path,
-            )
-        }
+        fsyncDirectory(path)
+        requireSecureDirectory(path)
+        fsyncDirectory(parent)
+        requireSecureDirectory(path)
+        notifyCommit(
+            CredentialStoreCommitPoint.AfterDirectoryDurable,
+            path,
+        )
     }
 
     private fun requireSecureDirectory(path: Path) {
@@ -849,9 +845,7 @@ internal class FileStalwartCredentialStore(
     }
 
     private fun ensureSecureFile(path: Path) {
-        var requiresDurability = false
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            requiresDurability = true
             try {
                 createFile(path)
             } catch (_: FileAlreadyExistsException) {
@@ -859,15 +853,13 @@ internal class FileStalwartCredentialStore(
             }
         }
         requireSecureRegularFile(path)
-        if (requiresDurability) {
-            forceSecureRegularFile(path)
-            fsyncDirectory(path.parent)
-            requireSecureRegularFile(path)
-            notifyCommit(
-                CredentialStoreCommitPoint.AfterCreatedStableLockDurable,
-                path,
-            )
-        }
+        forceSecureRegularFile(path)
+        fsyncDirectory(path.parent)
+        requireSecureRegularFile(path)
+        notifyCommit(
+            CredentialStoreCommitPoint.AfterStableLockDurable,
+            path,
+        )
     }
 
     private fun requireSecureRegularFile(path: Path) {

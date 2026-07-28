@@ -100,7 +100,7 @@ class FileStalwartCredentialStoreTest {
             )
             val directoryIndices = durableDirectories.map { directory ->
                 events.indexOf(
-                    CredentialStoreCommitPoint.AfterCreatedDirectoryDurable to directory,
+                    CredentialStoreCommitPoint.AfterDirectoryDurable to directory,
                 ).also { index ->
                     assertTrue(index >= 0, "missing durable-directory boundary")
                 }
@@ -110,7 +110,7 @@ class FileStalwartCredentialStoreTest {
                 "storage directories were not made durable in creation order",
             )
             val lockIndex = events.indexOf(
-                CredentialStoreCommitPoint.AfterCreatedStableLockDurable to paths.lock,
+                CredentialStoreCommitPoint.AfterStableLockDurable to paths.lock,
             )
             assertTrue(
                 lockIndex > directoryIndices.last(),
@@ -143,7 +143,7 @@ class FileStalwartCredentialStoreTest {
             }
 
             val quarantineDirectoryIndex = events.indexOf(
-                CredentialStoreCommitPoint.AfterCreatedDirectoryDurable to paths.quarantine,
+                CredentialStoreCommitPoint.AfterDirectoryDurable to paths.quarantine,
             )
             val markerPublicationIndex = events.indexOf(
                 CredentialStoreCommitPoint.BeforeQuarantineTransactionPublish to
@@ -154,6 +154,67 @@ class FileStalwartCredentialStoreTest {
                     markerPublicationIndex > quarantineDirectoryIndex,
                 "quarantine marker publication preceded directory durability",
             )
+        }
+    }
+
+    @Test
+    fun visiblePreExistingStorageEntriesAreRedurableBeforeSecondCallerPublishes() {
+        withRoot { root ->
+            val paths = CredentialStorePaths.testing(root.resolve("runtime"))
+            Files.createDirectories(paths.ciphertext.parent)
+            Files.createDirectories(paths.key.parent)
+            listOf(
+                paths.runtimeRoot,
+                paths.ciphertext.parent,
+                paths.key.parent,
+            ).forEach(::setOwnerOnlyDirectory)
+            Files.createFile(paths.lock)
+            setOwnerOnlyFile(paths.lock)
+
+            val events =
+                mutableListOf<Pair<CredentialStoreCommitPoint, Path>>()
+            FileStalwartCredentialStore(
+                paths = paths,
+                commitObserver = CredentialStoreCommitObserver { point, target ->
+                    events += point to target
+                },
+            ).use { secondCaller ->
+                val loaded =
+                    assertIs<CredentialStoreLoadResult.Available>(secondCaller.load())
+                loaded.snapshot.close()
+            }
+
+            val durableDirectories = listOf(
+                paths.runtimeRoot,
+                paths.ciphertext.parent,
+                paths.key.parent,
+            )
+            val directoryIndices = durableDirectories.map { directory ->
+                events.indexOf(
+                    CredentialStoreCommitPoint.AfterDirectoryDurable to directory,
+                ).also { index ->
+                    assertTrue(
+                        index >= 0,
+                        "second caller skipped a visible directory's durability",
+                    )
+                }
+            }
+            val lockIndex = events.indexOf(
+                CredentialStoreCommitPoint.AfterStableLockDurable to paths.lock,
+            )
+            assertTrue(
+                lockIndex > directoryIndices.max(),
+                "second caller skipped visible stable-lock durability",
+            )
+            listOf(paths.key, paths.ciphertext).forEach { published ->
+                val publicationIndex = events.indexOf(
+                    CredentialStoreCommitPoint.BeforeFailIfExistsPublish to published,
+                )
+                assertTrue(
+                    publicationIndex > lockIndex,
+                    "second caller published before redurability completed",
+                )
+            }
         }
     }
 
