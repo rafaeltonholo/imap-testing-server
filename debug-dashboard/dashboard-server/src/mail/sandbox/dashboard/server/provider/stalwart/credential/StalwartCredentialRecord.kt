@@ -1,5 +1,7 @@
 package mail.sandbox.dashboard.server.provider.stalwart.credential
 
+import java.util.Collections
+
 internal enum class CredentialPhase {
     Active,
     Staged,
@@ -132,10 +134,14 @@ internal data class StalwartCredentialRecord private constructor(
 internal class StalwartCredentialSnapshot(
     val storeId: java.util.UUID,
     val revision: Long,
-    val records: Map<String, StalwartCredentialRecord>,
+    records: Map<String, StalwartCredentialRecord>,
 ) : AutoCloseable {
+    private val ownedRecords = LinkedHashMap(records)
+    val records: Map<String, StalwartCredentialRecord> =
+        Collections.unmodifiableMap(ownedRecords)
+
     override fun close() {
-        records.values.forEach(StalwartCredentialRecord::close)
+        ownedRecords.values.forEach(StalwartCredentialRecord::close)
     }
 
     override fun toString(): String =

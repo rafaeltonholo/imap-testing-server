@@ -305,6 +305,52 @@ class FileStalwartCredentialStoreTest {
     }
 
     @Test
+    fun snapshotOwnsAnUnmodifiableDefensiveRecordMapUntilClose() {
+        val first = record(
+            accountId = "account-owned-one",
+            address = "owned-one@local.test",
+            active = generation(TEST_STORE_ID, 1, SECRET_ACTIVE.copyOf()),
+        )
+        val second = record(
+            accountId = "account-owned-two",
+            address = "owned-two@local.test",
+            active = generation(TEST_STORE_ID, 2, SECRET_OTHER.copyOf()),
+        )
+        val constructorInput = linkedMapOf(
+            first.accountId to first,
+            second.accountId to second,
+        )
+        val snapshot = StalwartCredentialSnapshot(
+            storeId = TEST_STORE_ID,
+            revision = 7,
+            records = constructorInput,
+        )
+
+        try {
+            @Suppress("UNCHECKED_CAST")
+            val exposed = snapshot.records as MutableMap<String, StalwartCredentialRecord>
+            assertFailsWith<UnsupportedOperationException> {
+                exposed.remove(first.accountId)
+            }
+            assertFailsWith<UnsupportedOperationException> {
+                exposed.clear()
+            }
+
+            constructorInput.clear()
+            assertEquals(setOf(first.accountId, second.accountId), snapshot.records.keys)
+        } finally {
+            snapshot.close()
+        }
+
+        assertFailsWith<IllegalStateException> {
+            first.active?.secret?.copyForUse()
+        }
+        assertFailsWith<IllegalStateException> {
+            second.active?.secret?.copyForUse()
+        }
+    }
+
+    @Test
     fun replacementRejectsAnyDescriptionOutsideTheExactStoreGenerationIdentity() {
         withStore { paths, store, storeId ->
             val mismatched = CredentialGeneration(
