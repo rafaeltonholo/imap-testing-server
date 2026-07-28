@@ -166,6 +166,8 @@ git commit -m "test: bootstrap scoped Stalwart gate fixture"
 **Files:**
 
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/stalwart/GateAppPasswordClient.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/GateAppPasswordClientTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRawBlobCompatibilityLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartPermissionMatrixLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartAppPasswordSemanticsLiveTest.kt`
 - Modify: `docs/debug-dashboard/gates/0b-stalwart.md`
@@ -203,12 +205,20 @@ every created AppPassword object and assert declarative mode `Replace` plus the
 exact final list, then verify the credential's effective scope through
 `/api/account`.
 
-- [ ] Before creating any AppPassword, run the management and stripped-credential
-  raw HTTP `/jmap/upload/{accountId}` and download permission negatives.
-  Pinned-source inspection predicts those endpoints may bypass
-  `jmapBlobUpload`/`jmapBlobGet` and even upload membership checks. If either
-  scoped credential can perform a forbidden blob operation, record `STOP` and
-  do not continue the gate.
+- [x] Before creating any AppPassword, characterize raw HTTP
+  `/jmap/upload/{accountId}` and download authorization. Pinned-source
+  inspection predicted that these routes bypass `jmapBlobUpload`/`jmapBlobGet`
+  and upload membership checks. The disposable v0.16.14 fixture confirmed that
+  the management key can upload to its own and an ordinary Account ID and can
+  download its own exact probe bytes; cross-Account management download remains
+  denied.
+
+  Decision (`2026-07-28`): accept this as a local-only test-provider
+  compatibility limitation and continue. It is not credential isolation.
+  Preserve loopback-only binding, keep management registry and Account-bound
+  mail/Blob clients type-separated, and never route the management credential
+  through the product raw Blob client. Any public, shared-untrusted, or
+  production use turns this accepted limitation back into `STOP`.
 
 - [ ] Write the failing semantics test before the client. Authenticated as the exact ordinary Account with its normal password, create `x:AppPassword` with description `mail-sandbox/debug-dashboard/<store-uuid>/<generation>`. Assert the server generates the secret, returns its plaintext only in `created`, returns only the non-recoverable `"****"` sentinel from later exact-ID get, does not permit secret update, and permits two simultaneous credentials for bounded rotation. Query IDs first and get only those exact IDs; get-all mixes credential types into `notFound`.
 
@@ -233,6 +243,12 @@ STALWART_LIVE_TESTS=1 \
 STALWART_BASE_URL=http://127.0.0.1:18443 \
 ./kotlin test \
   --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRawBlobCompatibilityLiveTest'
+
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+./kotlin test \
+  --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartPermissionMatrixLiveTest'
 
 STALWART_LIVE_TESTS=1 \
@@ -242,7 +258,10 @@ STALWART_BASE_URL=http://127.0.0.1:18443 \
   --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartAppPasswordSemanticsLiveTest'
 ```
 
-Expected: direct Account-bound mail access and targeted management revocation pass with zero `impersonate` grant. Any required Community behavior failure records `STOP` before Task 3.
+Expected: the accepted local-only raw Blob behavior remains exactly
+characterized; direct Account-bound mail access and targeted management
+revocation pass with zero `impersonate` grant. Any other required Community
+behavior failure records `STOP` before Task 3.
 
 - [ ] Commit:
 
@@ -411,8 +430,8 @@ git commit -m "feat: prove Stalwart mail credential lifecycle"
 
 ## Disposable gate decision
 
-- **PASS:** management/AppPassword permissions are disjoint, no `impersonate` exists, direct Account-bound mail works, targeted revocation preserves unrelated credentials, and every snapshot/lifecycle test in Tasks 1–4 passes on Community v0.16.14.
-- **STOP:** a required method needs a broad/inherited permission, cross-account isolation fails, read-once capture or targeted revocation cannot be made deterministic, two-credential overlap/quota behavior fails, store recovery would require guessing, or a required Community behavior is unavailable.
+- **PASS:** management/AppPassword permissions are disjoint at the JMAP and typed-client boundaries, no `impersonate` exists, direct Account-bound mail works, targeted revocation preserves unrelated credentials, the exact accepted local-only raw Blob behavior remains characterized, and every snapshot/lifecycle test in Tasks 1–4 passes on Community v0.16.14.
+- **STOP:** a required method needs a broad/inherited permission; cross-account isolation fails outside the one characterized management raw upload using an ordinary Account ID; management raw Blob behavior exceeds the exact accepted same-Account upload/download plus ordinary-Account-ID upload; read-once capture or targeted revocation cannot be made deterministic; two-credential overlap/quota behavior fails; store recovery would require guessing; or another required Community behavior is unavailable.
 
 On `STOP`, tear down only the named gate project, then run the path-validating cleanup test:
 
@@ -737,6 +756,7 @@ export STALWART_BASE_URL=http://127.0.0.1:18443
 export STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets"
 export STALWART_GATE_CREDENTIAL_ROOT="$PWD/.runtime/stalwart-gate0b/credential-store"
 for fixture_class in \
+  StalwartRawBlobCompatibilityLiveTest \
   StalwartPermissionMatrixLiveTest \
   StalwartAppPasswordSemanticsLiveTest \
   StalwartMailAccessLifecycleLiveTest; do
@@ -764,8 +784,8 @@ Expected: all checks pass and the stale-reference search prints nothing.
 
 - [ ] Record the final decision:
 
-  - **PASS:** all approved management, direct AppPassword, encrypted-store, lifecycle, migration/rollback, local-routing, mail/submission, password, and deletion proofs pass on Community v0.16.14. Structured `x:Log` is either proved or recorded capability-disabled with stdout logs retained.
-  - **STOP:** direct AppPassword access, exact permission isolation, targeted revocation/preservation, two-generation overlap, encrypted-store recovery/reset/restart, safe re-enrollment, migration/rollback, required local routing, or another mandatory Community behavior fails. Unstable optional `/32` restriction, capability-disabled `x:Log`, or a fast never-observed DestroyAccount task recorded `unverified` is not a stop.
+  - **PASS:** all approved management, direct AppPassword, encrypted-store, lifecycle, migration/rollback, local-routing, mail/submission, password, and deletion proofs pass on Community v0.16.14; the exact accepted local-only raw Blob behavior remains characterized. Structured `x:Log` is either proved or recorded capability-disabled with stdout logs retained.
+  - **STOP:** direct AppPassword access; exact permission isolation fails outside the accepted management same-Account raw upload/download and management raw upload using an ordinary Account ID; the characterized raw behavior widens; targeted revocation/preservation, two-generation overlap, encrypted-store recovery/reset/restart, safe re-enrollment, migration/rollback, required local routing, or another mandatory Community behavior fails. Unstable optional `/32` restriction, capability-disabled `x:Log`, or a fast never-observed DestroyAccount task recorded `unverified` is not a stop.
 
 - [ ] Always tear down only the named disposable gate project:
 

@@ -24,6 +24,64 @@ It left the final base-only fixture healthy for the next Gate 0B task. No
 credential was printed, and no live command addressed another Compose project,
 repository mail data, or a host port other than `18443`.
 
+## Task 2 raw Blob compatibility decision
+
+On `2026-07-28`, the pinned-source review and disposable live fixture confirmed
+that Stalwart v0.16.14 does not use the JMAP Blob permission names as an
+authorization boundary for its raw HTTP upload/download routes:
+
+- the management API key, whose exact effective scope contains no `jmap*` or
+  Blob permission, uploaded a reserved Blob to its own Account;
+- that key downloaded the exact non-secret probe bytes from its own reserved
+  Blob;
+- that key uploaded a reserved Blob using an ordinary Account ID even though it
+  is not a member of that Account;
+- management download of the ordinary Account's Blob was denied; a second Blob
+  independently seeded by the ordinary Account's normal credential was also
+  denied to management.
+
+The initial strict isolation verdict therefore reported the exact violations
+`MANAGEMENT_ACCOUNT_UPLOAD_ACCEPTED`,
+`MANAGEMENT_ACCOUNT_DOWNLOAD_ACCEPTED`, and
+`ORDINARY_ACCOUNT_UPLOAD_ACCEPTED`. No Account ID, Blob ID, credential, payload,
+or response body entered its failure diagnostics.
+
+This is accepted as a **local-only compatibility limitation**, not described as
+credential isolation. The project exists only to reproduce email-client/provider
+issues, binds the disposable fixture to loopback, and has no external users.
+The dashboard implementation must still keep management registry operations and
+Account-bound mail/Blob operations in separate typed clients; product code must
+never route a management credential through the raw Blob client. This is a
+misuse-prevention boundary in our code, not a server-enforced security boundary.
+Any future public, shared-untrusted, or production use reopens this finding as a
+hard stop.
+
+The hardened compatibility proof passed `1/1`. Its offline client/verdict suite
+passed `8/8` and covers pinned URLs, exact payload reads, independent seeding,
+HTTP `401`/`403`/privacy-preserving `404` denials, redirect rejection,
+cancellation propagation, and redaction. Final regression evidence on
+`2026-07-28 08:14 ADT` is:
+
+- canonical offline Gate 0B contracts: `39/39`, zero skipped or failed;
+- production-environment suite: `dashboard-contract` `20/20` and
+  `dashboard-server` `64/64`; `84/84` total, zero skipped or failed;
+- Chromium browser gate: passed.
+
+The small probe Blobs exist only in the ignored disposable scratch store and
+are removed with the scoped Gate cleanup.
+
+Run the accepted compatibility characterization from `debug-dashboard` with:
+
+```bash
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.stalwart.StalwartRawBlobCompatibilityLiveTest'
+```
+
 ## Fixed boundary
 
 - Image: `stalwartlabs/stalwart:v0.16.14`
@@ -122,17 +180,17 @@ forbidden.
 
 Every opt-in operation is an unconditional class ending in `LiveTest`. Selecting
 that exact class is the authorization boundary; there is no phase selector and
-no early-return path that can report a false pass. The networked bootstrap and
-retirement classes require:
+no early-return path that can report a false pass. The networked bootstrap,
+retirement, and raw Blob compatibility classes require:
 
 - `STALWART_LIVE_TESTS=1`
 - `STALWART_BASE_URL=http://127.0.0.1:18443`
 - the fixed absolute `STALWART_GATE_FIXTURE_SECRETS_FILE`
 
-Both networked classes perform a bounded probe of the dedicated readiness
+All three networked classes perform a bounded probe of the dedicated readiness
 endpoint before using credentials. They do not use assumptions, alternate
-servers, or fallback URLs. Both also execute the bind-only resolved-mount audit
-before accepting live evidence. Prepare accepts only exact
+servers, or fallback URLs. All three also execute the bind-only resolved-mount
+audit before accepting live evidence. Prepare accepts only exact
 `STALWART_GATE_PREPARE=1`; cleanup accepts only exact
 `STALWART_GATE_CLEANUP=1`. Conflicting gate variables fail closed.
 
