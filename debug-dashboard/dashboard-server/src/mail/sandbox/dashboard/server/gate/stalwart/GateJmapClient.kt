@@ -12,6 +12,9 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.StandardCharsets
 import java.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
@@ -27,7 +30,7 @@ import kotlinx.serialization.json.put
 
 internal sealed class GateCredential(
     val scheme: String,
-) {
+) : AutoCloseable {
     internal open val basicUsername: String? = null
 
     internal abstract fun authorizationHeader(): String
@@ -45,6 +48,9 @@ internal sealed class GateCredential(
             require(secret.isNotEmpty()) { "Bearer secret is absent" }
             return Bearer(secret)
         }
+
+        private const val BASIC_PREFIX = "Basic "
+        private const val BEARER_PREFIX = "Bearer "
     }
 
     private class Basic(
@@ -52,11 +58,48 @@ internal sealed class GateCredential(
         secret: CharArray,
     ) : GateCredential("Basic") {
         private val secret = secret.copyOf()
+        private var closed = false
 
+        @Synchronized
         override fun authorizationHeader(): String {
-            val bytes =
-                "$basicUsername:${secret.concatToString()}".toByteArray(Charsets.UTF_8)
-            return "Basic ${Base64.getEncoder().encodeToString(bytes)}"
+            check(!closed) { "Gate credential is closed" }
+            val clearText = CharArray(basicUsername.length + 1 + secret.size)
+            var utf8Buffer: ByteBuffer? = null
+            var utf8Bytes = ByteArray(0)
+            var encodedBytes = ByteArray(0)
+            var headerChars = CharArray(0)
+            return try {
+                basicUsername.toCharArray(clearText, destinationOffset = 0)
+                clearText[basicUsername.length] = ':'
+                secret.copyInto(
+                    destination = clearText,
+                    destinationOffset = basicUsername.length + 1,
+                )
+                utf8Buffer = StandardCharsets.UTF_8.encode(CharBuffer.wrap(clearText))
+                utf8Bytes = ByteArray(requireNotNull(utf8Buffer).remaining())
+                requireNotNull(utf8Buffer).get(utf8Bytes)
+                encodedBytes = Base64.getEncoder().encode(utf8Bytes)
+                headerChars = CharArray(BASIC_PREFIX.length + encodedBytes.size)
+                BASIC_PREFIX.toCharArray(headerChars, destinationOffset = 0)
+                encodedBytes.forEachIndexed { index, byte ->
+                    headerChars[BASIC_PREFIX.length + index] =
+                        byte.toInt().toChar()
+                }
+                headerChars.concatToString()
+            } finally {
+                clearText.fill('\u0000')
+                utf8Bytes.fill(0)
+                encodedBytes.fill(0)
+                headerChars.fill('\u0000')
+                utf8Buffer?.takeIf(ByteBuffer::hasArray)?.array()?.fill(0)
+            }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            secret.fill('\u0000')
         }
     }
 
@@ -64,9 +107,32 @@ internal sealed class GateCredential(
         secret: CharArray,
     ) : GateCredential("Bearer") {
         private val secret = secret.copyOf()
+        private var closed = false
 
-        override fun authorizationHeader(): String = "Bearer ${secret.concatToString()}"
+        @Synchronized
+        override fun authorizationHeader(): String {
+            check(!closed) { "Gate credential is closed" }
+            val header = CharArray(BEARER_PREFIX.length + secret.size)
+            return try {
+                BEARER_PREFIX.toCharArray(header, destinationOffset = 0)
+                secret.copyInto(
+                    destination = header,
+                    destinationOffset = BEARER_PREFIX.length,
+                )
+                header.concatToString()
+            } finally {
+                header.fill('\u0000')
+            }
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            secret.fill('\u0000')
+        }
     }
+
 }
 
 internal class GateHttpRequest(
@@ -120,29 +186,44 @@ internal data class GateJmapSession(
     val primaryAccountId: String?,
 )
 
+internal enum class GateJmapCapability(
+    val urn: String,
+) {
+    CORE("urn:ietf:params:jmap:core"),
+    MAIL("urn:ietf:params:jmap:mail"),
+    SUBMISSION("urn:ietf:params:jmap:submission"),
+    BLOB("urn:ietf:params:jmap:blob"),
+    STALWART("urn:stalwart:jmap"),
+}
+
 internal class GateJmapClient(
     private val baseUrl: URI,
     private val credential: GateCredential,
     private val transport: GateHttpTransport,
-) : GateRegistryApi {
+) : GateRegistryApi, AutoCloseable {
     private var cachedSession: GateJmapSession? = null
     private var callSequence = 0L
+    private var closed = false
 
     init {
-        require(
-            baseUrl.scheme == "http" &&
-                baseUrl.host == "127.0.0.1" &&
-                baseUrl.port == 18443 &&
-                baseUrl.rawUserInfo == null &&
-                baseUrl.rawQuery == null &&
-                baseUrl.rawFragment == null &&
-                (baseUrl.path.isNullOrEmpty() || baseUrl.path == "/"),
+        if (
+            baseUrl.scheme != "http" ||
+            baseUrl.host != "127.0.0.1" ||
+            baseUrl.port != 18443 ||
+            baseUrl.rawUserInfo != null ||
+            baseUrl.rawQuery != null ||
+            baseUrl.rawFragment != null ||
+            !(baseUrl.path.isNullOrEmpty() || baseUrl.path == "/")
         ) {
-            "Stalwart gate base URL must be the dedicated loopback endpoint"
+            credential.close()
+            throw IllegalArgumentException(
+                "Stalwart gate base URL must be the dedicated loopback endpoint",
+            )
         }
     }
 
     override suspend fun discoverSession(): GateJmapSession {
+        requireOpen()
         cachedSession?.let { return it }
         val discoveryUrl = baseUrl.resolve("/.well-known/jmap")
         val response = transport.execute(
@@ -207,6 +288,9 @@ internal class GateJmapClient(
             accountId?.let { put("accountId", it) }
             put("filter", filter)
             put("sort", JsonArray(emptyList()))
+            put("position", 0)
+            put("limit", MAX_REGISTRY_QUERY_PAGE)
+            put("calculateTotal", true)
         },
     )
 
@@ -261,9 +345,18 @@ internal class GateJmapClient(
     suspend fun call(
         methodName: String,
         arguments: JsonObject,
+        capabilities: List<GateJmapCapability> = REGISTRY_CAPABILITIES,
     ): JsonObject {
+        requireOpen()
         require(!methodName.contains("/api/principal")) {
             "The removed legacy principal API is forbidden"
+        }
+        require(
+            capabilities.isNotEmpty() &&
+                capabilities.first() == GateJmapCapability.CORE &&
+                capabilities.size == capabilities.toSet().size,
+        ) {
+            "JMAP capabilities must be explicit, unique, and Core-first"
         }
         val session = discoverSession()
         val callId = "gate-${++callSequence}"
@@ -271,8 +364,9 @@ internal class GateJmapClient(
             put(
                 "using",
                 buildJsonArray {
-                    add(stringElement(CORE_CAPABILITY))
-                    add(stringElement(STALWART_CAPABILITY))
+                    capabilities.forEach { capability ->
+                        add(stringElement(capability.urn))
+                    }
                 },
             )
             put(
@@ -296,6 +390,11 @@ internal class GateJmapClient(
                 body = requestBody,
             ),
         )
+        if (response.effectiveUrl != session.apiUrl) {
+            invalidResponse(
+                "JMAP method response did not remain on the pinned API URL",
+            )
+        }
         requireSuccess(response, "JMAP method")
         val parsed = parseObject(response.body, "JMAP method response")
         val methodResponses = parsed["methodResponses"] as? JsonArray
@@ -418,14 +517,30 @@ internal class GateJmapClient(
         return value
     }
 
+    override fun close() {
+        if (closed) return
+        closed = true
+        credential.close()
+    }
+
+    private fun requireOpen() {
+        check(!closed) { "Gate JMAP client is closed" }
+    }
+
     private companion object {
-        const val CORE_CAPABILITY = "urn:ietf:params:jmap:core"
+        val REGISTRY_CAPABILITIES = listOf(
+            GateJmapCapability.CORE,
+            GateJmapCapability.STALWART,
+        )
         const val STALWART_CAPABILITY = "urn:stalwart:jmap"
+        const val MAX_REGISTRY_QUERY_PAGE = 100
     }
 }
 
 internal class KtorGateHttpTransport(
+    followRedirects: Boolean = true,
     private val client: HttpClient = HttpClient(CIO) {
+        this.followRedirects = followRedirects
         install(HttpTimeout) {
             requestTimeoutMillis = 5_000
             connectTimeoutMillis = 3_000

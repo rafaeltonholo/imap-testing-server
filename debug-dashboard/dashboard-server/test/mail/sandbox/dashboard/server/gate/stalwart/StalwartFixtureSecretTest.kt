@@ -35,6 +35,22 @@ class StalwartFixtureSecretTest {
     }
 
     @Test
+    fun fixtureExposesOnlyTheReviewedLoopbackHttpAndSmtpProofPorts() {
+        val published = fixture().base.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("- \"127.0.0.1:") }
+            .toSet()
+
+        assertEquals(
+            setOf(
+                "- \"127.0.0.1:18443:8080\"",
+                "- \"127.0.0.1:18587:8587\"",
+            ),
+            published,
+        )
+    }
+
+    @Test
     fun fixtureAuditRejectsEveryUnsafeMutation() {
         val fixture = fixture()
         val mutations = mapOf<String, (FixtureText) -> FixtureText>(
@@ -45,6 +61,9 @@ class StalwartFixtureSecretTest {
             },
             "external publication" to {
                 it.copy(base = it.base.replace("127.0.0.1:18443:8080", "18443:8080"))
+            },
+            "external smtp publication" to {
+                it.copy(base = it.base.replace("127.0.0.1:18587:8587", "18587:8587"))
             },
             "additive external publication" to {
                 it.copy(

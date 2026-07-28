@@ -22,7 +22,8 @@ The final run started from an absent named project and absent ignored runtime,
 then exercised only the exact unconditional `*LiveTest` classes listed below.
 It left the final base-only fixture healthy for the next Gate 0B task. No
 credential was printed, and no live command addressed another Compose project,
-repository mail data, or a host port other than `18443`.
+repository mail data, or a host port other than the Task 1 loopback mapping
+`18443`. Task 2 later added the separately reviewed SMTP proof mapping `18587`.
 
 ## Task 2 raw Blob compatibility decision
 
@@ -82,11 +83,117 @@ STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secret
   'mail.sandbox.dashboard.server.gate.stalwart.StalwartRawBlobCompatibilityLiveTest'
 ```
 
+## Task 2 AppPassword and permission decision
+
+The disposable v0.16.14 fixture accepts an Account-owned AppPassword with this
+exact `Replace` allowlist:
+
+```text
+authenticate
+jmapMailboxGet
+jmapMailboxCreate
+jmapMailboxUpdate
+jmapMailboxDestroy
+jmapEmailGet
+jmapEmailQuery
+jmapEmailUpdate
+jmapEmailDestroy
+jmapEmailImport
+jmapIdentityGet
+jmapEmailSubmissionGet
+jmapEmailSubmissionCreate
+jmapBlobGet
+jmapBlobUpload
+```
+
+The server generates the `app_` secret. Its plaintext exists only in the
+`created` result; exact-ID inventory returns the non-recoverable `****` sentinel,
+and a secret patch is rejected as `invalidPatch`. Two generations authenticate
+simultaneously. The first generation can list, create, rename, and delete a
+Mailbox; upload and read a JMAP Blob; import, query, read, move, flag, and delete
+an Email; select an Identity; create and read an EmailSubmission; and deliver to
+the second registered Account. The recipient reads and removes the delivered
+probe with its own credential.
+
+JMAP submission succeeds without `emailSend`. On the dedicated loopback SMTP
+proof listener, the ordinary Password control returns
+`235 2.7.0 Authentication succeeded.`, while the otherwise valid AppPassword
+returns `550 5.7.1 Your account is not authorized to use this service.` This is
+an authorization denial, not an authentication failure and not a `535`.
+
+The exact negative matrix denies every allowlisted mail action when the same
+AppPassword targets the other ordinary Account, and denies those actions to the
+management key. It also denies the AppPassword every Account, Domain, Task, and
+Log operation exercised by the management surface; normal-Password mutation;
+AppPassword and API-key create/query/update/destroy; cross-Account username
+pairing; protected-management username pairing; and `target%credential`
+impersonation. A wrong secret and the revoked first generation fail
+authentication. Targeted management revocation uses one fresh
+`x:Account/get`, one positional credential-leaf removal, and one verification
+fetch; it preserves the sibling AppPassword and every unrelated stable
+credential object without `ifInState` or a blind retry. If the one update's
+response is lost or malformed, cancellation still propagates, but every other
+post-dispatch failure proceeds to that same single exact verification fetch.
+Only the exact expected stable-ID map reports `Revoked`; every other result is
+`ReconciliationRequired`.
+
+Credential inventory requests an explicit bounded first page with
+`calculateTotal`, then requires `position == 0` and `total == ids.size` before
+an exact-ID get may certify completeness. Numeric query metadata, permission
+booleans, and raw Blob sizes must use their native JSON types; string-encoded
+lookalikes fail closed. The read-once values copied into Basic/Bearer
+credentials have closeable ownership: every owning client closes its
+credential, caller-side handoff arrays and temporary Basic encoding buffers are
+wiped, and closed or invalidly constructed clients cannot authenticate.
+
+The permission-matrix proof freshly fetches all three fixture Accounts and their
+credential objects. Both ordinary Accounts select only the built-in `User` role;
+their normal-Password `/api/account` effective sets contain no `impersonate`.
+The protected management Account and its API-key credential remain exact
+`Replace` objects with the reviewed management baseline, and the management
+Bearer effective set equals that baseline. The live AppPassword's declarative
+and `/api/account` effective sets both equal the 15 names above. None of those
+Account, role selection, API-key, or AppPassword views contains `impersonate` or
+a wildcard.
+
+The official pinned image is compiled with enterprise-capable code but, without
+a license, `/api/account` reports the exact edition label `community`. The
+source-only `oss` label belongs to a binary compiled without that feature. The
+Gate therefore accepts only `community` for this exact image and still rejects
+`enterprise` and every other label.
+
+Quota behavior is deterministic. The live proof temporarily patches only the
+first ordinary Account's `quotas/maxAppPasswords` leaf to `1`, creates one
+reserved credential, and receives exact `overQuota` for a second. The first
+credential's fetched Account object, exact inventory, effective permission set,
+and authentication remain unchanged. A `finally` path removes both reserved
+descriptions only after restoring the exact prior quota map and re-proving the
+active credential object, inventory, effective scope, and authentication. It
+then verifies the exact prior credential inventory.
+
+The mail proof stores its unique marker and mutation-attempt flags before each
+create dispatch. Its non-cancellable cleanup therefore handles a lost create
+response by reconciling both exact mailbox names, the exact subject on owner and
+recipient Accounts, and EmailSubmission objects related to the exact owner
+Email IDs. An ambiguous submission receives a bounded late-delivery polling
+window, and final exact queries must prove every marker artifact absent.
+
+Current Task 2 evidence on `2026-07-28` is:
+
+- canonical offline Stalwart Gate contracts: `64/64`, zero skipped or failed;
+- focused AppPassword client contracts: `25/25`;
+- production-environment suite: `dashboard-contract` `20/20` and
+  `dashboard-server` `89/89`; `109/109` total, including the Chromium gate;
+- selected raw Blob compatibility proof: `1/1`;
+- selected AppPassword semantics proof: `1/1`;
+- selected permission-matrix and quota-restoration proof: `1/1`.
+
 ## Fixed boundary
 
 - Image: `stalwartlabs/stalwart:v0.16.14`
 - Compose project: `mail-sandbox-stalwart-gate`
-- Published endpoint: `http://127.0.0.1:18443`
+- Published HTTP endpoint: `http://127.0.0.1:18443`
+- Published SMTP proof endpoint: `127.0.0.1:18587`
 - Container service user: UID/GID `2000:2000`
 - Scratch state: `debug-dashboard/.runtime/stalwart-gate0b`
 - Store config: `{"@type":"RocksDb","path":"/var/lib/stalwart/"}`
@@ -108,7 +215,8 @@ final explicit inspection showed the same two bind mounts on both services and
 zero volume mounts. It also re-confirmed image ID
 `sha256:25001929f36a62521cedc50f12527080dac4cf6a0cc31b617b669d921cafc36a`,
 the exact `stalwartlabs/stalwart:v0.16.14` image reference, a healthy server, and
-the sole host binding `127.0.0.1:18443`. The separate main `stalwart-dev`
+the exact host bindings `127.0.0.1:18443` and `127.0.0.1:18587`. The separate
+main `stalwart-dev`
 container remained healthy. Its live `stalwart-data/LOG` continued to change
 while the gate ran, so a whole-tree metadata hash is not stable evidence; the
 resolved zero-volume/two-bind audit proves neither disposable container can
@@ -121,11 +229,16 @@ Compose output, arguments, and this evidence file must never contain a credentia
 ## Bootstrap contract
 
 The recovery-authenticated registry flow creates and re-fetches the HTTP
-`NetworkListener`, `local.test` Domain, `SystemSettings` singleton, protected
-management User Account, and two ordinary User Accounts. Every fetched ID, type,
-role, credential shape, and relevant field is checked. Ordinary Accounts are
-Password-only Users. The protected Account starts with a temporary Password and
-temporary API-key-management permissions.
+`NetworkListener`, the dedicated non-TLS `smtp-gate0b` `NetworkListener`,
+`MtaStageAuth`, `local.test` Domain, `SystemSettings` singleton, protected
+management User Account, and two ordinary User Accounts. The SMTP listener is
+published only as `127.0.0.1:18587:8587`. Its authentication stage clears the
+default port-dependent match rules and selects only `[plain]`, enabling an
+explicit local normal-password control plus the missing-`emailSend`
+AppPassword denial proof. Every fetched ID, type, role, credential shape, and
+relevant field is checked. Ordinary Accounts are Password-only Users. The
+protected Account starts with a temporary Password and temporary
+API-key-management permissions.
 
 Stalwart v0.16.14 constructs its recovery access token with all permissions:
 the pinned source's `AccessTokenInner::new_admin()` builds a scope with
@@ -180,16 +293,17 @@ forbidden.
 
 Every opt-in operation is an unconditional class ending in `LiveTest`. Selecting
 that exact class is the authorization boundary; there is no phase selector and
-no early-return path that can report a false pass. The networked bootstrap,
-retirement, and raw Blob compatibility classes require:
+no early-return path that can report a false pass. The five networked bootstrap,
+retirement, raw Blob compatibility, permission-matrix, and AppPassword-semantics
+classes require:
 
 - `STALWART_LIVE_TESTS=1`
 - `STALWART_BASE_URL=http://127.0.0.1:18443`
 - the fixed absolute `STALWART_GATE_FIXTURE_SECRETS_FILE`
 
-All three networked classes perform a bounded probe of the dedicated readiness
+All five networked classes perform a bounded probe of the dedicated readiness
 endpoint before using credentials. They do not use assumptions, alternate
-servers, or fallback URLs. All three also execute the bind-only resolved-mount
+servers, or fallback URLs. All five also execute the bind-only resolved-mount
 audit before accepting live evidence. Prepare accepts only exact
 `STALWART_GATE_PREPARE=1`; cleanup accepts only exact
 `STALWART_GATE_CLEANUP=1`. Conflicting gate variables fail closed.
@@ -267,6 +381,30 @@ STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secret
 ./kotlin test \
   --include-module dashboard-server \
   --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRecoveryRetirementLiveTest'
+
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.stalwart.StalwartRawBlobCompatibilityLiveTest'
+
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.stalwart.StalwartPermissionMatrixLiveTest'
+
+STALWART_LIVE_TESTS=1 \
+STALWART_BASE_URL=http://127.0.0.1:18443 \
+STALWART_GATE_FIXTURE_SECRETS_FILE="$PWD/.runtime/stalwart-gate0b/fixture-secrets" \
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.stalwart.StalwartAppPasswordSemanticsLiveTest'
 ```
 
 The fresh retirement JVM requires recovery Basic authentication to fail only with

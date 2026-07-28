@@ -51,6 +51,7 @@ internal object StalwartFixtureAudit {
                 condition: service_completed_successfully
             ports:
               - "127.0.0.1:18443:8080"
+              - "127.0.0.1:18587:8587"
             environment:
               STALWART_PUBLIC_URL: $PUBLIC_URL
             volumes:
@@ -105,7 +106,7 @@ internal object StalwartFixtureAudit {
     }
 }
 
-internal interface GateRegistryApi {
+internal interface GateRegistryApi : AutoCloseable {
     suspend fun discoverSession(): GateJmapSession
 
     suspend fun registryGet(
@@ -142,6 +143,10 @@ internal interface GateRegistryApi {
 }
 
 internal fun interface GateRegistryClientFactory {
+    /**
+     * Transfers ownership of [credential] to the returned closeable client.
+     * An implementation that fails during construction must close the credential.
+     */
     fun create(credential: GateCredential): GateRegistryApi
 }
 
@@ -183,6 +188,17 @@ internal class GateBootstrapResult(
     }
 
     override fun toString(): String = "GateBootstrapResult(secrets=redacted)"
+}
+
+internal inline fun <T> String.withGateSecretChars(
+    action: (CharArray) -> T,
+): T {
+    val secret = toCharArray()
+    return try {
+        action(secret)
+    } finally {
+        secret.fill('\u0000')
+    }
 }
 
 internal object GateBootstrap {
@@ -232,15 +248,36 @@ internal object GateBootstrap {
         clientFactory: GateRegistryClientFactory,
         inputs: GateBootstrapInputs,
     ): GateBootstrapResult {
-        val listenerId = requireCreated(
+        val httpListenerId = requireCreated(
             response = recovery.registryCreate(
                 objectType = "NetworkListener",
                 creationId = "http-listener",
-                value = networkListener(),
+                value = httpNetworkListener(),
             ),
             creationId = "http-listener",
         ).id
-        require(listenerId.isNotBlank()) { "Network listener ID is absent" }
+        require(httpListenerId.isNotBlank()) {
+            "HTTP NetworkListener ID is absent"
+        }
+        val smtpListenerId = requireCreated(
+            response = recovery.registryCreate(
+                objectType = "NetworkListener",
+                creationId = "smtp-listener",
+                value = smtpNetworkListener(),
+            ),
+            creationId = "smtp-listener",
+        ).id
+        require(smtpListenerId.isNotBlank()) {
+            "SMTP NetworkListener ID is absent"
+        }
+        requireUpdated(
+            response = recovery.registryUpdate(
+                objectType = "MtaStageAuth",
+                objectId = "singleton",
+                patch = smtpAuthenticationStage(),
+            ),
+            objectId = "singleton",
+        )
 
         val domainId = requireCreated(
             response = recovery.registryCreate(
@@ -308,10 +345,33 @@ internal object GateBootstrap {
             value = requireSingleGet(
                 recovery.registryGet(
                     objectType = "NetworkListener",
-                    ids = listOf(listenerId),
+                    ids = listOf(httpListenerId),
                 ),
             ),
-            expectedId = listenerId,
+            expectedId = httpListenerId,
+            expectedName = "http",
+            expectedProtocol = "http",
+            expectedBind = "[::]:8080",
+        )
+        validateNetworkListener(
+            value = requireSingleGet(
+                recovery.registryGet(
+                    objectType = "NetworkListener",
+                    ids = listOf(smtpListenerId),
+                ),
+            ),
+            expectedId = smtpListenerId,
+            expectedName = "smtp-gate0b",
+            expectedProtocol = "smtp",
+            expectedBind = "[::]:8587",
+        )
+        validateSmtpAuthenticationStage(
+            value = requireSingleGet(
+                recovery.registryGet(
+                    objectType = "MtaStageAuth",
+                    ids = listOf("singleton"),
+                ),
+            ),
         )
         validateDomain(
             value = requireSingleGet(
@@ -374,165 +434,174 @@ internal object GateBootstrap {
             domainId = domainId,
         )
 
-        val manager = clientFactory.create(
+        return clientFactory.create(
             GateCredential.basic(
                 username = MANAGEMENT_ADDRESS,
                 secret = inputs.managementPassword,
             ),
-        )
-        val managerSession = manager.discoverSession()
-        require(managerSession.primaryAccountId == managementId) {
-            "Management password authenticated the wrong primary Account"
-        }
+        ).use { manager ->
+            val managerSession = manager.discoverSession()
+            require(managerSession.primaryAccountId == managementId) {
+                "Management password authenticated the wrong primary Account"
+            }
 
-        val managementKey = requireCreated(
-            response = manager.registryCreate(
-                objectType = "ApiKey",
-                creationId = "management-key",
-                value = apiKey(
-                    description = "mail-sandbox/debug-dashboard/management",
-                    permissions = managementPermissions,
-                ),
-                accountId = managementId,
-            ),
-            creationId = "management-key",
-        )
-        val managementKeySecret = managementKey.secret
-            ?: throw IllegalStateException("Management API key secret was not returned at creation")
-        require(managementKeySecret.startsWith("API_")) {
-            "Management API key did not use the v0.16 API credential format"
-        }
-        validateApiKey(
-            value = requireSingleGet(
-                manager.registryGet(
+            val managementKey = requireCreated(
+                response = manager.registryCreate(
                     objectType = "ApiKey",
-                    ids = listOf(managementKey.id),
+                    creationId = "management-key",
+                    value = apiKey(
+                        description = "mail-sandbox/debug-dashboard/management",
+                        permissions = managementPermissions,
+                    ),
                     accountId = managementId,
                 ),
-            ),
-            expectedId = managementKey.id,
-            expectedPermissions = managementPermissions,
-            expectedDescription = "mail-sandbox/debug-dashboard/management",
-        )
-
-        val noAuthenticatePermissions = managementPermissions - "authenticate"
-        val noAuthenticateKey = requireCreated(
-            response = manager.registryCreate(
-                objectType = "ApiKey",
-                creationId = "no-auth-key",
-                value = apiKey(
-                    description = "mail-sandbox/debug-dashboard/no-auth-proof",
-                    permissions = noAuthenticatePermissions,
+                creationId = "management-key",
+            )
+            val managementKeySecret = managementKey.secret
+                ?: throw IllegalStateException("Management API key secret was not returned at creation")
+            require(managementKeySecret.startsWith("API_")) {
+                "Management API key did not use the v0.16 API credential format"
+            }
+            validateApiKey(
+                value = requireSingleGet(
+                    manager.registryGet(
+                        objectType = "ApiKey",
+                        ids = listOf(managementKey.id),
+                        accountId = managementId,
+                    ),
                 ),
-                accountId = managementId,
-            ),
-            creationId = "no-auth-key",
-        )
-        val noAuthenticateSecret = noAuthenticateKey.secret
-            ?: throw IllegalStateException("No-auth API key secret was not returned at creation")
-        validateApiKey(
-            value = requireSingleGet(
-                manager.registryGet(
+                expectedId = managementKey.id,
+                expectedPermissions = managementPermissions,
+                expectedDescription = "mail-sandbox/debug-dashboard/management",
+            )
+
+            val noAuthenticatePermissions = managementPermissions - "authenticate"
+            val noAuthenticateKey = requireCreated(
+                response = manager.registryCreate(
+                    objectType = "ApiKey",
+                    creationId = "no-auth-key",
+                    value = apiKey(
+                        description = "mail-sandbox/debug-dashboard/no-auth-proof",
+                        permissions = noAuthenticatePermissions,
+                    ),
+                    accountId = managementId,
+                ),
+                creationId = "no-auth-key",
+            )
+            val noAuthenticateSecret = noAuthenticateKey.secret
+                ?: throw IllegalStateException("No-auth API key secret was not returned at creation")
+            validateApiKey(
+                value = requireSingleGet(
+                    manager.registryGet(
+                        objectType = "ApiKey",
+                        ids = listOf(noAuthenticateKey.id),
+                        accountId = managementId,
+                    ),
+                ),
+                expectedId = noAuthenticateKey.id,
+                expectedPermissions = noAuthenticatePermissions,
+                expectedDescription = "mail-sandbox/debug-dashboard/no-auth-proof",
+            )
+            val rejected = noAuthenticateSecret.withGateSecretChars { secret ->
+                clientFactory.create(
+                    GateCredential.bearer(secret),
+                ).use { noAuthenticateClient ->
+                    runCatching {
+                        requireAuthenticationRejected(noAuthenticateClient)
+                    }
+                }
+            }
+            requireDestroyed(
+                response = manager.registryDestroy(
+                    objectType = "ApiKey",
+                    objectId = noAuthenticateKey.id,
+                    accountId = managementId,
+                ),
+                objectId = noAuthenticateKey.id,
+            )
+            requireNotFound(
+                response = manager.registryGet(
                     objectType = "ApiKey",
                     ids = listOf(noAuthenticateKey.id),
                     accountId = managementId,
                 ),
-            ),
-            expectedId = noAuthenticateKey.id,
-            expectedPermissions = noAuthenticatePermissions,
-            expectedDescription = "mail-sandbox/debug-dashboard/no-auth-proof",
-        )
-        val noAuthenticateClient = clientFactory.create(
-            GateCredential.bearer(noAuthenticateSecret.toCharArray()),
-        )
-        val rejected = runCatching {
-            requireAuthenticationRejected(noAuthenticateClient)
-        }
-        requireDestroyed(
-            response = manager.registryDestroy(
-                objectType = "ApiKey",
                 objectId = noAuthenticateKey.id,
-                accountId = managementId,
-            ),
-            objectId = noAuthenticateKey.id,
-        )
-        requireNotFound(
-            response = manager.registryGet(
-                objectType = "ApiKey",
-                ids = listOf(noAuthenticateKey.id),
-                accountId = managementId,
-            ),
-            objectId = noAuthenticateKey.id,
-        )
-        rejected.getOrThrow()
-
-        val beforeRetirement = requireSingleGet(
-            recovery.registryGet("Account", ids = listOf(managementId)),
-        )
-        val preservedApiKey = exactCredentialEntry(
-            account = beforeRetirement,
-            type = "ApiKey",
-            credentialId = managementKey.id,
-        )
-        val temporaryPassword = exactCredentialEntry(
-            account = beforeRetirement,
-            type = "Password",
-        )
-        require(accountCredentials(beforeRetirement).size == 2) {
-            "Management Account did not contain only the intended API key and temporary Password"
-        }
-        require(exactCredentialCount(beforeRetirement, "AppPassword") == 0) {
-            "Management Account unexpectedly contained an AppPassword"
-        }
-        require(preservedApiKey.mapKey != temporaryPassword.mapKey) {
-            "Management Account credentials reused a map key"
-        }
-        require(temporaryPassword.mapKey.toUIntOrNull() != null) {
-            "Temporary Password used an invalid credential map key"
-        }
-        requireUpdated(
-            response = recovery.registryUpdate(
-                objectType = "Account",
-                objectId = managementId,
-                patch = buildJsonObject {
-                    put("credentials/${temporaryPassword.mapKey}", JsonNull)
-                    put("permissions", permissions(managementPermissions))
-                },
-            ),
-            objectId = managementId,
-        )
-
-        val finalAccount = requireSingleGet(
-            recovery.registryGet("Account", ids = listOf(managementId)),
-        )
-        val effectivePermissions = validateFinalManagementAccount(
-            account = finalAccount,
-            expectedAccountId = managementId,
-            expectedApiKeyId = managementKey.id,
-        )
-
-        val managementBearer = clientFactory.create(
-            GateCredential.bearer(managementKeySecret.toCharArray()),
-        )
-        val bearerSession = managementBearer.discoverSession()
-        require(bearerSession.primaryAccountId == managementId) {
-            "Management API key authenticated the wrong primary Account"
-        }
-        requireRegistryMethodForbidden {
-            managementBearer.registryGet(
-                objectType = "ApiKey",
-                ids = listOf(managementKey.id),
-                accountId = managementId,
             )
-        }
+            rejected.getOrThrow()
 
-        return GateBootstrapResult(
-            managementAccountId = managementId,
-            managementApiKey = managementKeySecret.toCharArray(),
-            firstUserAccountId = firstUserId,
-            secondUserAccountId = secondUserId,
-            effectiveManagementPermissions = effectivePermissions,
-        )
+            val beforeRetirement = requireSingleGet(
+                recovery.registryGet("Account", ids = listOf(managementId)),
+            )
+            val preservedApiKey = exactCredentialEntry(
+                account = beforeRetirement,
+                type = "ApiKey",
+                credentialId = managementKey.id,
+            )
+            val temporaryPassword = exactCredentialEntry(
+                account = beforeRetirement,
+                type = "Password",
+            )
+            require(accountCredentials(beforeRetirement).size == 2) {
+                "Management Account did not contain only the intended API key and temporary Password"
+            }
+            require(exactCredentialCount(beforeRetirement, "AppPassword") == 0) {
+                "Management Account unexpectedly contained an AppPassword"
+            }
+            require(preservedApiKey.mapKey != temporaryPassword.mapKey) {
+                "Management Account credentials reused a map key"
+            }
+            require(temporaryPassword.mapKey.toUIntOrNull() != null) {
+                "Temporary Password used an invalid credential map key"
+            }
+            requireUpdated(
+                response = recovery.registryUpdate(
+                    objectType = "Account",
+                    objectId = managementId,
+                    patch = buildJsonObject {
+                        put("credentials/${temporaryPassword.mapKey}", JsonNull)
+                        put("permissions", permissions(managementPermissions))
+                    },
+                ),
+                objectId = managementId,
+            )
+
+            val finalAccount = requireSingleGet(
+                recovery.registryGet("Account", ids = listOf(managementId)),
+            )
+            val effectivePermissions = validateFinalManagementAccount(
+                account = finalAccount,
+                expectedAccountId = managementId,
+                expectedApiKeyId = managementKey.id,
+            )
+
+            managementKeySecret.withGateSecretChars { secret ->
+                clientFactory.create(
+                    GateCredential.bearer(secret),
+                ).use { managementBearer ->
+                    val bearerSession = managementBearer.discoverSession()
+                    require(bearerSession.primaryAccountId == managementId) {
+                        "Management API key authenticated the wrong primary Account"
+                    }
+                    requireRegistryMethodForbidden {
+                        managementBearer.registryGet(
+                            objectType = "ApiKey",
+                            ids = listOf(managementKey.id),
+                            accountId = managementId,
+                        )
+                    }
+                }
+            }
+
+            managementKeySecret.withGateSecretChars { secret ->
+                GateBootstrapResult(
+                    managementAccountId = managementId,
+                    managementApiKey = secret,
+                    firstUserAccountId = firstUserId,
+                    secondUserAccountId = secondUserId,
+                    effectiveManagementPermissions = effectivePermissions,
+                )
+            }
+        }
     }
 
     suspend fun requireRegistryMethodForbidden(
@@ -622,7 +691,7 @@ internal object GateBootstrap {
         )
     }
 
-    private fun networkListener(): JsonObject = buildJsonObject {
+    private fun httpNetworkListener(): JsonObject = buildJsonObject {
         put("name", "http")
         put(
             "bind",
@@ -633,6 +702,29 @@ internal object GateBootstrap {
         put("protocol", "http")
         put("useTls", false)
         put("tlsImplicit", false)
+    }
+
+    private fun smtpNetworkListener(): JsonObject = buildJsonObject {
+        put("name", "smtp-gate0b")
+        put(
+            "bind",
+            buildJsonObject {
+                put("[::]:8587", true)
+            },
+        )
+        put("protocol", "smtp")
+        put("useTls", false)
+        put("tlsImplicit", false)
+    }
+
+    private fun smtpAuthenticationStage(): JsonObject = buildJsonObject {
+        put(
+            "saslMechanisms",
+            buildJsonObject {
+                put("match", buildJsonObject {})
+                put("else", "[plain]")
+            },
+        )
     }
 
     private fun localDomain(): JsonObject = buildJsonObject {
@@ -715,15 +807,18 @@ internal object GateBootstrap {
     private fun validateNetworkListener(
         value: JsonObject,
         expectedId: String,
+        expectedName: String,
+        expectedProtocol: String,
+        expectedBind: String,
     ) {
         requireObjectId(value, expectedId, "NetworkListener")
-        require(value["name"]?.jsonPrimitive?.content == "http") {
+        require(value["name"]?.jsonPrimitive?.content == expectedName) {
             "Fetched NetworkListener name did not match"
         }
-        require(value["protocol"]?.jsonPrimitive?.content == "http") {
+        require(value["protocol"]?.jsonPrimitive?.content == expectedProtocol) {
             "Fetched NetworkListener protocol did not match"
         }
-        require(enabledMap(value, "bind") == setOf("[::]:8080")) {
+        require(enabledMap(value, "bind") == setOf(expectedBind)) {
             "Fetched NetworkListener bind set did not match"
         }
         require(value["useTls"]?.jsonPrimitive?.boolean == false) {
@@ -733,6 +828,25 @@ internal object GateBootstrap {
             "Fetched NetworkListener unexpectedly enabled implicit TLS"
         }
         requireNoImpersonate(value, "NetworkListener")
+    }
+
+    private fun validateSmtpAuthenticationStage(value: JsonObject) {
+        requireObjectId(value, "singleton", "MtaStageAuth")
+        val mechanisms = value["saslMechanisms"] as? JsonObject
+            ?: throw IllegalStateException(
+                "Fetched MtaStageAuth SASL expression is absent",
+            )
+        val match = mechanisms["match"] as? JsonObject
+            ?: throw IllegalStateException(
+                "Fetched MtaStageAuth SASL match map is absent",
+            )
+        require(match.isEmpty()) {
+            "Fetched MtaStageAuth retained a shadowing SASL match rule"
+        }
+        require(mechanisms["else"]?.jsonPrimitive?.content == "[plain]") {
+            "Fetched MtaStageAuth SASL fallback did not match"
+        }
+        requireNoImpersonate(value, "MtaStageAuth")
     }
 
     private fun validateDomain(
@@ -1284,12 +1398,18 @@ internal object StalwartGateSecretFiles {
         require(values.getValue("version") == "1") {
             "Unsupported fixture-secret handoff version"
         }
-        return GateFixtureSecrets(
-            managementAccountId = values.getValue("managementAccountId"),
-            managementApiKey = values.getValue("managementApiKey").toCharArray(),
-            firstUserPassword = values.getValue("firstUserPassword").toCharArray(),
-            secondUserPassword = values.getValue("secondUserPassword").toCharArray(),
-        )
+        return values.getValue("managementApiKey").withGateSecretChars { managementKey ->
+            values.getValue("firstUserPassword").withGateSecretChars { firstPassword ->
+                values.getValue("secondUserPassword").withGateSecretChars { secondPassword ->
+                    GateFixtureSecrets(
+                        managementAccountId = values.getValue("managementAccountId"),
+                        managementApiKey = managementKey,
+                        firstUserPassword = firstPassword,
+                        secondUserPassword = secondPassword,
+                    )
+                }
+            }
+        }
     }
 
     fun readRecoveryHandoff(
@@ -1310,10 +1430,12 @@ internal object StalwartGateSecretFiles {
         require(values.getValue("version") == "1") {
             "Unsupported recovery handoff version"
         }
-        return GateRecoveryCredential(
-            username = values.getValue("recoveryUsername"),
-            secret = values.getValue("recoverySecret").toCharArray(),
-        )
+        return values.getValue("recoverySecret").withGateSecretChars { secret ->
+            GateRecoveryCredential(
+                username = values.getValue("recoveryUsername"),
+                secret = secret,
+            )
+        }
     }
 
     private fun readOwnerOnlyProperties(

@@ -47,7 +47,7 @@ The previous global-impersonation proposal is rejected and is not a stop gate to
 
 - [ ] Write the failing fixture audit first. It must reject any image other than `stalwartlabs/stalwart:v0.16.14`, an enterprise license, non-loopback publication, `impersonate`, a mount of repository `stalwart-data/`, a missing readiness healthcheck, or scratch state outside ignored `debug-dashboard/.runtime/stalwart-gate0b/`.
 
-- [ ] Create the base fixture with only `127.0.0.1:18443:8080`, a real readiness healthcheck, and gate-owned scratch state. Keep every `STALWART_RECOVERY_*` variable out of the base file.
+- [ ] Create the base fixture with only `127.0.0.1:18443:8080` and the dedicated SMTP proof mapping `127.0.0.1:18587:8587`, a real readiness healthcheck, and gate-owned scratch state. Keep every `STALWART_RECOVERY_*` variable out of the base file.
 
 - [ ] Add a recovery override containing only `STALWART_RECOVERY_MODE=1`, `STALWART_RECOVERY_MODE_PORT=8080`, and the required `STALWART_GATE_RECOVERY_ENV_FILE`. `StalwartFixturePrepareLiveTest` creates:
 
@@ -66,7 +66,7 @@ Both are beneath owner-only directories and mode `0600`. `StalwartBootstrapLiveT
 
   1. start `compose.yml` plus `compose.recovery.yml`;
   2. wait for the recovery endpoint and authenticate with the generated recovery credential;
-  3. create the minimal normal HTTP listener, SystemSettings, local Domain, one protected management Account/API key, and two ordinary User Accounts/passwords;
+  3. create the minimal normal HTTP listener, the loopback-only SMTP proof listener on container port `8587`, `MtaStageAuth` with an empty match map and `[plain]` fallback, SystemSettings, local Domain, one protected management Account/API key, and two ordinary User Accounts/passwords;
   4. fetch and verify every object's type, roles, permissions, credential type, and immutable protected ID;
   5. stop without deleting scratch state;
   6. restart with base `compose.yml` only;
@@ -172,7 +172,7 @@ git commit -m "test: bootstrap scoped Stalwart gate fixture"
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartAppPasswordSemanticsLiveTest.kt`
 - Modify: `docs/debug-dashboard/gates/0b-stalwart.md`
 
-- [ ] Start with this source-derived AppPassword Replace allowlist:
+- [x] Start with this source-derived AppPassword Replace allowlist:
 
 ```kotlin
 val dashboardMailPermissions = setOf(
@@ -220,21 +220,21 @@ exact final list, then verify the credential's effective scope through
   through the product raw Blob client. Any public, shared-untrusted, or
   production use turns this accepted limitation back into `STOP`.
 
-- [ ] Write the failing semantics test before the client. Authenticated as the exact ordinary Account with its normal password, create `x:AppPassword` with description `mail-sandbox/debug-dashboard/<store-uuid>/<generation>`. Assert the server generates the secret, returns its plaintext only in `created`, returns only the non-recoverable `"****"` sentinel from later exact-ID get, does not permit secret update, and permits two simultaneous credentials for bounded rotation. Query IDs first and get only those exact IDs; get-all mixes credential types into `notFound`.
+- [x] Write the failing semantics test before the client. Authenticated as the exact ordinary Account with its normal password, create `x:AppPassword` with description `mail-sandbox/debug-dashboard/<store-uuid>/<generation>`. Assert the server generates the secret, returns its plaintext only in `created`, returns only the non-recoverable `"****"` sentinel from later exact-ID get, does not permit secret update, and permits two simultaneous credentials for bounded rotation. Query IDs first and get only those exact IDs; get-all mixes credential types into `notFound`.
 
-- [ ] Prove the created AppPassword directly authenticates only its owning Account and can execute the exact mailbox/Email/blob/Identity/submission calls in the allowlist. Prove cross-account username/credential combinations fail.
+- [x] Prove the created AppPassword directly authenticates only its owning Account and can execute the exact mailbox/Email/blob/Identity/submission calls in the allowlist. Prove cross-account username/credential combinations fail.
 
-- [ ] Prove the AppPassword cannot call Account/Domain/Task/Log methods, change the normal Password, create/query/update/destroy AppPasswords, create/query/update/destroy API keys, or use `target%credential` impersonation.
+- [x] Prove the AppPassword cannot call Account/Domain/Task/Log methods, change the normal Password, create/query/update/destroy AppPasswords, create/query/update/destroy API keys, or use `target%credential` impersonation.
 
-- [ ] Prove the management key cannot read/mutate/submit mail and cannot create or use another Account's AppPassword through `x:AppPassword`. Through `x:Account/get|set`, prove it can freshly fetch the target's credential list, remove only a known dashboard-reserved secondary credential, submit one update, re-fetch, and verify every unrelated credential object is unchanged.
+- [x] Prove the management key cannot read/mutate/submit mail and cannot create or use another Account's AppPassword through `x:AppPassword`. Through `x:Account/get|set`, prove it can freshly fetch the target's credential list, remove only a known dashboard-reserved secondary credential, submit one update, re-fetch, and verify every unrelated credential object is unchanged.
 
-- [ ] Fetch every Account, role, API key, AppPassword, and fixture principal created by the gate and assert no effective permission set contains `impersonate`.
+- [x] Fetch every Account, role, API key, AppPassword, and fixture principal created by the gate and assert no effective permission set contains `impersonate`.
 
-- [ ] Encode the trusted test-sandbox concurrency contract in the test: no external writer may edit the Account credential list between the pre-update fetch and post-update verification. Do not send or claim an `ifInState` guard for this patch. Inject a mismatched post-fetch response and require `reconciliationRequired`, never a second blind patch.
+- [x] Encode the trusted test-sandbox concurrency contract in the test: no external writer may edit the Account credential list between the pre-update fetch and post-update verification. Do not send or claim an `ifInState` guard for this patch. Inject a mismatched post-fetch response and require `reconciliationRequired`, never a second blind patch.
 
-- [ ] Prove wrong, revoked, protected-Account, management-Account, cross-account, and quota-exhausted cases. Quota exhaustion must leave the existing active credential valid and unchanged.
+- [x] Prove wrong, revoked, protected-Account, management-Account, cross-account, and quota-exhausted cases. Quota exhaustion must leave the existing active credential valid and unchanged.
 
-- [ ] Run:
+- [x] Run:
 
 ```bash
 cd debug-dashboard
@@ -263,7 +263,7 @@ characterized; direct Account-bound mail access and targeted management
 revocation pass with zero `impersonate` grant. Any other required Community
 behavior failure records `STOP` before Task 3.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add debug-dashboard/dashboard-server docs/debug-dashboard/gates/0b-stalwart.md

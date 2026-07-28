@@ -31,37 +31,36 @@ class StalwartRawBlobCompatibilityLiveTest {
             projectRoot = projectRoot,
             environment = environment,
         ).use { fixture ->
-            val managementCredential =
-                GateCredential.bearer(fixture.managementApiKey)
             KtorGateHttpTransport().use { jmapTransport ->
-                val manager = GateJmapClient(
+                val managementSession = GateJmapClient(
                     baseUrl = live.baseUrl,
-                    credential = managementCredential,
+                    credential = GateCredential.bearer(fixture.managementApiKey),
                     transport = jmapTransport,
-                )
-                val managementSession = manager.discoverSession()
-                assertEquals(
-                    fixture.managementAccountId,
-                    managementSession.primaryAccountId,
-                )
-                assertEquals(EXPECTED_API_URL, managementSession.apiUrl)
-                assertExactManagementScope(
-                    response = manager.registryGet(
-                        objectType = "Account",
-                        ids = listOf(fixture.managementAccountId),
-                    ),
-                    expectedAccountId = fixture.managementAccountId,
-                )
+                ).use { manager ->
+                    manager.discoverSession().also { session ->
+                        assertEquals(
+                            fixture.managementAccountId,
+                            session.primaryAccountId,
+                        )
+                        assertEquals(EXPECTED_API_URL, session.apiUrl)
+                        assertExactManagementScope(
+                            response = manager.registryGet(
+                                objectType = "Account",
+                                ids = listOf(fixture.managementAccountId),
+                            ),
+                            expectedAccountId = fixture.managementAccountId,
+                        )
+                    }
+                }
 
-                val ordinaryCredential = GateCredential.basic(
-                    username = GateBootstrap.FIRST_USER_ADDRESS,
-                    secret = fixture.firstUserPassword,
-                )
                 val ordinarySession = GateJmapClient(
                     baseUrl = live.baseUrl,
-                    credential = ordinaryCredential,
+                    credential = GateCredential.basic(
+                        username = GateBootstrap.FIRST_USER_ADDRESS,
+                        secret = fixture.firstUserPassword,
+                    ),
                     transport = jmapTransport,
-                ).discoverSession()
+                ).use { it.discoverSession() }
                 assertEquals(EXPECTED_API_URL, ordinarySession.apiUrl)
                 val ordinaryAccountId = assertNotNull(
                     ordinarySession.primaryAccountId,
@@ -71,55 +70,60 @@ class StalwartRawBlobCompatibilityLiveTest {
                 assertFalse(ordinaryAccountId == fixture.managementAccountId)
 
                 KtorGateRawBlobTransport().use { rawTransport ->
-                    val rawClient = GateAppPasswordClient(
+                    GateAppPasswordClient(
                         session = managementSession,
-                        credential = managementCredential,
+                        credential = GateCredential.bearer(fixture.managementApiKey),
                         transport = rawTransport,
-                    )
-                    val managementProbes =
-                        listOf(
-                            probe(
-                                client = rawClient,
-                                target = GateRawBlobProbeTarget.MANAGEMENT_ACCOUNT,
-                                accountId = fixture.managementAccountId,
-                                payload = MANAGEMENT_PAYLOAD,
-                            ),
-                            probe(
-                                client = rawClient,
-                                target = GateRawBlobProbeTarget.ORDINARY_ACCOUNT,
-                                accountId = ordinaryAccountId,
-                                payload = ORDINARY_PAYLOAD,
-                            ),
-                        )
-                    val authorizedClient = GateAppPasswordClient(
-                        session = ordinarySession,
-                        credential = ordinaryCredential,
-                        transport = rawTransport,
-                    )
-                    val authorizedUpload = authorizedClient.rawUpload(
-                        accountId = ordinaryAccountId,
-                        payload = INDEPENDENT_PAYLOAD,
-                    )
-                    val seededBlob = when (authorizedUpload) {
-                        is GateRawBlobUploadResult.Accepted -> authorizedUpload.blob
-                        is GateRawBlobUploadResult.Denied ->
-                            throw AssertionError(
-                                "Authorized raw-blob seed upload was denied",
+                    ).use { rawClient ->
+                        val managementProbes =
+                            listOf(
+                                probe(
+                                    client = rawClient,
+                                    target = GateRawBlobProbeTarget.MANAGEMENT_ACCOUNT,
+                                    accountId = fixture.managementAccountId,
+                                    payload = MANAGEMENT_PAYLOAD,
+                                ),
+                                probe(
+                                    client = rawClient,
+                                    target = GateRawBlobProbeTarget.ORDINARY_ACCOUNT,
+                                    accountId = ordinaryAccountId,
+                                    payload = ORDINARY_PAYLOAD,
+                                ),
                             )
-                    }
-                    val independentManagementDownload = rawClient.rawDownload(
-                        accountId = ordinaryAccountId,
-                        blobId = seededBlob.blobId,
-                        expectedPayload = INDEPENDENT_PAYLOAD,
-                    )
+                        GateAppPasswordClient(
+                            session = ordinarySession,
+                            credential = GateCredential.basic(
+                                username = GateBootstrap.FIRST_USER_ADDRESS,
+                                secret = fixture.firstUserPassword,
+                            ),
+                            transport = rawTransport,
+                        ).use { authorizedClient ->
+                            val authorizedUpload = authorizedClient.rawUpload(
+                                accountId = ordinaryAccountId,
+                                payload = INDEPENDENT_PAYLOAD,
+                            )
+                            val seededBlob = when (authorizedUpload) {
+                                is GateRawBlobUploadResult.Accepted -> authorizedUpload.blob
+                                is GateRawBlobUploadResult.Denied ->
+                                    throw AssertionError(
+                                        "Authorized raw-blob seed upload was denied",
+                                    )
+                            }
+                            val independentManagementDownload = rawClient.rawDownload(
+                                accountId = ordinaryAccountId,
+                                blobId = seededBlob.blobId,
+                                expectedPayload = INDEPENDENT_PAYLOAD,
+                            )
 
-                    GateRawBlobCompatibility.requirePinnedLocalOnlyBehavior(
-                        managementProbes = managementProbes,
-                        independentDownload = GateRawBlobIndependentDownloadProbe(
-                            authorizedUpload = authorizedUpload,
-                            managementDownload = independentManagementDownload,
-                        ),
-                    )
+                            GateRawBlobCompatibility.requirePinnedLocalOnlyBehavior(
+                                managementProbes = managementProbes,
+                                independentDownload = GateRawBlobIndependentDownloadProbe(
+                                    authorizedUpload = authorizedUpload,
+                                    managementDownload = independentManagementDownload,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }

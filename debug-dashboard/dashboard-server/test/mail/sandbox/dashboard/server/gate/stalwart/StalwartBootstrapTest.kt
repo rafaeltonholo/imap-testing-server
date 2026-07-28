@@ -7,6 +7,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -23,6 +24,27 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class StalwartBootstrapTest {
+    @Test
+    fun temporarySecretArraysAreClearedAfterSuccessAndFailure() {
+        lateinit var successfulArray: CharArray
+        val returned = "temporary-secret".withGateSecretChars { secret ->
+            successfulArray = secret
+            secret.concatToString()
+        }
+
+        assertEquals("temporary-secret", returned)
+        assertContentEquals(CharArray(successfulArray.size), successfulArray)
+
+        lateinit var failedArray: CharArray
+        assertFailsWith<IllegalStateException> {
+            "another-secret".withGateSecretChars { secret ->
+                failedArray = secret
+                error("expected failure")
+            }
+        }
+        assertContentEquals(CharArray(failedArray.size), failedArray)
+    }
+
     @Test
     fun liveEnvironmentRequiresExplicitLoopbackAndFixedSecretHandoff() {
         withTemporaryProject { projectRoot ->
@@ -174,17 +196,16 @@ class StalwartBootstrapTest {
                 """.trimIndent(),
             ),
         )
-        val client = GateJmapClient(
+        val (session, result) = GateJmapClient(
             baseUrl = URI("http://127.0.0.1:18443"),
             credential = GateCredential.basic(
                 username = "gate-recovery",
                 secret = "never-record-this-secret".toCharArray(),
             ),
             transport = transport,
-        )
-
-        val session = client.discoverSession()
-        val result = client.registryGet("Account")
+        ).use { client ->
+            client.discoverSession() to client.registryGet("Account")
+        }
 
         assertEquals("recovery-account", session.primaryAccountId)
         assertEquals(
@@ -221,13 +242,14 @@ class StalwartBootstrapTest {
                 body = """{"apiUrl":"/api/principal","primaryAccounts":{}}""",
             ),
         )
-        val legacyClient = GateJmapClient(
+        val legacyFailure = GateJmapClient(
             baseUrl = URI("http://127.0.0.1:18443"),
             credential = GateCredential.basic("gate-recovery", "secret".toCharArray()),
             transport = legacy,
-        )
-        val legacyFailure = assertFailsWith<GateJmapException> {
-            legacyClient.discoverSession()
+        ).use { legacyClient ->
+            assertFailsWith<GateJmapException> {
+                legacyClient.discoverSession()
+            }
         }
         assertEquals(GateJmapFailure.InvalidResponse, legacyFailure.kind)
         assertEquals(1, legacy.requests.size)
@@ -240,13 +262,14 @@ class StalwartBootstrapTest {
                 body = secretBody,
             ),
         )
-        val failedClient = GateJmapClient(
+        val failure = GateJmapClient(
             baseUrl = URI("http://127.0.0.1:18443"),
             credential = GateCredential.bearer("API_secret".toCharArray()),
             transport = failed,
-        )
-        val failure = assertFailsWith<GateJmapException> {
-            failedClient.discoverSession()
+        ).use { failedClient ->
+            assertFailsWith<GateJmapException> {
+                failedClient.discoverSession()
+            }
         }
         assertFalse(failure.message.orEmpty().contains(secretBody))
         assertFalse(failure.toString().contains("API_secret"))
@@ -277,17 +300,17 @@ class StalwartBootstrapTest {
                 """.trimIndent(),
             ),
         )
-        val client = GateJmapClient(
+        val created = GateJmapClient(
             baseUrl = URI("http://127.0.0.1:18443"),
             credential = GateCredential.bearer("API_secret".toCharArray()),
             transport = transport,
-        )
-
-        val created = client.registryCreate(
-            objectType = "Domain",
-            creationId = "domain",
-            value = buildJsonObject { put("name", "local.test") },
-        )
+        ).use { client ->
+            client.registryCreate(
+                objectType = "Domain",
+                creationId = "domain",
+                value = buildJsonObject { put("name", "local.test") },
+            )
+        }
 
         assertEquals("domain-id", created.createdId("domain"))
         assertFalse(transport.requests[1].toString().contains("local.test"))
@@ -316,17 +339,21 @@ class StalwartBootstrapTest {
         assertEquals(
             listOf(
                 "create:NetworkListener",
+                "create:NetworkListener",
+                "update:MtaStageAuth:singleton",
                 "create:Domain",
                 "update:SystemSettings:singleton",
                 "create:Account",
                 "create:Account",
                 "create:Account",
             ),
-            recovery.operations.take(6).map { it.label },
+            recovery.operations.take(8).map { it.label },
         )
         assertEquals(
             listOf(
-                "get:NetworkListener:listener-id",
+                "get:NetworkListener:http-listener-id",
+                "get:NetworkListener:smtp-listener-id",
+                "get:MtaStageAuth:singleton",
                 "get:Domain:domain-id",
                 "get:SystemSettings:singleton",
                 "get:Account:management-id",
@@ -334,8 +361,32 @@ class StalwartBootstrapTest {
                 "get:Account:second-user-id",
             ),
             recovery.operations.filter { it.label.startsWith("get:") }
-                .take(6)
+                .take(8)
                 .map { it.label },
+        )
+        val smtpListener = recovery.operations.single {
+            it.creationId == "smtp-listener"
+        }.value
+        assertEquals("smtp-gate0b", smtpListener?.get("name")?.jsonPrimitive?.content)
+        assertEquals("smtp", smtpListener?.get("protocol")?.jsonPrimitive?.content)
+        assertEquals(
+            setOf("[::]:8587"),
+            smtpListener
+                ?.get("bind")
+                ?.jsonObject
+                ?.keys,
+        )
+        val smtpAuth = requireNotNull(
+            recovery.operations.single {
+                it.label == "update:MtaStageAuth:singleton"
+            }.value,
+        )
+        assertEquals(
+            buildJsonObject {
+                put("match", buildJsonObject {})
+                put("else", "[plain]")
+            },
+            smtpAuth["saslMechanisms"],
         )
         val accountCreates = recovery.operations
             .filter { it.label == "create:Account" }
@@ -450,6 +501,10 @@ class StalwartBootstrapTest {
             },
         )
         assertFalse(result.effectiveManagementPermissions.any { "*" in it })
+        assertEquals(0, recovery.closeCount)
+        assertEquals(1, manager.closeCount)
+        assertEquals(1, noAuthenticate.closeCount)
+        assertEquals(1, managementBearer.closeCount)
         result.close()
         inputs.close()
     }
@@ -526,7 +581,16 @@ class StalwartBootstrapTest {
 
         override fun create(credential: GateCredential): GateRegistryApi {
             credentials += credential
-            return clients.removeFirst()
+            val client = clients.removeFirst()
+            return object : GateRegistryApi by client {
+                override fun close() {
+                    try {
+                        client.close()
+                    } finally {
+                        credential.close()
+                    }
+                }
+            }
         }
     }
 
@@ -548,6 +612,7 @@ class StalwartBootstrapTest {
         var discoveryAttempted = false
         var discoveryRejected = false
         var discoveredPrimaryAccountId: String? = null
+        var closeCount = 0
         private var managementRetired = false
         private var managementGetCount = 0
         private val destroyedApiKeyIds = mutableSetOf<String>()
@@ -584,7 +649,12 @@ class StalwartBootstrapTest {
                 accountId = accountId,
             )
             val (id, extra) = when {
-                objectType == "NetworkListener" -> "listener-id" to emptyMap()
+                objectType == "NetworkListener" &&
+                    creationId == "http-listener" ->
+                    "http-listener-id" to emptyMap()
+                objectType == "NetworkListener" &&
+                    creationId == "smtp-listener" ->
+                    "smtp-listener-id" to emptyMap()
                 objectType == "Domain" -> "domain-id" to emptyMap()
                 objectType == "Account" && creationId == "management" ->
                     "management-id" to emptyMap()
@@ -617,6 +687,11 @@ class StalwartBootstrapTest {
                 "NetworkListener" -> getResponse(
                     objectType,
                     networkListenerObject(requireNotNull(ids).single()),
+                )
+
+                "MtaStageAuth" -> getResponse(
+                    objectType,
+                    smtpAuthenticationStageObject(requireNotNull(ids).single()),
                 )
 
                 "Domain" -> getResponse(
@@ -725,14 +800,36 @@ class StalwartBootstrapTest {
             accountId: String?,
         ): JsonObject = error("Unexpected scripted query $objectType")
 
+        override fun close() {
+            closeCount += 1
+        }
+
         private fun networkListenerObject(id: String): JsonObject = buildJsonObject {
             put("id", id)
-            put("name", "http")
-            put("bind", buildJsonObject { put("[::]:8080", true) })
-            put("protocol", "http")
+            val isSmtp = id == "smtp-listener-id"
+            put("name", if (isSmtp) "smtp-gate0b" else "http")
+            put(
+                "bind",
+                buildJsonObject {
+                    put(if (isSmtp) "[::]:8587" else "[::]:8080", true)
+                },
+            )
+            put("protocol", if (isSmtp) "smtp" else "http")
             put("useTls", false)
             put("tlsImplicit", false)
         }
+
+        private fun smtpAuthenticationStageObject(id: String): JsonObject =
+            buildJsonObject {
+                put("id", id)
+                put(
+                    "saslMechanisms",
+                    buildJsonObject {
+                        put("match", buildJsonObject {})
+                        put("else", "[plain]")
+                    },
+                )
+            }
 
         private fun domainObject(id: String): JsonObject = buildJsonObject {
             put("id", id)

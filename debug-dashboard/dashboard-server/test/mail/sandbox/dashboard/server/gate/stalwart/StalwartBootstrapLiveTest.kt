@@ -26,54 +26,55 @@ class StalwartBootstrapLiveTest {
                 fixtureSecretsPath = live.fixtureSecretsPath,
             ).use { recoveryCredential ->
                 KtorGateHttpTransport().use { transport ->
-                    val recovery = GateJmapClient(
+                    GateJmapClient(
                         baseUrl = live.baseUrl,
                         credential = GateCredential.basic(
                             username = recoveryCredential.username,
                             secret = recoveryCredential.secret,
                         ),
                         transport = transport,
-                    )
-                    val factory = GateRegistryClientFactory { credential ->
-                        GateJmapClient(
-                            baseUrl = live.baseUrl,
-                            credential = credential,
-                            transport = transport,
-                        )
-                    }
-                    GateBootstrapInputs(
-                        managementPassword = managementPassword,
-                        firstUserPassword = firstUserPassword,
-                        secondUserPassword = secondUserPassword,
-                    ).use { inputs ->
-                        GateBootstrap.bootstrap(
-                            recovery = recovery,
-                            clientFactory = factory,
-                            inputs = inputs,
-                        ).use { result ->
-                            assertEquals(
-                                GateBootstrap.managementPermissions,
-                                result.effectiveManagementPermissions,
+                    ).use { recovery ->
+                        val factory = GateRegistryClientFactory { credential ->
+                            GateJmapClient(
+                                baseUrl = live.baseUrl,
+                                credential = credential,
+                                transport = transport,
                             )
-                            assertEquals(
-                                3,
-                                setOf(
-                                    result.managementAccountId,
-                                    result.firstUserAccountId,
-                                    result.secondUserAccountId,
-                                ).size,
-                            )
-                            GateFixtureSecrets(
-                                managementAccountId = result.managementAccountId,
-                                managementApiKey = result.managementApiKey,
-                                firstUserPassword = firstUserPassword,
-                                secondUserPassword = secondUserPassword,
-                            ).use { fixtureSecrets ->
-                                StalwartGateSecretFiles.writeFixtureSecrets(
-                                    projectRoot = projectRoot,
-                                    path = live.fixtureSecretsPath,
-                                    secrets = fixtureSecrets,
+                        }
+                        GateBootstrapInputs(
+                            managementPassword = managementPassword,
+                            firstUserPassword = firstUserPassword,
+                            secondUserPassword = secondUserPassword,
+                        ).use { inputs ->
+                            GateBootstrap.bootstrap(
+                                recovery = recovery,
+                                clientFactory = factory,
+                                inputs = inputs,
+                            ).use { result ->
+                                assertEquals(
+                                    GateBootstrap.managementPermissions,
+                                    result.effectiveManagementPermissions,
                                 )
+                                assertEquals(
+                                    3,
+                                    setOf(
+                                        result.managementAccountId,
+                                        result.firstUserAccountId,
+                                        result.secondUserAccountId,
+                                    ).size,
+                                )
+                                GateFixtureSecrets(
+                                    managementAccountId = result.managementAccountId,
+                                    managementApiKey = result.managementApiKey,
+                                    firstUserPassword = firstUserPassword,
+                                    secondUserPassword = secondUserPassword,
+                                ).use { fixtureSecrets ->
+                                    StalwartGateSecretFiles.writeFixtureSecrets(
+                                        projectRoot = projectRoot,
+                                        path = live.fixtureSecretsPath,
+                                        secrets = fixtureSecrets,
+                                    )
+                                }
                             }
                         }
                     }

@@ -12,13 +12,21 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import java.net.URI
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 internal class GateRawBlobHttpRequest(
     val method: String,
@@ -260,24 +268,929 @@ internal object GateRawBlobCompatibility {
     }
 }
 
+internal val DASHBOARD_MAIL_PERMISSIONS: Set<String> = linkedSetOf(
+    "authenticate",
+    "jmapMailboxGet",
+    "jmapMailboxCreate",
+    "jmapMailboxUpdate",
+    "jmapMailboxDestroy",
+    "jmapEmailGet",
+    "jmapEmailQuery",
+    "jmapEmailUpdate",
+    "jmapEmailDestroy",
+    "jmapEmailImport",
+    "jmapIdentityGet",
+    "jmapEmailSubmissionGet",
+    "jmapEmailSubmissionCreate",
+    "jmapBlobGet",
+    "jmapBlobUpload",
+)
+
+internal class GateAppPasswordDescription private constructor(
+    val value: String,
+) {
+    init {
+        require(value.length in 1..256 && '\u0000' !in value) {
+            "AppPassword description is invalid"
+        }
+    }
+
+    override fun toString(): String = value
+
+    companion object {
+        private const val PREFIX = "mail-sandbox/debug-dashboard/"
+
+        fun reserved(
+            storeId: UUID,
+            generation: UInt,
+        ): GateAppPasswordDescription {
+            require(generation > 0u) {
+                "AppPassword generation must be positive"
+            }
+            return GateAppPasswordDescription("$PREFIX$storeId/$generation")
+        }
+
+        internal fun fromServer(value: String): GateAppPasswordDescription =
+            GateAppPasswordDescription(value)
+    }
+}
+
+internal class GateCreatedAppPassword(
+    val id: String,
+    val description: GateAppPasswordDescription,
+    secret: CharArray,
+) : AutoCloseable {
+    private val secret = validatedSecretCopy(id, secret)
+    private var closed = false
+
+    @Synchronized
+    fun copySecret(): CharArray {
+        check(!closed) { "Created AppPassword secret is closed" }
+        return secret.copyOf()
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        secret.fill('\u0000')
+    }
+
+    override fun toString(): String =
+        "GateCreatedAppPassword(id=$id, description=$description, secret=redacted)"
+
+    private companion object {
+        fun validatedSecretCopy(
+            id: String,
+            source: CharArray,
+        ): CharArray {
+            val copy = source.copyOf()
+            return try {
+                require(id.isSafeGateId()) {
+                    "Created AppPassword ID is invalid"
+                }
+                require(
+                    copy.size >= 4 &&
+                        copy[0] == 'a' &&
+                        copy[1] == 'p' &&
+                        copy[2] == 'p' &&
+                        copy[3] == '_',
+                ) {
+                    "Created AppPassword secret format is invalid"
+                }
+                copy
+            } catch (failure: Throwable) {
+                copy.fill('\u0000')
+                throw failure
+            }
+        }
+    }
+}
+
+internal class GateStoredAppPassword(
+    val id: String,
+    val description: GateAppPasswordDescription,
+    val permissions: Set<String>,
+) {
+    override fun toString(): String =
+        "GateStoredAppPassword(id=$id, description=$description, secret=redacted)"
+}
+
+internal class GateEffectivePermissionScope(
+    val permissions: Set<String>,
+    val edition: String,
+    val locale: String,
+) {
+    override fun toString(): String =
+        "GateEffectivePermissionScope(" +
+            "permissionCount=${permissions.size}, edition=$edition, locale=$locale)"
+}
+
+internal class GateEffectivePermissionClient(
+    private val baseUrl: URI,
+    private val credential: GateCredential,
+    private val transport: GateHttpTransport,
+) : AutoCloseable {
+    private var closed = false
+
+    init {
+        if (baseUrl != URI("http://127.0.0.1:18443")) {
+            credential.close()
+            throw IllegalArgumentException(
+                "Effective permission endpoint must use the dedicated loopback fixture",
+            )
+        }
+    }
+
+    suspend fun fetch(): GateEffectivePermissionScope {
+        requireOpen()
+        val endpoint = baseUrl.resolve("/api/account")
+        val response = transport.execute(
+            GateHttpRequest(
+                method = "GET",
+                url = endpoint,
+                credential = credential,
+            ),
+        )
+        if (response.effectiveUrl != endpoint) {
+            invalidRegistryResponse(
+                "Effective permission request did not remain on its pinned URL",
+            )
+        }
+        if (response.status !in 200..299) {
+            throw GateJmapException(
+                kind = GateJmapFailure.HttpStatus(response.status),
+                message = "Effective permission request was rejected",
+            )
+        }
+        if (response.body.length !in 2..MAX_SCOPE_RESPONSE_CHARS) {
+            invalidRegistryResponse(
+                "Effective permission response size was invalid",
+            )
+        }
+        val value = try {
+            Json.parseToJsonElement(response.body).jsonObject
+        } catch (_: Exception) {
+            invalidRegistryResponse(
+                "Effective permission response was not valid JSON",
+            )
+        }
+        val permissions = value["permissions"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Effective permission response omitted permissions",
+            )
+        val permissionNames = permissions.map { permission ->
+            requiredString(
+                permission,
+                "Effective permission response contained a malformed permission",
+            )
+        }
+        if (
+            permissionNames.size != permissionNames.toSet().size ||
+                permissionNames.any { !PERMISSION_NAME.matches(it) }
+        ) {
+            invalidRegistryResponse(
+                "Effective permission response contained an invalid permission set",
+            )
+        }
+        val edition = requiredString(
+            value["edition"],
+            "Effective permission response omitted its edition",
+        )
+        if (edition != "community") {
+            invalidRegistryResponse(
+                "Effective permission response was not Community edition",
+            )
+        }
+        val locale = requiredString(
+            value["locale"],
+            "Effective permission response omitted its locale",
+        )
+        if (locale.isBlank() || locale.length > 64) {
+            invalidRegistryResponse(
+                "Effective permission response locale was invalid",
+            )
+        }
+        return GateEffectivePermissionScope(
+            permissions = permissionNames.toSet(),
+            edition = edition,
+            locale = locale,
+        )
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        credential.close()
+    }
+
+    private fun requireOpen() {
+        check(!closed) { "Effective permission client is closed" }
+    }
+
+    private companion object {
+        val PERMISSION_NAME = Regex("[A-Za-z][A-Za-z0-9]*")
+        const val MAX_SCOPE_RESPONSE_CHARS = 64 * 1_024
+    }
+}
+
+internal sealed interface GateAppPasswordCreateResult {
+    class Created(
+        val credential: GateCreatedAppPassword,
+    ) : GateAppPasswordCreateResult {
+        override fun toString(): String =
+            "GateAppPasswordCreateResult.Created(credential=$credential)"
+    }
+
+    class Rejected(
+        val type: String,
+    ) : GateAppPasswordCreateResult {
+        override fun toString(): String =
+            "GateAppPasswordCreateResult.Rejected(type=redacted)"
+    }
+}
+
+internal class GateAppPasswordUpdateDenial(
+    val type: String,
+) {
+    override fun toString(): String =
+        "GateAppPasswordUpdateDenial(type=$type, replacement=redacted)"
+}
+
+internal class GateAppPasswordEnrollmentClient(
+    private val registry: GateRegistryApi,
+    private val ownerAccountId: String,
+    private val ownerAddress: String,
+) {
+    init {
+        require(ownerAccountId.isSafeGateId()) {
+            "AppPassword owner Account ID is invalid"
+        }
+        require(
+            OWNER_ADDRESS.matches(ownerAddress) &&
+                ownerAddress.endsWith("@${GateBootstrap.DOMAIN}") &&
+                ownerAddress != GateBootstrap.MANAGEMENT_ADDRESS,
+        ) {
+            "AppPassword owner address is invalid"
+        }
+    }
+
+    suspend fun create(
+        description: GateAppPasswordDescription,
+    ): GateCreatedAppPassword =
+        when (val result = tryCreate(description)) {
+            is GateAppPasswordCreateResult.Created -> result.credential
+            is GateAppPasswordCreateResult.Rejected ->
+                throw IllegalStateException("AppPassword create was rejected")
+        }
+
+    suspend fun tryCreate(
+        description: GateAppPasswordDescription,
+    ): GateAppPasswordCreateResult {
+        requireOwnerSession()
+        val response = registry.registryCreate(
+            objectType = APP_PASSWORD_OBJECT,
+            creationId = CREATION_ID,
+            value = buildJsonObject {
+                put("description", description.value)
+                put(
+                    "permissions",
+                    buildJsonObject {
+                        put("@type", "Replace")
+                        put(
+                            "permissions",
+                            buildJsonObject {
+                                DASHBOARD_MAIL_PERMISSIONS.forEach {
+                                    put(it, true)
+                                }
+                            },
+                        )
+                    },
+                )
+                put("allowedIps", buildJsonObject {})
+            },
+            accountId = ownerAccountId,
+        )
+        val payload = methodPayload(
+            response = response,
+            expectedMethod = "x:AppPassword/set",
+        )
+        requireAccount(payload)
+        val notCreated = (payload["notCreated"] as? JsonObject).orEmpty()
+        val createdMap = (payload["created"] as? JsonObject).orEmpty()
+        if (CREATION_ID in notCreated) {
+            if (createdMap.isNotEmpty() || notCreated.size != 1) {
+                invalidRegistryResponse(
+                    "AppPassword create returned conflicting outcomes",
+                )
+            }
+            val rejection = notCreated[CREATION_ID] as? JsonObject
+                ?: invalidRegistryResponse(
+                    "AppPassword create rejection was malformed",
+                )
+            val type = requiredString(
+                rejection["type"],
+                "AppPassword create rejection type was malformed",
+            )
+            if (!ERROR_TYPE.matches(type)) {
+                invalidRegistryResponse(
+                    "AppPassword create rejection type was invalid",
+                )
+            }
+            return GateAppPasswordCreateResult.Rejected(type)
+        }
+        if (notCreated.isNotEmpty() || createdMap.size != 1) {
+            invalidRegistryResponse(
+                "AppPassword create returned an invalid outcome",
+            )
+        }
+        val created = createdMap[CREATION_ID] as? JsonObject
+            ?: invalidRegistryResponse("AppPassword create result was absent")
+        val id = requiredString(
+            created["id"],
+            "AppPassword create ID was malformed",
+        )
+        val secret = requiredString(
+            created["secret"],
+            "AppPassword create secret was absent",
+        ).toCharArray()
+        return try {
+            GateAppPasswordCreateResult.Created(
+                GateCreatedAppPassword(
+                    id = id,
+                    description = description,
+                    secret = secret,
+                ),
+            )
+        } finally {
+            secret.fill('\u0000')
+        }
+    }
+
+    suspend fun requireSecretUpdateRejected(
+        credentialId: String,
+        replacement: CharArray,
+    ): GateAppPasswordUpdateDenial {
+        require(credentialId.isSafeGateId()) {
+            "AppPassword ID is invalid"
+        }
+        require(replacement.isNotEmpty()) {
+            "AppPassword mutation probe is absent"
+        }
+        requireOwnerSession()
+        val payload = methodPayload(
+            response = registry.registryUpdate(
+                objectType = APP_PASSWORD_OBJECT,
+                objectId = credentialId,
+                patch = buildJsonObject {
+                    put("secret", replacement.concatToString())
+                },
+                accountId = ownerAccountId,
+            ),
+            expectedMethod = "x:AppPassword/set",
+        )
+        requireAccount(payload)
+        val updated = payload["updated"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "AppPassword secret mutation omitted updated",
+            )
+        if (updated.isNotEmpty()) {
+            invalidRegistryResponse(
+                "AppPassword secret mutation unexpectedly succeeded",
+            )
+        }
+        val failures = payload["notUpdated"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "AppPassword secret mutation omitted notUpdated",
+            )
+        if (failures.keys != setOf(credentialId)) {
+            invalidRegistryResponse(
+                "AppPassword secret mutation returned an invalid outcome",
+            )
+        }
+        val failure = failures[credentialId] as? JsonObject
+            ?: invalidRegistryResponse(
+                "AppPassword secret mutation omitted the exact ID",
+            )
+        val type = requiredString(
+            failure["type"],
+            "AppPassword secret mutation rejection was malformed",
+        )
+        if (type != "invalidPatch") {
+            invalidRegistryResponse(
+                "AppPassword secret mutation used an unexpected rejection type",
+            )
+        }
+        return GateAppPasswordUpdateDenial(type)
+    }
+
+    suspend fun destroy(credentialId: String) {
+        require(credentialId.isSafeGateId()) {
+            "AppPassword ID is invalid"
+        }
+        requireOwnerSession()
+        val payload = methodPayload(
+            response = registry.registryDestroy(
+                objectType = APP_PASSWORD_OBJECT,
+                objectId = credentialId,
+                accountId = ownerAccountId,
+            ),
+            expectedMethod = "x:AppPassword/set",
+        )
+        requireAccount(payload)
+        if (!(payload["notDestroyed"] as? JsonObject).orEmpty().isEmpty()) {
+            invalidRegistryResponse("AppPassword destroy was rejected")
+        }
+        val destroyed = payload["destroyed"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "AppPassword destroy omitted its result",
+            )
+        if (
+            destroyed.size != 1 ||
+                requiredString(
+                    destroyed.single(),
+                    "AppPassword destroyed ID was malformed",
+                ) != credentialId
+        ) {
+            invalidRegistryResponse(
+                "AppPassword destroy did not confirm the exact ID",
+            )
+        }
+    }
+
+    suspend fun inventory(): List<GateStoredAppPassword> {
+        requireOwnerSession()
+        val queryPayload = methodPayload(
+            response = registry.registryQuery(
+                objectType = APP_PASSWORD_OBJECT,
+                filter = buildJsonObject {},
+                accountId = ownerAccountId,
+            ),
+            expectedMethod = "x:AppPassword/query",
+        )
+        requireAccount(queryPayload)
+        val ids = (queryPayload["ids"] as? JsonArray)
+            ?.map { value ->
+                requiredString(
+                    value,
+                    "AppPassword query returned a malformed ID",
+                ).also {
+                    if (!it.isSafeGateId()) {
+                        invalidRegistryResponse(
+                            "AppPassword query returned an invalid ID",
+                        )
+                    }
+                }
+            }
+            ?: invalidRegistryResponse("AppPassword query omitted IDs")
+        if (ids.size != ids.toSet().size) {
+            invalidRegistryResponse("AppPassword query returned duplicate IDs")
+        }
+        val positionPrimitive = queryPayload["position"] as? JsonPrimitive
+        val position = positionPrimitive
+            ?.takeUnless(JsonPrimitive::isString)
+            ?.longOrNull
+            ?: invalidRegistryResponse(
+                "AppPassword query position was malformed",
+            )
+        val totalPrimitive = queryPayload["total"] as? JsonPrimitive
+        val total = totalPrimitive
+            ?.takeUnless(JsonPrimitive::isString)
+            ?.longOrNull
+            ?: invalidRegistryResponse(
+                "AppPassword query total was malformed",
+            )
+        if (
+            position != 0L ||
+                total < 0L ||
+                total != ids.size.toLong()
+        ) {
+            invalidRegistryResponse(
+                "AppPassword query result was incomplete",
+            )
+        }
+        if (ids.isEmpty()) return emptyList()
+
+        val getPayload = methodPayload(
+            response = registry.registryGet(
+                objectType = APP_PASSWORD_OBJECT,
+                ids = ids,
+                accountId = ownerAccountId,
+            ),
+            expectedMethod = "x:AppPassword/get",
+        )
+        requireAccount(getPayload)
+        val notFound = getPayload["notFound"] as? JsonArray
+            ?: invalidRegistryResponse("AppPassword get omitted notFound")
+        if (notFound.isNotEmpty()) {
+            invalidRegistryResponse("AppPassword inventory changed during its exact get")
+        }
+        val list = getPayload["list"] as? JsonArray
+            ?: invalidRegistryResponse("AppPassword get omitted its list")
+        val values = list.map(::storedAppPassword)
+        if (
+            values.size != ids.size ||
+                values.map { it.id }.toSet() != ids.toSet()
+        ) {
+            invalidRegistryResponse(
+                "AppPassword get did not return the exact queried IDs",
+            )
+        }
+        return ids.map { id -> values.single { it.id == id } }
+    }
+
+    private suspend fun requireOwnerSession() {
+        val session = registry.discoverSession()
+        require(
+            session.primaryAccountId == ownerAccountId &&
+                session.username == ownerAddress &&
+                session.apiUrl == PINNED_JMAP_API_URL,
+        ) {
+            "Normal-password enrollment authenticated the wrong Account"
+        }
+    }
+
+    private fun storedAppPassword(value: JsonElement): GateStoredAppPassword {
+        val objectValue = value as? JsonObject
+            ?: invalidRegistryResponse("AppPassword get returned a malformed object")
+        val id = requiredString(
+            objectValue["id"],
+            "Stored AppPassword ID was malformed",
+        )
+        if (!id.isSafeGateId()) {
+            invalidRegistryResponse("Stored AppPassword ID was invalid")
+        }
+        val description = GateAppPasswordDescription.fromServer(
+            requiredString(
+                objectValue["description"],
+                "Stored AppPassword description was malformed",
+            ),
+        )
+        if (
+            requiredString(
+                objectValue["secret"],
+                "Stored AppPassword secret sentinel was malformed",
+            ) != MASKED_SECRET
+        ) {
+            invalidRegistryResponse(
+                "Stored AppPassword did not contain the masked secret sentinel",
+            )
+        }
+        val permissions = objectValue["permissions"] as? JsonObject
+            ?: invalidRegistryResponse("Stored AppPassword permissions were absent")
+        if (
+            requiredString(
+                permissions["@type"],
+                "Stored AppPassword permission mode was malformed",
+            ) != "Replace"
+        ) {
+            invalidRegistryResponse(
+                "Stored AppPassword permission mode was not Replace",
+            )
+        }
+        val permissionMap = permissions["permissions"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "Stored AppPassword permission map was absent",
+            )
+        if (
+            permissionMap.values.any { value ->
+                val primitive = value as? JsonPrimitive
+                primitive == null ||
+                    primitive.isString ||
+                    primitive.booleanOrNull != true
+            }
+        ) {
+            invalidRegistryResponse(
+                "Stored AppPassword contained a disabled permission",
+            )
+        }
+        val effective = permissionMap.keys
+        if (effective != DASHBOARD_MAIL_PERMISSIONS) {
+            invalidRegistryResponse(
+                "Stored AppPassword permissions differed from the baseline",
+            )
+        }
+        val allowedIps = objectValue["allowedIps"] as? JsonObject
+            ?: invalidRegistryResponse(
+                "Stored AppPassword allowed IP map was absent",
+            )
+        if (allowedIps.isNotEmpty()) {
+            invalidRegistryResponse(
+                "Stored AppPassword unexpectedly restricted source addresses",
+            )
+        }
+        return GateStoredAppPassword(
+            id = id,
+            description = description,
+            permissions = effective,
+        )
+    }
+
+    private fun requireAccount(payload: JsonObject) {
+        if (
+            requiredString(
+                payload["accountId"],
+                "AppPassword response Account ID was malformed",
+            ) != ownerAccountId
+        ) {
+            invalidRegistryResponse(
+                "AppPassword response belonged to the wrong Account",
+            )
+        }
+    }
+
+    private companion object {
+        val OWNER_ADDRESS =
+            Regex("[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9.-]{1,190}")
+        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
+        const val APP_PASSWORD_OBJECT = "AppPassword"
+        const val CREATION_ID = "dashboard-app-password"
+        const val MASKED_SECRET = "****"
+        val ERROR_TYPE = Regex("[A-Za-z][A-Za-z0-9]*")
+    }
+}
+
+internal sealed interface GateTargetedRevocationResult {
+    data object Revoked : GateTargetedRevocationResult
+
+    data object ReconciliationRequired : GateTargetedRevocationResult
+}
+
+internal class GateManagementAppPasswordRevoker(
+    private val registry: GateRegistryApi,
+    private val managementAccountId: String,
+) {
+    init {
+        require(managementAccountId.isSafeGateId()) {
+            "Management Account ID is invalid"
+        }
+    }
+
+    suspend fun revoke(
+        targetAccountId: String,
+        targetCredentialId: String,
+        expectedDescription: GateAppPasswordDescription,
+    ): GateTargetedRevocationResult {
+        require(
+            targetAccountId.isSafeGateId() &&
+                targetAccountId != managementAccountId,
+        ) {
+            "Target Account ID is invalid"
+        }
+        require(targetCredentialId.isSafeGateId()) {
+            "Target AppPassword ID is invalid"
+        }
+        requireManagementSession()
+
+        val before = credentialEntries(fetchTargetAccount(targetAccountId))
+        val targetKey = CredentialStableId(
+            type = "AppPassword",
+            credentialId = targetCredentialId,
+        )
+        val target = before.entries.singleOrNull { entry ->
+            entry.stableId == targetKey &&
+                requiredString(
+                    entry.value["description"],
+                    "Target AppPassword description was malformed",
+                ) == expectedDescription.value
+        } ?: return GateTargetedRevocationResult.ReconciliationRequired
+
+        try {
+            val updatePayload = methodPayload(
+                response = registry.registryUpdate(
+                    objectType = "Account",
+                    objectId = targetAccountId,
+                    patch = buildJsonObject {
+                        put("credentials/${target.mapKey}", JsonNull)
+                    },
+                    accountId = managementAccountId,
+                ),
+                expectedMethod = "x:Account/set",
+            )
+            requireManagementResponseAccount(updatePayload)
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            // The mutation may have been applied before its response was lost.
+            // The single exact verification below is authoritative.
+        }
+
+        val after = try {
+            credentialEntries(fetchTargetAccount(targetAccountId))
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            return GateTargetedRevocationResult.ReconciliationRequired
+        }
+        val expectedAfter = before.byStableId - targetKey
+        return if (after.byStableId == expectedAfter) {
+            GateTargetedRevocationResult.Revoked
+        } else {
+            GateTargetedRevocationResult.ReconciliationRequired
+        }
+    }
+
+    private suspend fun requireManagementSession() {
+        val session = registry.discoverSession()
+        require(
+            session.primaryAccountId == managementAccountId &&
+                session.username == GateBootstrap.MANAGEMENT_ADDRESS &&
+                session.apiUrl == PINNED_JMAP_API_URL,
+        ) {
+            "Targeted revocation authenticated the wrong management Account"
+        }
+    }
+
+    private suspend fun fetchTargetAccount(targetAccountId: String): JsonObject {
+        val payload = methodPayload(
+            response = registry.registryGet(
+                objectType = "Account",
+                ids = listOf(targetAccountId),
+                accountId = managementAccountId,
+            ),
+            expectedMethod = "x:Account/get",
+        )
+        requireManagementResponseAccount(payload)
+        if (!(payload["notFound"] as? JsonArray).orEmpty().isEmpty()) {
+            invalidRegistryResponse(
+                "Target Account disappeared during credential reconciliation",
+            )
+        }
+        val list = payload["list"] as? JsonArray
+            ?: invalidRegistryResponse("Target Account get omitted its list")
+        if (list.size != 1) {
+            invalidRegistryResponse(
+                "Target Account get did not return exactly one Account",
+            )
+        }
+        val account = list.single() as? JsonObject
+            ?: invalidRegistryResponse("Target Account get was malformed")
+        if (
+            requiredString(
+                account["id"],
+                "Target Account ID was malformed",
+            ) != targetAccountId
+        ) {
+            invalidRegistryResponse("Target Account get returned the wrong Account")
+        }
+        return account
+    }
+
+    private fun credentialEntries(
+        account: JsonObject,
+    ): CredentialEntries {
+        val credentials = account["credentials"] as? JsonObject
+            ?: invalidRegistryResponse("Target Account credentials were absent")
+        val entries = credentials.map { (mapKey, value) ->
+            if (mapKey.toUIntOrNull() == null) {
+                invalidRegistryResponse(
+                    "Target Account credential position was malformed",
+                )
+            }
+            val credential = value as? JsonObject
+                ?: invalidRegistryResponse(
+                    "Target Account credential was malformed",
+                )
+            val stableId = CredentialStableId(
+                type = requiredString(
+                    credential["@type"],
+                    "Target Account credential type was malformed",
+                ),
+                credentialId = requiredString(
+                    credential["credentialId"],
+                    "Target Account credential ID was malformed",
+                ),
+            )
+            if (!stableId.credentialId.isSafeGateId()) {
+                invalidRegistryResponse(
+                    "Target Account credential ID was invalid",
+                )
+            }
+            CredentialEntry(
+                mapKey = mapKey,
+                stableId = stableId,
+                value = credential,
+            )
+        }
+        val byStableId = entries.associate { it.stableId to it.value }
+        if (byStableId.size != entries.size) {
+            invalidRegistryResponse(
+                "Target Account contained duplicate stable credential IDs",
+            )
+        }
+        return CredentialEntries(
+            entries = entries,
+            byStableId = byStableId,
+        )
+    }
+
+    private fun requireManagementResponseAccount(payload: JsonObject) {
+        if (
+            requiredString(
+                payload["accountId"],
+                "Management registry response Account ID was malformed",
+            ) != managementAccountId
+        ) {
+            invalidRegistryResponse(
+                "Management registry response used the wrong Account context",
+            )
+        }
+    }
+
+    private data class CredentialStableId(
+        val type: String,
+        val credentialId: String,
+    )
+
+    private data class CredentialEntry(
+        val mapKey: String,
+        val stableId: CredentialStableId,
+        val value: JsonObject,
+    )
+
+    private data class CredentialEntries(
+        val entries: List<CredentialEntry>,
+        val byStableId: Map<CredentialStableId, JsonObject>,
+    )
+
+    private companion object {
+        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
+    }
+}
+
+private fun String.isSafeGateId(): Boolean =
+    length in 1..1_024 && GATE_ID.matches(this)
+
+private fun methodPayload(
+    response: JsonObject,
+    expectedMethod: String,
+): JsonObject {
+    val responses = response["methodResponses"] as? JsonArray
+        ?: invalidRegistryResponse("Registry response omitted methodResponses")
+    if (responses.size != 1) {
+        invalidRegistryResponse(
+            "Registry response did not contain exactly one method",
+        )
+    }
+    val method = responses.single() as? JsonArray
+        ?: invalidRegistryResponse("Registry method response was malformed")
+    if (method.size != 3) {
+        invalidRegistryResponse("Registry method response tuple was malformed")
+    }
+    if (
+        requiredString(
+            method[0],
+            "Registry response method was malformed",
+        ) != expectedMethod
+    ) {
+        invalidRegistryResponse("Registry response method did not match")
+    }
+    requiredString(method[2], "Registry response call ID was malformed")
+    return method[1] as? JsonObject
+        ?: invalidRegistryResponse("Registry response payload was malformed")
+}
+
+private fun requiredString(
+    value: JsonElement?,
+    message: String,
+): String {
+    val primitive = value as? JsonPrimitive
+    if (primitive == null || !primitive.isString) {
+        invalidRegistryResponse(message)
+    }
+    return primitive.content
+}
+
+private fun invalidRegistryResponse(message: String): Nothing =
+    throw GateJmapException(
+        kind = GateJmapFailure.InvalidResponse,
+        message = message,
+    )
+
+private val GATE_ID = Regex("[A-Za-z0-9]+")
+
 internal class GateAppPasswordClient(
     session: GateJmapSession,
     private val credential: GateCredential,
     private val transport: GateRawBlobTransport,
-) {
+) : AutoCloseable {
     private val apiUrl = session.apiUrl
+    private var closed = false
 
     init {
-        require(
-            apiUrl.scheme == "http" &&
-                apiUrl.host == "127.0.0.1" &&
-                apiUrl.port == 18443 &&
-                apiUrl.rawPath == "/jmap/" &&
-                apiUrl.rawUserInfo == null &&
-                apiUrl.rawQuery == null &&
-                apiUrl.rawFragment == null,
+        if (
+            apiUrl.scheme != "http" ||
+            apiUrl.host != "127.0.0.1" ||
+            apiUrl.port != 18443 ||
+            apiUrl.rawPath != "/jmap/" ||
+            apiUrl.rawUserInfo != null ||
+            apiUrl.rawQuery != null ||
+            apiUrl.rawFragment != null
         ) {
-            "Stalwart raw-blob Session must use the dedicated JMAP endpoint"
+            credential.close()
+            throw IllegalArgumentException(
+                "Stalwart raw-blob Session must use the dedicated JMAP endpoint",
+            )
         }
     }
 
@@ -285,6 +1198,7 @@ internal class GateAppPasswordClient(
         accountId: String,
         payload: ByteArray,
     ): GateRawBlobUploadResult {
+        requireOpen()
         val safeAccountId = safeSegment(accountId, "Account ID")
         require(payload.isNotEmpty() && payload.size <= MAX_PROBE_PAYLOAD_BYTES) {
             "Raw-blob probe payload size is invalid"
@@ -317,6 +1231,7 @@ internal class GateAppPasswordClient(
         blobId: String,
         expectedPayload: ByteArray,
     ): GateRawBlobDownloadResult {
+        requireOpen()
         val safeAccountId = safeSegment(accountId, "Account ID")
         val safeBlobId = safeSegment(blobId, "Blob ID")
         require(
@@ -373,7 +1288,10 @@ internal class GateAppPasswordClient(
         val accountId = requiredString(value["accountId"])
         val blobId = requiredString(value["blobId"])
         val type = requiredString(value["type"])
-        val size = (value["size"] as? JsonPrimitive)?.longOrNull
+        val sizePrimitive = value["size"] as? JsonPrimitive
+        val size = sizePrimitive
+            ?.takeUnless(JsonPrimitive::isString)
+            ?.longOrNull
             ?: invalidResponse("Raw blob upload response size was malformed")
         if (
             accountId != expectedAccountId ||
@@ -428,6 +1346,16 @@ internal class GateAppPasswordClient(
             kind = GateRawBlobFailure.InvalidResponse,
             message = message,
         )
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        credential.close()
+    }
+
+    private fun requireOpen() {
+        check(!closed) { "Raw-blob client is closed" }
     }
 
     private companion object {

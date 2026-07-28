@@ -36,87 +36,88 @@ class StalwartRecoveryRetirementLiveTest {
                 fixtureSecretsPath = live.fixtureSecretsPath,
             ).use { recovery ->
                 KtorGateHttpTransport().use { transport ->
-                    val manager = GateJmapClient(
+                    GateJmapClient(
                         baseUrl = live.baseUrl,
                         credential = GateCredential.bearer(fixture.managementApiKey),
                         transport = transport,
-                    )
+                    ).use { manager ->
+                        // A successful bounded request separates retired authentication
+                        // from an unavailable or otherwise unrelated endpoint failure.
+                        val managerSession = manager.discoverSession()
+                        assertSession(
+                            session = managerSession,
+                            expectedAccountId = fixture.managementAccountId,
+                        )
 
-                    // A successful bounded request separates retired authentication
-                    // from an unavailable or otherwise unrelated endpoint failure.
-                    val managerSession = manager.discoverSession()
-                    assertSession(
-                        session = managerSession,
-                        expectedAccountId = fixture.managementAccountId,
-                    )
+                        GateJmapClient(
+                            baseUrl = live.baseUrl,
+                            credential = GateCredential.basic(
+                                username = recovery.username,
+                                secret = recovery.secret,
+                            ),
+                            transport = transport,
+                        ).use { recoveryClient ->
+                            assertRecoveryAuthenticationRejected(recoveryClient)
+                        }
 
-                    val recoveryClient = GateJmapClient(
-                        baseUrl = live.baseUrl,
-                        credential = GateCredential.basic(
-                            username = recovery.username,
-                            secret = recovery.secret,
-                        ),
-                        transport = transport,
-                    )
-                    assertRecoveryAuthenticationRejected(recoveryClient)
+                        val firstUserSession = GateJmapClient(
+                            baseUrl = live.baseUrl,
+                            credential = GateCredential.basic(
+                                username = GateBootstrap.FIRST_USER_ADDRESS,
+                                secret = fixture.firstUserPassword,
+                            ),
+                            transport = transport,
+                        ).use { it.discoverSession() }
+                        assertSession(firstUserSession)
 
-                    val firstUserSession = GateJmapClient(
-                        baseUrl = live.baseUrl,
-                        credential = GateCredential.basic(
-                            username = GateBootstrap.FIRST_USER_ADDRESS,
-                            secret = fixture.firstUserPassword,
-                        ),
-                        transport = transport,
-                    ).discoverSession()
-                    assertSession(firstUserSession)
+                        val secondUserSession = GateJmapClient(
+                            baseUrl = live.baseUrl,
+                            credential = GateCredential.basic(
+                                username = GateBootstrap.SECOND_USER_ADDRESS,
+                                secret = fixture.secondUserPassword,
+                            ),
+                            transport = transport,
+                        ).use { it.discoverSession() }
+                        assertSession(secondUserSession)
 
-                    val secondUserSession = GateJmapClient(
-                        baseUrl = live.baseUrl,
-                        credential = GateCredential.basic(
-                            username = GateBootstrap.SECOND_USER_ADDRESS,
-                            secret = fixture.secondUserPassword,
-                        ),
-                        transport = transport,
-                    ).discoverSession()
-                    assertSession(secondUserSession)
+                        val firstUserId = assertNotNull(firstUserSession.primaryAccountId)
+                        val secondUserId = assertNotNull(secondUserSession.primaryAccountId)
+                        assertEquals(
+                            3,
+                            setOf(
+                                fixture.managementAccountId,
+                                firstUserId,
+                                secondUserId,
+                            ).size,
+                            "Gate credentials must authenticate three distinct Accounts",
+                        )
 
-                    val firstUserId = assertNotNull(firstUserSession.primaryAccountId)
-                    val secondUserId = assertNotNull(secondUserSession.primaryAccountId)
-                    assertEquals(
-                        3,
-                        setOf(
-                            fixture.managementAccountId,
-                            firstUserId,
-                            secondUserId,
-                        ).size,
-                        "Gate credentials must authenticate three distinct Accounts",
-                    )
+                        val managementAccount = requireSingleRegistryObject(
+                            response = manager.registryGet(
+                                objectType = "Account",
+                                ids = listOf(fixture.managementAccountId),
+                            ),
+                            expectedMethod = "x:Account/get",
+                        )
+                        assertManagementAccount(
+                            account = managementAccount,
+                            expectedAccountId = fixture.managementAccountId,
+                        )
 
-                    val managementAccount = requireSingleRegistryObject(
-                        response = manager.registryGet(
-                            objectType = "Account",
-                            ids = listOf(fixture.managementAccountId),
-                        ),
-                        expectedMethod = "x:Account/get",
-                    )
-                    assertManagementAccount(
-                        account = managementAccount,
-                        expectedAccountId = fixture.managementAccountId,
-                    )
-
-                    val ordinaryAccounts = requireRegistryObjects(
-                        response = manager.registryGet(
-                            objectType = "Account",
-                            ids = listOf(firstUserId, secondUserId),
-                        ),
-                        expectedMethod = "x:Account/get",
-                    )
-                    assertEquals(
-                        setOf(firstUserId, secondUserId),
-                        ordinaryAccounts.map(::accountId).toSet(),
-                        "Account/get returned the wrong ordinary Accounts",
-                    )
-                    ordinaryAccounts.forEach(::assertPasswordOnlyOrdinaryAccount)
+                        val ordinaryAccounts = requireRegistryObjects(
+                            response = manager.registryGet(
+                                objectType = "Account",
+                                ids = listOf(firstUserId, secondUserId),
+                            ),
+                            expectedMethod = "x:Account/get",
+                        )
+                        assertEquals(
+                            setOf(firstUserId, secondUserId),
+                            ordinaryAccounts.map(::accountId).toSet(),
+                            "Account/get returned the wrong ordinary Accounts",
+                        )
+                        ordinaryAccounts.forEach(::assertPasswordOnlyOrdinaryAccount)
+                    }
                 }
             }
         }
