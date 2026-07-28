@@ -1,5 +1,6 @@
 package mail.sandbox.dashboard.server.provider.stalwart.credential
 
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -7,11 +8,20 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -370,9 +380,9 @@ class StalwartMailAccessServiceTest {
     fun concurrentReadersDrainBeforeAWriterAndPendingWriterBlocksNewReaders() {
         val writerWaiting = CountDownLatch(1)
         val registry = StalwartCredentialLeaseRegistry(
-            waiter = StalwartLeaseConditionWaiter { condition, remaining ->
+            waiter = StalwartLeaseChangeWaiter { change, _ ->
                 writerWaiting.countDown()
-                condition.awaitNanos(remaining)
+                change.await()
             },
         )
         val first = acquiredLease(registry, "account-one", 1)
@@ -381,7 +391,9 @@ class StalwartMailAccessServiceTest {
         val executor = Executors.newSingleThreadExecutor()
         try {
             val writerFuture = executor.submit<StalwartExclusiveLeaseAcquireResult> {
-                registry.acquireExclusive("account-one")
+                runBlocking {
+                    registry.acquireExclusive("account-one")
+                }
             }
             assertTrue(writerWaiting.await(5, TimeUnit.SECONDS))
 
@@ -426,30 +438,31 @@ class StalwartMailAccessServiceTest {
     }
 
     @Test
-    fun fakeThirtySecondDrainTimeoutClearsPendingWithoutStateMutation() {
-        val now = AtomicLong(0)
-        val waits = AtomicInteger()
-        val registry = StalwartCredentialLeaseRegistry(
-            nanoClock = StalwartLeaseNanoClock(now::get),
-            waiter = StalwartLeaseConditionWaiter { _, remaining ->
-                waits.incrementAndGet()
-                now.addAndGet(remaining)
-            },
-        )
-        val reader = acquiredLease(registry, "account-one", 1)
+    fun fakeThirtySecondDrainTimeoutClearsPendingWithoutStateMutation() =
+        runBlocking {
+            val now = AtomicLong(0)
+            val waits = AtomicInteger()
+            val registry = StalwartCredentialLeaseRegistry(
+                nanoClock = StalwartLeaseNanoClock(now::get),
+                waiter = StalwartLeaseChangeWaiter { _, remaining ->
+                    waits.incrementAndGet()
+                    now.addAndGet(remaining)
+                },
+            )
+            val reader = acquiredLease(registry, "account-one", 1)
 
-        assertIs<StalwartExclusiveLeaseAcquireResult.TimedOut>(
-            registry.acquireExclusive("account-one"),
-        )
-        assertEquals(1, waits.get())
+            assertIs<StalwartExclusiveLeaseAcquireResult.TimedOut>(
+                registry.acquireExclusive("account-one"),
+            )
+            assertEquals(1, waits.get())
 
-        val nextReader = acquiredLease(registry, "account-one", 1)
-        nextReader.close()
-        reader.close()
-        assertIs<StalwartExclusiveLeaseAcquireResult.Acquired>(
-            registry.acquireExclusive("account-one"),
-        ).lease.close()
-    }
+            val nextReader = acquiredLease(registry, "account-one", 1)
+            nextReader.close()
+            reader.close()
+            assertIs<StalwartExclusiveLeaseAcquireResult.Acquired>(
+                registry.acquireExclusive("account-one"),
+            ).lease.close()
+        }
 
     @Test
     fun sharedPermitExistsBeforeCurrentGenerationLoaderRuns() = runBlocking {
@@ -475,9 +488,9 @@ class StalwartMailAccessServiceTest {
     fun globalBarrierDrainsEveryAccountAndBlocksAllNewLeaseSuppliers() {
         val globalWaiting = CountDownLatch(1)
         val registry = StalwartCredentialLeaseRegistry(
-            waiter = StalwartLeaseConditionWaiter { condition, remaining ->
+            waiter = StalwartLeaseChangeWaiter { change, _ ->
                 globalWaiting.countDown()
-                condition.awaitNanos(remaining)
+                change.await()
             },
         )
         val first = acquiredLease(registry, "account-one", 1)
@@ -486,7 +499,9 @@ class StalwartMailAccessServiceTest {
         try {
             val globalFuture =
                 executor.submit<StalwartGlobalExclusiveLeaseAcquireResult> {
-                    registry.acquireGlobalExclusive()
+                    runBlocking {
+                        registry.acquireGlobalExclusive()
+                    }
                 }
             assertTrue(globalWaiting.await(5, TimeUnit.SECONDS))
 
@@ -518,6 +533,384 @@ class StalwartMailAccessServiceTest {
             first.close()
             second.close()
             executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun accountWriterSuspendsSoItsSingleDispatcherCanCloseTheReader() =
+        runBlocking {
+            val registry = StalwartCredentialLeaseRegistry()
+            val reader = acquiredLease(registry, "single-account", 1)
+            val dispatcher =
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            var writer: Deferred<StalwartExclusiveLeaseAcquireResult>? = null
+            try {
+                writer = async(dispatcher) {
+                    registry.acquireExclusive(
+                        accountId = "single-account",
+                        timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                    )
+                }
+                awaitMutationPending(registry, "single-account")
+                val closer = async(dispatcher) {
+                    reader.close()
+                }
+
+                val result = withTimeout(200) {
+                    writer.await()
+                }
+                closer.await()
+                assertIs<StalwartExclusiveLeaseAcquireResult.Acquired>(
+                    result,
+                ).lease.close()
+            } finally {
+                reader.close()
+                try {
+                    writer?.let { pending ->
+                        val result = withTimeout(1_000) {
+                            pending.await()
+                        }
+                        if (
+                            result is
+                            StalwartExclusiveLeaseAcquireResult.Acquired
+                        ) {
+                            result.lease.close()
+                        }
+                    }
+                } finally {
+                    dispatcher.close()
+                }
+            }
+        }
+
+    @Test
+    fun globalWriterSuspendsSoItsSingleDispatcherCanCloseEveryReader() =
+        runBlocking {
+            val registry = StalwartCredentialLeaseRegistry()
+            val reader = acquiredLease(registry, "single-global", 1)
+            val dispatcher =
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            var writer:
+                Deferred<StalwartGlobalExclusiveLeaseAcquireResult>? = null
+            try {
+                writer = async(dispatcher) {
+                    registry.acquireGlobalExclusive(
+                        timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                    )
+                }
+                awaitMutationPending(registry, "global-blocked-reader")
+                val closer = async(dispatcher) {
+                    reader.close()
+                }
+
+                val result = withTimeout(200) {
+                    writer.await()
+                }
+                closer.await()
+                assertIs<StalwartGlobalExclusiveLeaseAcquireResult.Acquired>(
+                    result,
+                ).lease.close()
+            } finally {
+                reader.close()
+                try {
+                    writer?.let { pending ->
+                        val result = withTimeout(1_000) {
+                            pending.await()
+                        }
+                        if (
+                            result is
+                            StalwartGlobalExclusiveLeaseAcquireResult.Acquired
+                        ) {
+                            result.lease.close()
+                        }
+                    }
+                } finally {
+                    dispatcher.close()
+                }
+            }
+        }
+
+    @Test
+    fun cancellingPendingAccountWriterRemovesItsBarrierPromptly() =
+        runBlocking {
+            val registry = StalwartCredentialLeaseRegistry()
+            val reader = acquiredLease(registry, "cancel-account", 1)
+            val dispatcher =
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val writer = async(dispatcher) {
+                registry.acquireExclusive(
+                    accountId = "cancel-account",
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+            }
+            try {
+                awaitMutationPending(registry, "cancel-account")
+                writer.cancel(
+                    CancellationException("cancel pending Account writer"),
+                )
+                withTimeout(200) {
+                    writer.join()
+                }
+
+                val admitted = assertIs<StalwartMailLeaseAcquireResult.Acquired>(
+                    registry.acquireMail("cancel-account") {
+                        material("cancel-account", 2)
+                    },
+                )
+                admitted.lease.close()
+            } finally {
+                reader.close()
+                try {
+                    withTimeout(1_000) {
+                        writer.join()
+                    }
+                } finally {
+                    dispatcher.close()
+                }
+            }
+        }
+
+    @Test
+    fun cancellingPendingGlobalWriterRemovesItsBarrierPromptly() =
+        runBlocking {
+            val registry = StalwartCredentialLeaseRegistry()
+            val reader = acquiredLease(registry, "cancel-global", 1)
+            val dispatcher =
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val writer = async(dispatcher) {
+                registry.acquireGlobalExclusive(
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+            }
+            try {
+                awaitMutationPending(registry, "global-cancel-blocked")
+                writer.cancel(
+                    CancellationException("cancel pending global writer"),
+                )
+                withTimeout(200) {
+                    writer.join()
+                }
+
+                val admitted = assertIs<StalwartMailLeaseAcquireResult.Acquired>(
+                    registry.acquireMail("global-after-cancel") {
+                        material("global-after-cancel", 1)
+                    },
+                )
+                admitted.lease.close()
+            } finally {
+                reader.close()
+                try {
+                    withTimeout(1_000) {
+                        writer.join()
+                    }
+                } finally {
+                    dispatcher.close()
+                }
+            }
+        }
+
+    @Test
+    fun cancelledOrInterruptedLeaseHandoffsReleaseActivePermits() =
+        runBlocking {
+            lateinit var cancelAccountHandoff: () -> Unit
+            val accountRegistry = StalwartCredentialLeaseRegistry(
+                handoffObserver = StalwartLeaseHandoffObserver {
+                    cancelAccountHandoff()
+                },
+            )
+            val accountWriter = async {
+                val operationContext = currentCoroutineContext()
+                cancelAccountHandoff = {
+                    operationContext.cancel(
+                        CancellationException(
+                            "cancel Account lease handoff",
+                        ),
+                    )
+                }
+                accountRegistry.acquireExclusive(
+                    accountId = "cancel-account-handoff",
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+            }
+            accountWriter.join()
+            assertTrue(accountWriter.isCancelled)
+            assertIs<StalwartMailLeaseAcquireResult.Acquired>(
+                accountRegistry.acquireMail("cancel-account-handoff") {
+                    material("cancel-account-handoff", 1)
+                },
+            ).lease.close()
+
+            lateinit var cancelGlobalHandoff: () -> Unit
+            val globalRegistry = StalwartCredentialLeaseRegistry(
+                handoffObserver = StalwartLeaseHandoffObserver {
+                    cancelGlobalHandoff()
+                },
+            )
+            val globalWriter = async {
+                val operationContext = currentCoroutineContext()
+                cancelGlobalHandoff = {
+                    operationContext.cancel(
+                        CancellationException(
+                            "cancel global lease handoff",
+                        ),
+                    )
+                }
+                globalRegistry.acquireGlobalExclusive(
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+            }
+            globalWriter.join()
+            assertTrue(globalWriter.isCancelled)
+            assertIs<StalwartMailLeaseAcquireResult.Acquired>(
+                globalRegistry.acquireMail("after-global-handoff") {
+                    material("after-global-handoff", 1)
+                },
+            ).lease.close()
+
+            val interruptedRegistry = StalwartCredentialLeaseRegistry(
+                handoffObserver = StalwartLeaseHandoffObserver {
+                    Thread.currentThread().interrupt()
+                },
+            )
+            try {
+                interruptedRegistry.acquireExclusive(
+                    accountId = "interrupt-account-handoff",
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+                fail("Interrupted Account handoff returned an active lease")
+            } catch (_: InterruptedException) {
+                assertTrue(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+            assertIs<StalwartMailLeaseAcquireResult.Acquired>(
+                interruptedRegistry.acquireMail("interrupt-account-handoff") {
+                    material("interrupt-account-handoff", 1)
+                },
+            ).lease.close()
+        }
+
+    @Test
+    fun globalBarrierAndTimedOutWriterRetainNoIdleAccountState() =
+        runBlocking {
+            val observedAccountCounts =
+                Collections.synchronizedList(mutableListOf<Int>())
+            val registry = StalwartCredentialLeaseRegistry(
+                stateObserver = StalwartLeaseStateObserver { accountCount ->
+                    observedAccountCounts += accountCount
+                },
+            )
+            val reader = acquiredLease(registry, "tracked-reader", 1)
+            val dispatcher =
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val global = async(dispatcher) {
+                registry.acquireGlobalExclusive(
+                    timeoutNanos = TimeUnit.MILLISECONDS.toNanos(500),
+                )
+            }
+            try {
+                awaitMutationPending(registry, "unknown-reader")
+                assertEquals(1, observedAccountCounts.last())
+
+                assertIs<StalwartExclusiveLeaseAcquireResult.TimedOut>(
+                    registry.acquireExclusive(
+                        accountId = "unknown-writer",
+                        timeoutNanos = 0,
+                    ),
+                )
+                assertTrue(2 in observedAccountCounts)
+                assertEquals(1, observedAccountCounts.last())
+            } finally {
+                reader.close()
+                try {
+                    val result = withTimeout(1_000) {
+                        global.await()
+                    }
+                    if (
+                        result is
+                        StalwartGlobalExclusiveLeaseAcquireResult.Acquired
+                    ) {
+                        result.lease.close()
+                    }
+                } finally {
+                    dispatcher.close()
+                }
+            }
+        }
+
+    @Test
+    fun drainDeadlineIncludesRegistrationAndEveryWaitIteration() = runBlocking {
+        val now = AtomicLong(0)
+        val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(100)
+        val registrationNanos = TimeUnit.MILLISECONDS.toNanos(60)
+        val waitStepNanos = TimeUnit.MILLISECONDS.toNanos(15)
+        val observedRemaining = mutableListOf<Long>()
+        val registry = StalwartCredentialLeaseRegistry(
+            nanoClock = StalwartLeaseNanoClock(now::get),
+            pendingRegistrationObserver =
+                StalwartLeasePendingRegistrationObserver {
+                    now.addAndGet(registrationNanos)
+                },
+            waiter = StalwartLeaseChangeWaiter { _, remaining ->
+                observedRemaining += remaining
+                now.addAndGet(minOf(waitStepNanos, remaining))
+            },
+        )
+        val reader = acquiredLease(registry, "deadline-account", 1)
+        try {
+            assertIs<StalwartExclusiveLeaseAcquireResult.TimedOut>(
+                registry.acquireExclusive(
+                    accountId = "deadline-account",
+                    timeoutNanos = timeoutNanos,
+                ),
+            )
+            assertEquals(
+                listOf(
+                    TimeUnit.MILLISECONDS.toNanos(40),
+                    TimeUnit.MILLISECONDS.toNanos(25),
+                    TimeUnit.MILLISECONDS.toNanos(10),
+                ),
+                observedRemaining,
+            )
+        } finally {
+            reader.close()
+        }
+    }
+
+    @Test
+    fun interruptedLeaseDrainPropagatesWithoutReadingTheCredentialStore() {
+        val account = StalwartMailAccount(
+            accountId = "interrupted-account",
+            address = "interrupted@local.test",
+        )
+        val store = FakeCredentialStore()
+        val registry = StalwartCredentialLeaseRegistry(
+            waiter = StalwartLeaseChangeWaiter { _, _ ->
+                throw InterruptedException("interrupted credential drain")
+            },
+        )
+        val reader = acquiredLease(registry, account.accountId, 1)
+        val passwordChars = "interrupted-password".toCharArray()
+        try {
+            assertFailsWith<InterruptedException> {
+                runBlocking {
+                    service(
+                        store = store,
+                        management = FakeManagementRemote(),
+                        probe = FakeProbeRemote(),
+                        leases = registry,
+                    ).enroll(
+                        account,
+                        StalwartNormalPassword.takeOwnership(passwordChars),
+                    )
+                }
+            }
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertEquals(0, store.loadCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
+        } finally {
+            Thread.interrupted()
+            reader.close()
         }
     }
 
@@ -680,6 +1073,374 @@ class StalwartMailAccessServiceTest {
             assertEquals(listOf(setOf(orphan)), management.revocations)
             assertEquals(0, store.replaceCalls)
             assertTrue(passwordChars.all { it == '\u0000' })
+        }
+
+    @Test
+    fun cancelledCreatedEnrollmentValidationStillRevokesExactCredential() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "cancelled-created-validation",
+                address = "cancelled-created-validation@local.test",
+            )
+            val store = FakeCredentialStore()
+            val invalidCreated = StalwartReservedCredential(
+                credentialId = "cancelled-invalid-enrollment",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/2",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventoryResults += availableInventory(account.accountId)
+                it.inventoryResults +=
+                    availableInventory(account.accountId, invalidCreated)
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.requireActiveAfterInventoryCall = 1
+            }
+            val createdBytes =
+                "app_cancelled_invalid_enrollment".encodeToByteArray()
+            val cancellation =
+                CancellationException("cancel definitive enrollment create")
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = invalidCreated.credentialId,
+                        description = invalidCreated.description,
+                        secret = createdBytes,
+                    ),
+                )
+                it.cancellationAfterDispatch = cancellation
+            }
+            val passwordChars =
+                "cancelled-created-validation-password".toCharArray()
+
+            val operation = launch {
+                service(
+                    store = store,
+                    management = management,
+                    probe = FakeProbeRemote(),
+                    owner = owner,
+                ).enroll(
+                    account,
+                    StalwartNormalPassword.takeOwnership(passwordChars),
+                )
+            }
+            operation.join()
+
+            assertTrue(operation.isCancelled)
+            assertEquals(2, management.inventoryCalls)
+            assertEquals(
+                listOf(setOf(invalidCreated)),
+                management.revocations,
+            )
+            assertEquals(0, store.replaceCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
+            assertTrue(createdBytes.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun definitiveCreatedCleanupTimeoutFailsClosedAndWipesInputs() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "created-cleanup-timeout",
+                address = "created-cleanup-timeout@local.test",
+            )
+            val store = FakeCredentialStore()
+            val invalidCreated = StalwartReservedCredential(
+                credentialId = "created-cleanup-timeout-id",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/2",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventoryResults += availableInventory(account.accountId)
+                it.inventoryResults +=
+                    availableInventory(account.accountId, invalidCreated)
+                it.delayAfterInventoryCall = 1
+                it.inventoryDelayMillis = 200
+            }
+            val createdBytes =
+                "app_created_cleanup_timeout".encodeToByteArray()
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = invalidCreated.credentialId,
+                        description = invalidCreated.description,
+                        secret = createdBytes,
+                    ),
+                )
+            }
+            val passwordChars =
+                "created-cleanup-timeout-password".toCharArray()
+
+            val result = service(
+                store = store,
+                management = management,
+                probe = FakeProbeRemote(),
+                owner = owner,
+                definitiveCreatedCleanupTimeout = 10.milliseconds,
+            ).enroll(
+                account,
+                StalwartNormalPassword.takeOwnership(passwordChars),
+            )
+
+            val reconciliation =
+                assertIs<StalwartMailAccessResult.ReconciliationRequired>(
+                    result,
+                )
+            assertEquals(
+                StalwartMailAccessReason.CleanupUnproven,
+                reconciliation.reason,
+            )
+            assertEquals(2, management.inventoryCalls)
+            assertTrue(management.revocations.isEmpty())
+            assertEquals(0, store.replaceCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
+            assertTrue(createdBytes.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun cancelledCreatedRotationValidationStillRevokesOnlySuccessor() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "cancelled-rotation-validation",
+                address = "cancelled-rotation-validation@local.test",
+            )
+            val store = FakeCredentialStore()
+            val old = generationSpec(store.storeId, 1)
+            store.record = recordSpec(account, CredentialPhase.Active, old)
+            val invalidSuccessor = StalwartReservedCredential(
+                credentialId = "cancelled-invalid-successor",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/3",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventory = availableInventory(
+                    account.accountId,
+                    reserved(old),
+                )
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.requireActiveOnRevoke = true
+            }
+            val createdBytes =
+                "app_cancelled_invalid_successor".encodeToByteArray()
+            val cancellation =
+                CancellationException("cancel definitive rotation create")
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = invalidSuccessor.credentialId,
+                        description = invalidSuccessor.description,
+                        secret = createdBytes,
+                    ),
+                )
+                it.cancellationAfterDispatch = cancellation
+            }
+            val passwordChars =
+                "cancelled-rotation-validation-password".toCharArray()
+
+            val operation = launch {
+                service(
+                    store = store,
+                    management = management,
+                    probe = FakeProbeRemote(),
+                    owner = owner,
+                ).rotate(
+                    account,
+                    StalwartNormalPassword.takeOwnership(passwordChars),
+                )
+            }
+            operation.join()
+
+            assertTrue(operation.isCancelled)
+            assertEquals(
+                listOf(setOf(reserved(old), invalidSuccessor)),
+                management.revocationExpectedInventories,
+            )
+            assertEquals(
+                listOf(setOf(invalidSuccessor)),
+                management.revocations,
+            )
+            assertEquals(
+                old.credentialId,
+                store.recordSpecs[account.accountId]?.active?.credentialId,
+            )
+            assertEquals(0, store.replaceCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
+            assertTrue(createdBytes.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun cancelledCreatedEnrollmentCasFailureStillCleansExactCredential() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "cancelled-enrollment-cas",
+                address = "cancelled-enrollment-cas@local.test",
+            )
+            val otherAccount = StalwartMailAccount(
+                accountId = "cancelled-enrollment-other",
+                address = "cancelled-enrollment-other@local.test",
+            )
+            val store = FakeCredentialStore().also {
+                it.writeResults += CredentialStoreWriteResult.StoreUnavailable
+            }
+            val other = generationSpec(store.storeId, 7)
+            val createdRemote = StalwartReservedCredential(
+                credentialId = "cancelled-enrollment-created",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/1",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventoryResults += availableInventory(account.accountId)
+                it.inventoryResults +=
+                    availableInventory(account.accountId, createdRemote)
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.requireActiveAfterInventoryCall = 1
+            }
+            val createdBytes =
+                "app_cancelled_enrollment_cas".encodeToByteArray()
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = createdRemote.credentialId,
+                        description = createdRemote.description,
+                        secret = createdBytes,
+                    ),
+                )
+            }
+            val cancellation =
+                CancellationException("cancel failed enrollment CAS")
+            val passwordChars =
+                "cancelled-enrollment-cas-password".toCharArray()
+
+            val operation = launch {
+                val operationContext = currentCoroutineContext()
+                store.beforeFirstReplace = {
+                    it.putRecord(
+                        recordSpec(
+                            otherAccount,
+                            CredentialPhase.Active,
+                            other,
+                        ),
+                    )
+                    it.revision += 1
+                    operationContext.cancel(cancellation)
+                }
+                service(
+                    store = store,
+                    management = management,
+                    probe = FakeProbeRemote(),
+                    owner = owner,
+                ).enroll(
+                    account,
+                    StalwartNormalPassword.takeOwnership(passwordChars),
+                )
+            }
+            operation.join()
+
+            assertTrue(operation.isCancelled)
+            assertEquals(2, management.inventoryCalls)
+            assertEquals(
+                listOf(setOf(createdRemote)),
+                management.revocations,
+            )
+            assertEquals(2, store.replaceCalls)
+            assertEquals(
+                setOf(otherAccount.accountId),
+                store.recordSpecs.keys,
+            )
+            assertTrue(passwordChars.all { it == '\u0000' })
+            assertTrue(createdBytes.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun cancelledCreatedRotationCasFailureStillRevokesOnlySuccessor() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "cancelled-rotation-cas",
+                address = "cancelled-rotation-cas@local.test",
+            )
+            val otherAccount = StalwartMailAccount(
+                accountId = "cancelled-rotation-other",
+                address = "cancelled-rotation-other@local.test",
+            )
+            val store = FakeCredentialStore().also {
+                it.writeResults += CredentialStoreWriteResult.StoreUnavailable
+            }
+            val old = generationSpec(store.storeId, 1)
+            val other = generationSpec(store.storeId, 9)
+            store.record = recordSpec(account, CredentialPhase.Active, old)
+            val successor = StalwartReservedCredential(
+                credentialId = "cancelled-rotation-successor",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/2",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventory = availableInventory(
+                    account.accountId,
+                    reserved(old),
+                )
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.requireActiveOnRevoke = true
+            }
+            val createdBytes =
+                "app_cancelled_rotation_cas".encodeToByteArray()
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = successor.credentialId,
+                        description = successor.description,
+                        secret = createdBytes,
+                    ),
+                )
+            }
+            val cancellation =
+                CancellationException("cancel failed rotation CAS")
+            val passwordChars =
+                "cancelled-rotation-cas-password".toCharArray()
+
+            val operation = launch {
+                val operationContext = currentCoroutineContext()
+                store.beforeFirstReplace = {
+                    it.putRecord(
+                        recordSpec(
+                            otherAccount,
+                            CredentialPhase.Active,
+                            other,
+                        ),
+                    )
+                    it.revision += 1
+                    operationContext.cancel(cancellation)
+                }
+                service(
+                    store = store,
+                    management = management,
+                    probe = FakeProbeRemote(),
+                    owner = owner,
+                ).rotate(
+                    account,
+                    StalwartNormalPassword.takeOwnership(passwordChars),
+                )
+            }
+            operation.join()
+
+            assertTrue(operation.isCancelled)
+            assertEquals(
+                listOf(setOf(reserved(old), successor)),
+                management.revocationExpectedInventories,
+            )
+            assertEquals(
+                listOf(setOf(successor)),
+                management.revocations,
+            )
+            assertEquals(
+                old.credentialId,
+                store.recordSpecs[account.accountId]?.active?.credentialId,
+            )
+            assertEquals(2, store.replaceCalls)
+            assertEquals(
+                setOf(account.accountId, otherAccount.accountId),
+                store.recordSpecs.keys,
+            )
+            assertTrue(passwordChars.all { it == '\u0000' })
+            assertTrue(createdBytes.all { it == 0.toByte() })
         }
 
     @Test
@@ -934,7 +1695,7 @@ class StalwartMailAccessServiceTest {
         val now = AtomicLong(0)
         val leases = StalwartCredentialLeaseRegistry(
             nanoClock = StalwartLeaseNanoClock(now::get),
-            waiter = StalwartLeaseConditionWaiter { _, remaining ->
+            waiter = StalwartLeaseChangeWaiter { _, remaining ->
                 now.addAndGet(remaining)
             },
         )
@@ -2026,7 +2787,7 @@ class StalwartMailAccessServiceTest {
         val now = AtomicLong(0)
         val leases = StalwartCredentialLeaseRegistry(
             nanoClock = StalwartLeaseNanoClock(now::get),
-            waiter = StalwartLeaseConditionWaiter { _, remaining ->
+            waiter = StalwartLeaseChangeWaiter { _, remaining ->
                 now.addAndGet(remaining)
             },
         )
@@ -2323,6 +3084,33 @@ class StalwartMailAccessServiceTest {
         assertEquals(listOf(setOf(successor)), management.revocations)
     }
 
+    private suspend fun awaitMutationPending(
+        registry: StalwartCredentialLeaseRegistry,
+        accountId: String,
+    ) {
+        withTimeout(1_000) {
+            while (true) {
+                when (
+                    val attempt = registry.acquireMail(accountId) {
+                        material(accountId, 1)
+                    }
+                ) {
+                    is StalwartMailLeaseAcquireResult.Acquired -> {
+                        attempt.lease.close()
+                        yield()
+                    }
+                    is StalwartMailLeaseAcquireResult.Unavailable -> {
+                        assertEquals(
+                            StalwartMailLeaseUnavailableReason.MutationPending,
+                            attempt.reason,
+                        )
+                        return@withTimeout
+                    }
+                }
+            }
+        }
+    }
+
     private fun acquiredLease(
         registry: StalwartCredentialLeaseRegistry,
         accountId: String,
@@ -2354,6 +3142,7 @@ class StalwartMailAccessServiceTest {
         leases: StalwartCredentialLeaseRegistry =
             StalwartCredentialLeaseRegistry(),
         protectedAccountIds: Set<String> = emptySet(),
+        definitiveCreatedCleanupTimeout: Duration = 30.seconds,
     ): StalwartMailAccessService = StalwartMailAccessService(
         store = store,
         management = management,
@@ -2361,6 +3150,8 @@ class StalwartMailAccessServiceTest {
         probe = probe,
         leases = leases,
         protectedAccountIds = protectedAccountIds,
+        definitiveCreatedCleanupTimeout =
+            definitiveCreatedCleanupTimeout,
     )
 
     private fun projection(
@@ -2618,6 +3409,9 @@ class StalwartMailAccessServiceTest {
             mutableListOf<Set<StalwartReservedCredential>>()
         var onRevoke: (() -> Unit)? = null
         var requireActiveAfterInventoryCall: Int? = null
+        var requireActiveOnRevoke = false
+        var delayAfterInventoryCall: Int? = null
+        var inventoryDelayMillis = 0L
         var globalInventory:
             StalwartRemoteRead<StalwartGlobalReservedInventory> =
             StalwartRemoteRead.Unavailable
@@ -2632,6 +3426,9 @@ class StalwartMailAccessServiceTest {
             requireActiveAfterInventoryCall
                 ?.takeIf { inventoryCalls > it }
                 ?.let { currentCoroutineContext().ensureActive() }
+            delayAfterInventoryCall
+                ?.takeIf { inventoryCalls > it }
+                ?.let { delay(inventoryDelayMillis) }
             events?.add("inventory:$accountId")
             return inventoryResults.removeFirstOrNull() ?: inventory
         }
@@ -2649,6 +3446,9 @@ class StalwartMailAccessServiceTest {
             expected: Set<StalwartReservedCredential>,
             targets: Set<StalwartReservedCredential>,
         ): StalwartRemoteMutationResult {
+            if (requireActiveOnRevoke) {
+                currentCoroutineContext().ensureActive()
+            }
             revocationExpectedInventories += expected
             revocations += targets
             events?.add("revoke:$accountId")

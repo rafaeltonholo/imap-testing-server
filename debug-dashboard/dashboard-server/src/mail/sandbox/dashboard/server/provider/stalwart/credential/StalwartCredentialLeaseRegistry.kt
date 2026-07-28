@@ -1,9 +1,14 @@
 package mail.sandbox.dashboard.server.provider.stalwart.credential
 
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.Condition
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.nanoseconds
 
 internal class StalwartMailLeaseMaterial private constructor(
     val accountId: String,
@@ -125,8 +130,6 @@ internal sealed interface StalwartExclusiveLeaseAcquireResult {
     ) : StalwartExclusiveLeaseAcquireResult
 
     data object TimedOut : StalwartExclusiveLeaseAcquireResult
-
-    data object Interrupted : StalwartExclusiveLeaseAcquireResult
 }
 
 internal sealed interface StalwartGlobalExclusiveLeaseAcquireResult {
@@ -135,8 +138,6 @@ internal sealed interface StalwartGlobalExclusiveLeaseAcquireResult {
     ) : StalwartGlobalExclusiveLeaseAcquireResult
 
     data object TimedOut : StalwartGlobalExclusiveLeaseAcquireResult
-
-    data object Interrupted : StalwartGlobalExclusiveLeaseAcquireResult
 }
 
 internal class StalwartExclusiveCredentialLease internal constructor(
@@ -170,29 +171,46 @@ internal fun interface StalwartLeaseNanoClock {
     fun nanoTime(): Long
 }
 
-internal fun interface StalwartLeaseConditionWaiter {
+internal fun interface StalwartLeaseChangeWaiter {
     @Throws(InterruptedException::class)
-    fun await(
-        condition: Condition,
+    suspend fun await(
+        change: Deferred<Unit>,
         remainingNanos: Long,
     )
+}
+
+internal fun interface StalwartLeaseStateObserver {
+    fun changed(trackedAccountCount: Int)
+}
+
+internal fun interface StalwartLeasePendingRegistrationObserver {
+    fun beforeRegistration()
+}
+
+internal fun interface StalwartLeaseHandoffObserver {
+    fun beforeHandoff()
 }
 
 internal class StalwartCredentialLeaseRegistry(
     private val nanoClock: StalwartLeaseNanoClock =
         StalwartLeaseNanoClock(System::nanoTime),
-    private val waiter: StalwartLeaseConditionWaiter =
-        StalwartLeaseConditionWaiter { condition, remaining ->
-            condition.awaitNanos(remaining)
+    private val waiter: StalwartLeaseChangeWaiter =
+        StalwartLeaseChangeWaiter { change, remaining ->
+            withTimeoutOrNull(remaining.nanoseconds) {
+                change.await()
+            }
+            Unit
         },
     private val maximumDrainNanos: Long = TimeUnit.SECONDS.toNanos(30),
+    private val stateObserver: StalwartLeaseStateObserver =
+        StalwartLeaseStateObserver { },
+    private val pendingRegistrationObserver:
+        StalwartLeasePendingRegistrationObserver =
+        StalwartLeasePendingRegistrationObserver { },
+    private val handoffObserver: StalwartLeaseHandoffObserver =
+        StalwartLeaseHandoffObserver { },
 ) {
-    private val lock = ReentrantLock()
-    private val changed = lock.newCondition()
-    private val accounts = mutableMapOf<String, AccountLeaseState>()
-    private var activeReaders = 0
-    private var globalPendingWriters = 0
-    private var globalWriterActive = false
+    private val state = AtomicReference(RegistryState())
 
     init {
         require(maximumDrainNanos in 1..TimeUnit.SECONDS.toNanos(30)) {
@@ -210,21 +228,7 @@ internal class StalwartCredentialLeaseRegistry(
         loadCurrentMaterial: suspend () -> StalwartMailLeaseMaterial?,
     ): StalwartMailLeaseAcquireResult {
         require(accountId.isNotBlank()) { "Mail lease Account ID is absent" }
-        val permitGranted = lock.withLock {
-            val account = state(accountId)
-            if (
-                globalPendingWriters > 0 ||
-                globalWriterActive ||
-                account.pendingWriters > 0 ||
-                account.writerActive
-            ) {
-                false
-            } else {
-                account.readers += 1
-                activeReaders += 1
-                true
-            }
-        }
+        val permitGranted = acquireReader(accountId)
         if (!permitGranted) {
             return StalwartMailLeaseAcquireResult.Unavailable(
                 StalwartMailLeaseUnavailableReason.MutationPending,
@@ -259,7 +263,7 @@ internal class StalwartCredentialLeaseRegistry(
         }
     }
 
-    fun acquireExclusive(
+    suspend fun acquireExclusive(
         accountId: String,
         timeoutNanos: Long = maximumDrainNanos,
     ): StalwartExclusiveLeaseAcquireResult {
@@ -267,81 +271,277 @@ internal class StalwartCredentialLeaseRegistry(
         require(timeoutNanos in 0..maximumDrainNanos) {
             "Exclusive credential drain timeout is invalid"
         }
-        lock.lock()
-        val account = state(accountId)
-        account.pendingWriters += 1
+        val coroutineContext = currentCoroutineContext()
+        coroutineContext.ensureActive()
+        throwIfInterrupted()
         val started = nanoClock.nanoTime()
+        pendingRegistrationObserver.beforeRegistration()
+        coroutineContext.ensureActive()
+        throwIfInterrupted()
+
+        var registered = false
+        var firstDecision = true
         try {
-            while (
-                account.readers > 0 ||
-                account.writerActive ||
-                globalPendingWriters > 0 ||
-                globalWriterActive
-            ) {
+            if (!registerPendingWriter(accountId, started, timeoutNanos)) {
+                return StalwartExclusiveLeaseAcquireResult.TimedOut
+            }
+            registered = true
+            while (true) {
+                coroutineContext.ensureActive()
+                throwIfInterrupted()
+                val current = state.get()
+                val account = requireNotNull(current.accounts[accountId]) {
+                    "Pending exclusive lease Account state is absent"
+                }
+                check(account.pendingWriters > 0) {
+                    "Pending exclusive lease count is invalid"
+                }
                 val remaining = remainingNanos(started, timeoutNanos)
-                if (remaining <= 0) {
-                    account.pendingWriters -= 1
-                    changed.signalAll()
+                val mayDecide =
+                    remaining > 0 || (timeoutNanos == 0L && firstDecision)
+                if (!mayDecide) {
                     return StalwartExclusiveLeaseAcquireResult.TimedOut
                 }
-                try {
-                    waiter.await(changed, remaining)
-                } catch (_: InterruptedException) {
-                    account.pendingWriters -= 1
-                    changed.signalAll()
-                    Thread.currentThread().interrupt()
-                    return StalwartExclusiveLeaseAcquireResult.Interrupted
+                if (
+                    account.readers == 0 &&
+                    !account.writerActive &&
+                    current.globalPendingWriters == 0 &&
+                    !current.globalWriterActive
+                ) {
+                    val active = account.copy(
+                        pendingWriters = account.pendingWriters - 1,
+                        writerActive = true,
+                    )
+                    val updated = current.copy(
+                        accounts = current.accounts + (accountId to active),
+                    )
+                    if (publish(current, updated)) {
+                        registered = false
+                        val lease =
+                            StalwartExclusiveCredentialLease(accountId) {
+                                releaseWriter(accountId)
+                            }
+                        return handOffLease(
+                            lease = lease,
+                            result =
+                                StalwartExclusiveLeaseAcquireResult.Acquired(
+                                    lease,
+                                ),
+                        )
+                    }
+                    firstDecision = false
+                    continue
                 }
+                firstDecision = false
+                waiter.await(current.changed, remaining.coerceAtLeast(0))
+                throwIfInterrupted()
             }
-            account.pendingWriters -= 1
-            account.writerActive = true
-            return StalwartExclusiveLeaseAcquireResult.Acquired(
-                StalwartExclusiveCredentialLease(accountId) {
-                    releaseWriter(accountId)
-                },
-            )
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
         } finally {
-            lock.unlock()
+            if (registered) {
+                unregisterPendingWriter(accountId)
+            }
         }
     }
 
-    fun acquireGlobalExclusive(
+    suspend fun acquireGlobalExclusive(
         timeoutNanos: Long = maximumDrainNanos,
     ): StalwartGlobalExclusiveLeaseAcquireResult {
         require(timeoutNanos in 0..maximumDrainNanos) {
             "Global credential drain timeout is invalid"
         }
-        lock.lock()
-        globalPendingWriters += 1
+        val coroutineContext = currentCoroutineContext()
+        coroutineContext.ensureActive()
+        throwIfInterrupted()
         val started = nanoClock.nanoTime()
+        pendingRegistrationObserver.beforeRegistration()
+        coroutineContext.ensureActive()
+        throwIfInterrupted()
+
+        var registered = false
+        var firstDecision = true
         try {
-            while (
-                activeReaders > 0 ||
-                globalWriterActive ||
-                accounts.values.any { it.writerActive }
-            ) {
+            if (!registerPendingGlobalWriter(started, timeoutNanos)) {
+                return StalwartGlobalExclusiveLeaseAcquireResult.TimedOut
+            }
+            registered = true
+            while (true) {
+                coroutineContext.ensureActive()
+                throwIfInterrupted()
+                val current = state.get()
+                check(current.globalPendingWriters > 0) {
+                    "Pending global exclusive lease count is invalid"
+                }
                 val remaining = remainingNanos(started, timeoutNanos)
-                if (remaining <= 0) {
-                    globalPendingWriters -= 1
-                    changed.signalAll()
+                val mayDecide =
+                    remaining > 0 || (timeoutNanos == 0L && firstDecision)
+                if (!mayDecide) {
                     return StalwartGlobalExclusiveLeaseAcquireResult.TimedOut
                 }
-                try {
-                    waiter.await(changed, remaining)
-                } catch (_: InterruptedException) {
-                    globalPendingWriters -= 1
-                    changed.signalAll()
-                    Thread.currentThread().interrupt()
-                    return StalwartGlobalExclusiveLeaseAcquireResult.Interrupted
+                if (
+                    current.activeReaders == 0 &&
+                    !current.globalWriterActive &&
+                    current.accounts.values.none { it.writerActive }
+                ) {
+                    val updated = current.copy(
+                        globalPendingWriters =
+                            current.globalPendingWriters - 1,
+                        globalWriterActive = true,
+                    )
+                    if (publish(current, updated)) {
+                        registered = false
+                        val lease = StalwartGlobalExclusiveCredentialLease(
+                            ::releaseGlobalWriter,
+                        )
+                        return handOffLease(
+                            lease = lease,
+                            result =
+                                StalwartGlobalExclusiveLeaseAcquireResult.Acquired(
+                                    lease,
+                                ),
+                        )
+                    }
+                    firstDecision = false
+                    continue
                 }
+                firstDecision = false
+                waiter.await(current.changed, remaining.coerceAtLeast(0))
+                throwIfInterrupted()
             }
-            globalPendingWriters -= 1
-            globalWriterActive = true
-            return StalwartGlobalExclusiveLeaseAcquireResult.Acquired(
-                StalwartGlobalExclusiveCredentialLease(::releaseGlobalWriter),
-            )
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
         } finally {
-            lock.unlock()
+            if (registered) {
+                unregisterPendingGlobalWriter()
+            }
+        }
+    }
+
+    private fun acquireReader(accountId: String): Boolean {
+        while (true) {
+            val current = state.get()
+            if (
+                current.globalPendingWriters > 0 ||
+                current.globalWriterActive
+            ) {
+                return false
+            }
+            val account = current.accounts[accountId] ?: AccountLeaseState()
+            if (
+                account.pendingWriters > 0 ||
+                account.writerActive
+            ) {
+                return false
+            }
+            val updated = current.copy(
+                accounts = current.accounts + (
+                    accountId to account.copy(readers = account.readers + 1)
+                ),
+                activeReaders = current.activeReaders + 1,
+            )
+            if (publish(current, updated)) {
+                return true
+            }
+        }
+    }
+
+    private suspend fun registerPendingWriter(
+        accountId: String,
+        started: Long,
+        timeoutNanos: Long,
+    ): Boolean {
+        var firstAttempt = true
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            throwIfInterrupted()
+            val remaining = remainingNanos(started, timeoutNanos)
+            if (
+                remaining <= 0 &&
+                !(timeoutNanos == 0L && firstAttempt)
+            ) {
+                return false
+            }
+            val current = state.get()
+            val account = current.accounts[accountId] ?: AccountLeaseState()
+            val updated = current.copy(
+                accounts = current.accounts + (
+                    accountId to account.copy(
+                        pendingWriters = account.pendingWriters + 1,
+                    )
+                ),
+            )
+            if (publish(current, updated)) {
+                return true
+            }
+            firstAttempt = false
+        }
+    }
+
+    private fun unregisterPendingWriter(accountId: String) {
+        while (true) {
+            val current = state.get()
+            val account = requireNotNull(current.accounts[accountId]) {
+                "Pending exclusive lease Account state is absent"
+            }
+            check(account.pendingWriters > 0) {
+                "Pending exclusive lease count is invalid"
+            }
+            val withoutPending = account.copy(
+                pendingWriters = account.pendingWriters - 1,
+            )
+            val updated = current.copy(
+                accounts = current.accounts.withAccountOrPruned(
+                    accountId,
+                    withoutPending,
+                ),
+            )
+            if (publish(current, updated)) {
+                return
+            }
+        }
+    }
+
+    private suspend fun registerPendingGlobalWriter(
+        started: Long,
+        timeoutNanos: Long,
+    ): Boolean {
+        var firstAttempt = true
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            throwIfInterrupted()
+            val remaining = remainingNanos(started, timeoutNanos)
+            if (
+                remaining <= 0 &&
+                !(timeoutNanos == 0L && firstAttempt)
+            ) {
+                return false
+            }
+            val current = state.get()
+            val updated = current.copy(
+                globalPendingWriters = current.globalPendingWriters + 1,
+            )
+            if (publish(current, updated)) {
+                return true
+            }
+            firstAttempt = false
+        }
+    }
+
+    private fun unregisterPendingGlobalWriter() {
+        while (true) {
+            val current = state.get()
+            check(current.globalPendingWriters > 0) {
+                "Pending global exclusive lease count is invalid"
+            }
+            val updated = current.copy(
+                globalPendingWriters = current.globalPendingWriters - 1,
+            )
+            if (publish(current, updated)) {
+                return
+            }
         }
     }
 
@@ -354,59 +554,124 @@ internal class StalwartCredentialLeaseRegistry(
     }
 
     private fun releaseReader(accountId: String) {
-        lock.withLock {
-            val account = requireNotNull(accounts[accountId]) {
+        while (true) {
+            val current = state.get()
+            val account = requireNotNull(current.accounts[accountId]) {
                 "Mail lease Account state is absent"
             }
-            check(account.readers > 0 && activeReaders > 0) {
+            check(account.readers > 0 && current.activeReaders > 0) {
                 "Mail lease reader count is invalid"
             }
-            account.readers -= 1
-            activeReaders -= 1
-            removeIdleAccount(accountId, account)
-            changed.signalAll()
+            val withoutReader = account.copy(readers = account.readers - 1)
+            val updated = current.copy(
+                accounts = current.accounts.withAccountOrPruned(
+                    accountId,
+                    withoutReader,
+                ),
+                activeReaders = current.activeReaders - 1,
+            )
+            if (publish(current, updated)) {
+                return
+            }
         }
     }
 
     private fun releaseWriter(accountId: String) {
-        lock.withLock {
-            val account = requireNotNull(accounts[accountId]) {
+        while (true) {
+            val current = state.get()
+            val account = requireNotNull(current.accounts[accountId]) {
                 "Exclusive lease Account state is absent"
             }
             check(account.writerActive) { "Exclusive lease was not active" }
-            account.writerActive = false
-            removeIdleAccount(accountId, account)
-            changed.signalAll()
+            val withoutWriter = account.copy(writerActive = false)
+            val updated = current.copy(
+                accounts = current.accounts.withAccountOrPruned(
+                    accountId,
+                    withoutWriter,
+                ),
+            )
+            if (publish(current, updated)) {
+                return
+            }
         }
     }
 
     private fun releaseGlobalWriter() {
-        lock.withLock {
-            check(globalWriterActive) { "Global exclusive lease was not active" }
-            globalWriterActive = false
-            changed.signalAll()
+        while (true) {
+            val current = state.get()
+            check(current.globalWriterActive) {
+                "Global exclusive lease was not active"
+            }
+            val updated = current.copy(globalWriterActive = false)
+            if (publish(current, updated)) {
+                return
+            }
         }
     }
 
-    private fun state(accountId: String): AccountLeaseState =
-        accounts.getOrPut(accountId, ::AccountLeaseState)
+    private fun publish(
+        previous: RegistryState,
+        updated: RegistryState,
+    ): Boolean {
+        val next = updated.copy(changed = CompletableDeferred())
+        if (!state.compareAndSet(previous, next)) {
+            return false
+        }
+        previous.changed.complete(Unit)
+        try {
+            stateObserver.changed(next.accounts.size)
+        } catch (_: Exception) {
+            // Test-only observation must never change registry semantics.
+        }
+        return true
+    }
 
-    private fun removeIdleAccount(
+    private suspend fun <Lease : AutoCloseable, Result> handOffLease(
+        lease: Lease,
+        result: Result,
+    ): Result = suspendCancellableCoroutine { continuation ->
+        try {
+            handoffObserver.beforeHandoff()
+            throwIfInterrupted()
+        } catch (failure: Throwable) {
+            lease.close()
+            throw failure
+        }
+        continuation.resume(result) { _, _, _ ->
+            lease.close()
+        }
+    }
+
+    private fun throwIfInterrupted() {
+        if (Thread.currentThread().isInterrupted) {
+            throw InterruptedException("Credential lease drain was interrupted")
+        }
+    }
+
+    private fun Map<String, AccountLeaseState>.withAccountOrPruned(
         accountId: String,
         account: AccountLeaseState,
-    ) {
-        if (
-            account.readers == 0 &&
-            account.pendingWriters == 0 &&
-            !account.writerActive
-        ) {
-            accounts.remove(accountId, account)
+    ): Map<String, AccountLeaseState> =
+        if (account.isIdle) {
+            this - accountId
+        } else {
+            this + (accountId to account)
         }
-    }
 
-    private class AccountLeaseState {
-        var readers = 0
-        var pendingWriters = 0
-        var writerActive = false
+    private data class RegistryState(
+        val accounts: Map<String, AccountLeaseState> = emptyMap(),
+        val activeReaders: Int = 0,
+        val globalPendingWriters: Int = 0,
+        val globalWriterActive: Boolean = false,
+        val changed: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    private data class AccountLeaseState(
+        val readers: Int = 0,
+        val pendingWriters: Int = 0,
+        val writerActive: Boolean = false,
+    ) {
+        val isIdle: Boolean
+            get() = readers == 0 && pendingWriters == 0 && !writerActive
     }
 }

@@ -4,7 +4,10 @@ import java.security.MessageDigest
 import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.withLock
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 internal fun interface StalwartDurableCredentialPhaseObserver {
     fun persisted(
@@ -22,6 +25,7 @@ internal class StalwartMailAccessService(
     protectedAccountIds: Set<String>,
     private val durablePhaseObserver: StalwartDurableCredentialPhaseObserver =
         StalwartDurableCredentialPhaseObserver { _, _ -> },
+    private val definitiveCreatedCleanupTimeout: Duration = 30.seconds,
 ) {
     private val protectedAccountIds = protectedAccountIds.toSet()
     private val storeWriteLock = ReentrantLock()
@@ -29,6 +33,12 @@ internal class StalwartMailAccessService(
     init {
         require(this.protectedAccountIds.none(String::isBlank)) {
             "Protected Stalwart Account ID is absent"
+        }
+        require(
+            definitiveCreatedCleanupTimeout > Duration.ZERO &&
+                definitiveCreatedCleanupTimeout <= 30.seconds
+        ) {
+            "Definitive Created cleanup timeout is invalid"
         }
     }
 
@@ -112,9 +122,8 @@ internal class StalwartMailAccessService(
                     exclusive.lease.use {
                         enrollExclusive(account, normalPassword)
                     }
-                StalwartExclusiveLeaseAcquireResult.TimedOut,
-                StalwartExclusiveLeaseAcquireResult.Interrupted,
-                -> StalwartMailAccessResult.RetryableFailure(
+                StalwartExclusiveLeaseAcquireResult.TimedOut ->
+                    StalwartMailAccessResult.RetryableFailure(
                     projection(
                         account,
                         currentLocalStateOrRecovery(account),
@@ -148,9 +157,8 @@ internal class StalwartMailAccessService(
                     exclusive.lease.use {
                         repairExclusive(account, normalPassword)
                     }
-                StalwartExclusiveLeaseAcquireResult.TimedOut,
-                StalwartExclusiveLeaseAcquireResult.Interrupted,
-                -> StalwartMailAccessResult.RetryableFailure(
+                StalwartExclusiveLeaseAcquireResult.TimedOut ->
+                    StalwartMailAccessResult.RetryableFailure(
                     projection(
                         account,
                         currentLocalStateOrRecovery(account),
@@ -182,9 +190,8 @@ internal class StalwartMailAccessService(
                 exclusive.lease.use {
                     removeExclusive(account)
                 }
-            StalwartExclusiveLeaseAcquireResult.TimedOut,
-            StalwartExclusiveLeaseAcquireResult.Interrupted,
-            -> StalwartMailAccessResult.RetryableFailure(
+            StalwartExclusiveLeaseAcquireResult.TimedOut ->
+                StalwartMailAccessResult.RetryableFailure(
                 projection(
                     account,
                     currentLocalStateOrRecovery(account),
@@ -215,9 +222,8 @@ internal class StalwartMailAccessService(
                     exclusive.lease.use {
                         rotateExclusive(account, normalPassword)
                     }
-                StalwartExclusiveLeaseAcquireResult.TimedOut,
-                StalwartExclusiveLeaseAcquireResult.Interrupted,
-                -> StalwartMailAccessResult.RetryableFailure(
+                StalwartExclusiveLeaseAcquireResult.TimedOut ->
+                    StalwartMailAccessResult.RetryableFailure(
                     projection(
                         account,
                         currentLocalStateOrRecovery(account),
@@ -247,9 +253,8 @@ internal class StalwartMailAccessService(
                 exclusive.lease.use {
                     reconcileAfterRestartExclusive(account)
                 }
-            StalwartExclusiveLeaseAcquireResult.TimedOut,
-            StalwartExclusiveLeaseAcquireResult.Interrupted,
-            -> StalwartMailAccessResult.RetryableFailure(
+            StalwartExclusiveLeaseAcquireResult.TimedOut ->
+                StalwartMailAccessResult.RetryableFailure(
                 projection(
                     account,
                     currentLocalStateOrRecovery(account),
@@ -266,9 +271,8 @@ internal class StalwartMailAccessService(
                 global.lease.use {
                     resetUnavailableStoreExclusive()
                 }
-            StalwartGlobalExclusiveLeaseAcquireResult.TimedOut,
-            StalwartGlobalExclusiveLeaseAcquireResult.Interrupted,
-            -> StalwartCredentialStoreResetResult.RetryableFailure(
+            StalwartGlobalExclusiveLeaseAcquireResult.TimedOut ->
+                StalwartCredentialStoreResetResult.RetryableFailure(
                 StalwartMailAccessReason.LeaseDrainTimedOut,
             )
         }
@@ -702,11 +706,13 @@ internal class StalwartMailAccessService(
             return if (successorReserved == null) {
                 cleanupUnproven(account)
             } else {
-                cleanupRotationSuccessor(
-                    account = account,
-                    local = local,
-                    successor = successorReserved,
-                )
+                cleanupDefinitiveCreated(account) {
+                    cleanupRotationSuccessor(
+                        account = account,
+                        local = local,
+                        successor = successorReserved,
+                    )
+                }
             }
         }
 
@@ -731,11 +737,13 @@ internal class StalwartMailAccessService(
                         replacement = staged,
                     ) != LocalCommitResult.Committed
                 ) {
-                    return cleanupRotationSuccessor(
-                        account = account,
-                        local = local,
-                        successor = successor.reserved,
-                    )
+                    return cleanupDefinitiveCreated(account) {
+                        cleanupRotationSuccessor(
+                            account = account,
+                            local = local,
+                            successor = successor.reserved,
+                        )
+                    }
                 }
                 durablePhaseObserver.persisted(
                     account.accountId,
@@ -1303,11 +1311,13 @@ internal class StalwartMailAccessService(
                 generation,
             )
         ) {
-            return cleanupUncaptured(
-                account = account,
-                cleanReason = StalwartMailAccessReason.CaptureFailed,
-                createdStamp = null,
-            )
+            return cleanupDefinitiveCreated(account) {
+                cleanupUncaptured(
+                    account = account,
+                    cleanReason = StalwartMailAccessReason.CaptureFailed,
+                    createdStamp = null,
+                )
+            }
         }
 
         created.takeSecret().use { captured ->
@@ -1331,11 +1341,13 @@ internal class StalwartMailAccessService(
                     replacement = replacement,
                 )
                 if (commit != LocalCommitResult.Committed) {
-                    return cleanupUncaptured(
-                        account = account,
-                        cleanReason = StalwartMailAccessReason.CaptureFailed,
-                        createdStamp = createdStamp,
-                    )
+                    return cleanupDefinitiveCreated(account) {
+                        cleanupUncaptured(
+                            account = account,
+                            cleanReason = StalwartMailAccessReason.CaptureFailed,
+                            createdStamp = createdStamp,
+                        )
+                    }
                 }
 
                 return when (
@@ -1385,6 +1397,15 @@ internal class StalwartMailAccessService(
                 }
             }
         }
+    }
+
+    private suspend fun cleanupDefinitiveCreated(
+        account: StalwartMailAccount,
+        cleanup: suspend () -> StalwartMailAccessResult,
+    ): StalwartMailAccessResult = withContext(NonCancellable) {
+        withTimeoutOrNull(definitiveCreatedCleanupTimeout) {
+            cleanup()
+        } ?: cleanupUnproven(account)
     }
 
     private suspend fun cleanupUncaptured(

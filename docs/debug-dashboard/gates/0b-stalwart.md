@@ -206,12 +206,18 @@ lifecycle action.
 
 Shared mail leases acquire their reader permit before reloading and probing the
 current generation. Enrollment, repair, rotation, removal, and global reset use
-the exclusive side; a pending writer blocks new readers and drains existing
-readers for at most 30 seconds. Lease-acquisition timeouts or interruption and
-failures detected before mutation dispatch change neither the remote credential
-list nor local lifecycle phase. A stale local revision is never overwritten; if
-detected after creation, only exact successor cleanup is attempted. The
-post-dispatch cancellation boundary is recorded below.
+the exclusive side. Immutable atomic registry state and coroutine change epochs
+let pending writers suspend without occupying dispatcher threads; Account
+writers retain writer priority, and a pending global writer blocks every new
+reader and Account writer. One monotonic deadline covers pending registration,
+all compare-and-set retries, and the complete drain for at most 30 seconds.
+Timeout and coroutine cancellation synchronously remove exactly their pending
+barrier and prune idle Account state. Thread interruption is restored and
+propagated after the same cleanup without loading the credential store. Failures
+detected before mutation dispatch change neither the remote credential list nor
+local lifecycle phase. A stale local revision is never overwritten; if detected
+after creation, only exact successor cleanup is attempted. The post-dispatch
+cancellation boundary is recorded below.
 
 Enrollment inventories first, creates one Account-owned AppPassword with the
 request-scoped normal password, durably captures its read-once secret, and then
@@ -245,14 +251,17 @@ objects are preserved.
 
 Pre-dispatch owner-create and management cancellation propagates. Once owner
 creation may have dispatched, cancellation becomes `ResponseLost` and only the
-service's non-cancellable uncertain-create cleanup runs. Once a management
-patch may have dispatched, cancellation, response loss, and malformed responses
-all proceed only to the one non-cancellable exact post-fetch. No ambiguous
-mutation is retried. Global reset is available only after the local store proves
-unavailable: it enumerates all Accounts, including protected identities,
-verifies the same Account/protection set with a globally empty reserved
-inventory, quarantines the unusable pair, and accepts only a new revision-zero
-empty store with a fresh store ID.
+service's non-cancellable uncertain-create cleanup runs. A definitive
+`Created` result that then fails identity validation or local capture also gets
+one bounded non-cancellable exact cleanup; timeout fails closed to
+`CleanupUnproven`, and no normal lifecycle work is made non-cancellable. Once a
+management patch may have dispatched, cancellation, response loss, and
+malformed responses all proceed only to the one non-cancellable exact
+post-fetch. No ambiguous mutation is retried. Global reset is available only
+after the local store proves unavailable: it enumerates all Accounts, including
+protected identities, verifies the same Account/protection set with a globally
+empty reserved inventory, quarantines the unusable pair, and accepts only a new
+revision-zero empty store with a fresh store ID.
 
 The selected lifecycle live proof exercised project → enrollment → shared lease
 and direct mail probe → rotation → external revocation → recovery → repair →
@@ -279,17 +288,18 @@ shape, close the store, and only then delete the exact validated Gate credential
 root. An independent check found that root absent after the lifecycle run and
 after every restart pair.
 
-Final Task 4 evidence on `2026-07-28` is:
+Final Task 4 quality-fix evidence on `2026-07-28` is:
 
-- focused lifecycle service contracts: `42/42`;
+- focused lifecycle service contracts: `55/55`;
 - focused management adapter contracts: `33/33`;
 - focused credential-store and Gate path contracts: `40/40`;
 - focused bootstrap/live-environment contracts: `11/11`;
 - canonical offline Stalwart Gate contracts, with every `*LiveTest` excluded:
   `73/73`;
 - production/browser-environment suite, with every Stalwart `*LiveTest`
-  excluded: `dashboard-contract` `20/20` and `dashboard-server` `180/180`;
-  `200/200` total, including the Chromium browser gate;
+  excluded: `dashboard-contract` `20/20` and `dashboard-server` `193/193`;
+  `213/213` total, including the Chromium browser gate;
+- complete Kotlin Toolchain build: successful;
 - selected complete lifecycle proof: `1/1`;
 - selected restart preparation/reconciliation proofs: `6/6`.
 
