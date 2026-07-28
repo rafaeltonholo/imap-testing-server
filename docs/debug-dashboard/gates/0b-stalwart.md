@@ -132,10 +132,11 @@ authentication. Targeted management revocation uses one fresh
 `x:Account/get`, one positional credential-leaf removal, and one verification
 fetch; it preserves the sibling AppPassword and every unrelated stable
 credential object without `ifInState` or a blind retry. If the one update's
-response is lost or malformed, cancellation still propagates, but every other
-post-dispatch failure proceeds to that same single exact verification fetch.
-Only the exact expected stable-ID map reports `Revoked`; every other result is
-`ReconciliationRequired`.
+response is lost or malformed, the same single exact verification fetch decides
+the result. Pre-dispatch cancellation propagates; once the update may have
+dispatched, cancellation also proceeds only to that non-cancellable
+verification. Only the exact expected stable-ID map reports `Revoked`; every
+other result is `ReconciliationRequired`.
 
 Credential inventory requests an explicit bounded first page with
 `calculateTotal`, then requires `position == 0` and `total == ids.size` before
@@ -195,16 +196,22 @@ Stalwart Account IDs and the encrypted Task 3 store. An ordinary Account starts
 at `enrollmentRequired`; only one exactly matching, directly authenticated
 `Active` generation projects `ready`. Unknown, malformed, revoked, mismatched,
 or uncaptured reserved credentials fail closed to `recoveryRequired`. Durable
-`Staged` and `Retiring` records project `rotating`, a remotely removed but
-locally unerased record projects `removalPending`, and an unavailable store
-supersedes every Account state. Protected identities expose no lifecycle action.
+`Staged` records require both generations remotely. Durable `Retiring` records
+project `rotating` with either both exact generations or only the exact
+successor, because the old generation may already have been revoked before the
+final local collapse. A remotely removed but locally unerased record projects
+`removalPending`, and an unavailable store supersedes every Account state,
+including enrollment before any remote mutation. Protected identities expose no
+lifecycle action.
 
 Shared mail leases acquire their reader permit before reloading and probing the
 current generation. Enrollment, repair, rotation, removal, and global reset use
 the exclusive side; a pending writer blocks new readers and drains existing
-readers for at most 30 seconds. Timeouts, interruption, cancellation, stale
-local revisions, and unavailable remote state change neither the remote
-credential list nor local lifecycle phase.
+readers for at most 30 seconds. Lease-acquisition timeouts or interruption and
+failures detected before mutation dispatch change neither the remote credential
+list nor local lifecycle phase. A stale local revision is never overwritten; if
+detected after creation, only exact successor cleanup is attempted. The
+post-dispatch cancellation boundary is recorded below.
 
 Enrollment inventories first, creates one Account-owned AppPassword with the
 request-scoped normal password, durably captures its read-once secret, and then
@@ -218,15 +225,34 @@ rejection from the old secret plus successful direct mail from the successor.
 The normal password, AppPassword character/byte handoffs, probe copies, and
 lease copies all have explicit close-and-wipe ownership.
 
+Local compare-and-swap identity covers the complete public record plus a
+process-only SHA-256 fingerprint computed inside the owned secret read. The
+fingerprint has constant-time equality, redacted diagnostics, independent
+ownership, and explicit digest wiping; neither the raw secret nor the
+fingerprint enters the persisted store schema or logs. Same-Account records
+whose public fields match but whose secrets differ therefore cannot be erased,
+merged, or overwritten as an unrelated-revision retry.
+
 The management adapter requires a complete Account query and exact Account
 gets. Each cleanup performs one fresh fetch, one positional multi-leaf patch,
 and one authoritative post-fetch while comparing the full stable credential
-map, so unrelated Password, API-key, and AppPassword objects are preserved.
-Response loss never triggers a blind retry. Global reset is available only
-after the local store proves unavailable: it enumerates all Accounts, including
-protected identities, verifies the same Account/protection set with a globally
-empty reserved inventory, quarantines the unusable pair, and accepts only a new
-revision-zero empty store with a fresh store ID.
+map. Its fresh reserved list must exactly equal the caller's complete expected
+inventory, and the non-empty deletion targets must be a subset. Rotation can
+therefore revoke only the old generation while preserving the exact successor;
+an added, removed, or changed reserved credential before dispatch causes
+reconciliation with no patch. Unrelated Password, API-key, and AppPassword
+objects are preserved.
+
+Pre-dispatch owner-create and management cancellation propagates. Once owner
+creation may have dispatched, cancellation becomes `ResponseLost` and only the
+service's non-cancellable uncertain-create cleanup runs. Once a management
+patch may have dispatched, cancellation, response loss, and malformed responses
+all proceed only to the one non-cancellable exact post-fetch. No ambiguous
+mutation is retried. Global reset is available only after the local store proves
+unavailable: it enumerates all Accounts, including protected identities,
+verifies the same Account/protection set with a globally empty reserved
+inventory, quarantines the unusable pair, and accepts only a new revision-zero
+empty store with a fresh store ID.
 
 The selected lifecycle live proof exercised project → enrollment → shared lease
 and direct mail probe → rotation → external revocation → recovery → repair →
@@ -255,15 +281,15 @@ after every restart pair.
 
 Final Task 4 evidence on `2026-07-28` is:
 
-- focused lifecycle service contracts: `37/37`;
-- focused management adapter contracts: `28/28`;
+- focused lifecycle service contracts: `42/42`;
+- focused management adapter contracts: `33/33`;
 - focused credential-store and Gate path contracts: `40/40`;
 - focused bootstrap/live-environment contracts: `11/11`;
 - canonical offline Stalwart Gate contracts, with every `*LiveTest` excluded:
-  `68/68`;
+  `73/73`;
 - production/browser-environment suite, with every Stalwart `*LiveTest`
-  excluded: `dashboard-contract` `20/20` and `dashboard-server` `170/170`;
-  `190/190` total, including the Chromium browser gate;
+  excluded: `dashboard-contract` `20/20` and `dashboard-server` `180/180`;
+  `200/200` total, including the Chromium browser gate;
 - selected complete lifecycle proof: `1/1`;
 - selected restart preparation/reconciliation proofs: `6/6`.
 

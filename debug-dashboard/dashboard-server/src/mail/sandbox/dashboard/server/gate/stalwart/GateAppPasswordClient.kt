@@ -14,8 +14,10 @@ import io.ktor.http.contentType
 import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -978,17 +980,17 @@ internal class GateManagementAppPasswordRevoker(
                 expectedMethod = "x:Account/set",
             )
             requireManagementResponseAccount(updatePayload)
-        } catch (failure: CancellationException) {
-            throw failure
+        } catch (_: CancellationException) {
+            // Dispatch may have succeeded. Verification is authoritative.
         } catch (_: Exception) {
             // The mutation may have been applied before its response was lost.
             // The single exact verification below is authoritative.
         }
 
         val after = try {
-            credentialEntries(fetchTargetAccount(targetAccountId))
-        } catch (failure: CancellationException) {
-            throw failure
+            withContext(NonCancellable) {
+                credentialEntries(fetchTargetAccount(targetAccountId))
+            }
         } catch (_: Exception) {
             return GateTargetedRevocationResult.ReconciliationRequired
         }
@@ -1197,22 +1199,35 @@ internal class GateStalwartCredentialManagementRemote(
     override suspend fun revokeReserved(
         accountId: String,
         expected: Set<StalwartReservedCredential>,
+        targets: Set<StalwartReservedCredential>,
     ): StalwartRemoteMutationResult = mutex.withLock {
-        revokeReservedLocked(accountId, expected)
+        revokeReservedLocked(accountId, expected, targets)
     }
 
     private suspend fun revokeReservedLocked(
         accountId: String,
         expected: Set<StalwartReservedCredential>,
+        targets: Set<StalwartReservedCredential>,
     ): StalwartRemoteMutationResult {
-        if (!accountId.isSafeGateId() || expected.isEmpty()) {
+        if (
+            !accountId.isSafeGateId() ||
+            expected.isEmpty() ||
+            targets.isEmpty() ||
+            !expected.containsAll(targets)
+        ) {
             return StalwartRemoteMutationResult.ReconciliationRequired
         }
         return try {
             requireManagementSession()
             val before = credentialEntries(fetchExactAccount(accountId))
-            val targets = mutableListOf<LifecycleCredentialEntry>()
-            for (credential in expected) {
+            if (
+                before.reserved.size != expected.size ||
+                before.reserved.toSet() != expected
+            ) {
+                return StalwartRemoteMutationResult.ReconciliationRequired
+            }
+            val targetEntries = mutableListOf<LifecycleCredentialEntry>()
+            for (credential in targets) {
                 val stableId = LifecycleCredentialStableId(
                     type = APP_PASSWORD_TYPE,
                     credentialId = credential.credentialId,
@@ -1224,9 +1239,12 @@ internal class GateStalwartCredentialManagementRemote(
                             "Lifecycle AppPassword description was malformed",
                         ) == credential.description
                 } ?: return StalwartRemoteMutationResult.ReconciliationRequired
-                targets += target
+                targetEntries += target
             }
-            if (targets.map { it.stableId }.toSet().size != targets.size) {
+            if (
+                targetEntries.map { it.stableId }.toSet().size !=
+                targetEntries.size
+            ) {
                 return StalwartRemoteMutationResult.ReconciliationRequired
             }
 
@@ -1236,7 +1254,9 @@ internal class GateStalwartCredentialManagementRemote(
                         objectType = "Account",
                         objectId = accountId,
                         patch = buildJsonObject {
-                            targets.sortedBy { it.mapKey.toUInt() }.forEach {
+                            targetEntries.sortedBy {
+                                it.mapKey.toUInt()
+                            }.forEach {
                                 put("credentials/${it.mapKey}", JsonNull)
                             }
                         },
@@ -1256,15 +1276,22 @@ internal class GateStalwartCredentialManagementRemote(
                         "Lifecycle credential batch update was not exact",
                     )
                 }
-            } catch (failure: CancellationException) {
-                throw failure
+            } catch (_: CancellationException) {
+                // Dispatch may have succeeded. The post-fetch is authoritative.
             } catch (_: Exception) {
                 // Dispatch may have succeeded. The single post-fetch decides.
             }
 
-            val after = credentialEntries(fetchExactAccount(accountId))
+            val after = try {
+                withContext(NonCancellable) {
+                    credentialEntries(fetchExactAccount(accountId))
+                }
+            } catch (_: Exception) {
+                return StalwartRemoteMutationResult.ReconciliationRequired
+            }
             val expectedAfter =
-                before.byStableId - targets.map { it.stableId }.toSet()
+                before.byStableId -
+                    targetEntries.map { it.stableId }.toSet()
             if (after.byStableId == expectedAfter) {
                 StalwartRemoteMutationResult.Verified
             } else {

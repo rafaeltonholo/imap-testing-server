@@ -2,6 +2,9 @@ package mail.sandbox.dashboard.server.gate.stalwart
 
 import java.net.URI
 import java.util.UUID
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccount
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartNormalPassword
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteCreateResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteMutationResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteRead
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartReservedCredential
@@ -853,6 +856,75 @@ class GateAppPasswordClientTest {
         }
 
     @Test
+    fun lifecycleOwnerMapsOnlyPostDispatchCancellationToResponseLost() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "account7",
+                address = GateBootstrap.FIRST_USER_ADDRESS,
+            )
+            val baseUrl = URI("http://127.0.0.1:18443")
+            val sessionResponse = GateHttpResponse(
+                status = 200,
+                effectiveUrl = baseUrl.resolve("/.well-known/jmap"),
+                body = """
+                    {
+                      "apiUrl":"/jmap/",
+                      "username":"${account.address}",
+                      "primaryAccounts":{"urn:stalwart:jmap":"${account.accountId}"}
+                    }
+                """.trimIndent(),
+            )
+            val postDispatchCancellation =
+                CancellationException("post-dispatch create cancellation")
+            val postDispatchTransport = RecordingGateHttpTransport(
+                responses = listOf(sessionResponse),
+                failuresByCall = mapOf(2 to postDispatchCancellation),
+            )
+            val result = StalwartNormalPassword.takeOwnership(
+                "owner-password".toCharArray(),
+            ).use { password ->
+                GateStalwartCredentialOwnerRemote(
+                    baseUrl = baseUrl,
+                    transport = postDispatchTransport,
+                ).createOwned(
+                    account = account,
+                    description =
+                        "mail-sandbox/debug-dashboard/" +
+                            "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+                    normalPassword = password,
+                )
+            }
+
+            assertEquals(StalwartRemoteCreateResult.ResponseLost, result)
+            assertEquals(2, postDispatchTransport.requests.size)
+
+            val preDispatchCancellation =
+                CancellationException("pre-dispatch create cancellation")
+            val preDispatchTransport = RecordingGateHttpTransport(
+                responses = emptyList(),
+                failuresByCall = mapOf(1 to preDispatchCancellation),
+            )
+            val propagated = assertFailsWith<CancellationException> {
+                StalwartNormalPassword.takeOwnership(
+                    "owner-password".toCharArray(),
+                ).use { password ->
+                    GateStalwartCredentialOwnerRemote(
+                        baseUrl = baseUrl,
+                        transport = preDispatchTransport,
+                    ).createOwned(
+                        account = account,
+                        description =
+                            "mail-sandbox/debug-dashboard/" +
+                                "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+                        normalPassword = password,
+                    )
+                }
+            }
+            assertSame(preDispatchCancellation, propagated)
+            assertEquals(1, preDispatchTransport.requests.size)
+        }
+
+    @Test
     fun secretMutationDenialRequiresAnExactlyEmptyUpdatedMap() = runBlocking {
         val ownerAccountId = "account7"
         val credentialId = "credential2"
@@ -1289,6 +1361,280 @@ class GateAppPasswordClientTest {
         }
 
     @Test
+    fun lifecycleManagementRevokesOnlyTheTargetFromAnExactReservedInventory() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val targetAccountId = "account7"
+            val old = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val successor = StalwartReservedCredential(
+                credentialId = "credential3",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/3",
+            )
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getResponses = listOf(
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = targetAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "17":${appPasswordCredential(
+                                  credentialId = old.credentialId,
+                                  description = old.description,
+                              )},
+                              "29":${appPasswordCredential(
+                                  credentialId = successor.credentialId,
+                                  description = successor.description,
+                              )}
+                            }
+                        """.trimIndent(),
+                    ),
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = targetAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "29":${appPasswordCredential(
+                                  credentialId = successor.credentialId,
+                                  description = successor.description,
+                              )}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+                updateResponses = listOf(
+                    registryResponse(
+                        method = "x:Account/set",
+                        payload = """
+                            {
+                              "accountId":"$managementAccountId",
+                              "updated":{"$targetAccountId":null},
+                              "notUpdated":{}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).revokeReserved(
+                accountId = targetAccountId,
+                expected = setOf(old, successor),
+                targets = setOf(old),
+            )
+
+            assertEquals(StalwartRemoteMutationResult.Verified, result)
+            assertEquals(
+                buildJsonObject {
+                    put("credentials/17", JsonNull)
+                },
+                registry.updates.single().patch,
+            )
+            assertEquals(2, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleManagementRejectsAReservedListThatChangedBeforeDispatch() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val targetAccountId = "account7"
+            val expected = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val newlyObserved = StalwartReservedCredential(
+                credentialId = "credential3",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/3",
+            )
+            val sibling = appPasswordCredential(
+                credentialId = "credential4",
+                description = "team-owned/unrelated",
+            )
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getResponses = listOf(
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = targetAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "17":${appPasswordCredential(
+                                  credentialId = expected.credentialId,
+                                  description = expected.description,
+                              )},
+                              "29":${appPasswordCredential(
+                                  credentialId = newlyObserved.credentialId,
+                                  description = newlyObserved.description,
+                              )},
+                              "49":$sibling
+                            }
+                        """.trimIndent(),
+                    ),
+                    accountGetResponse(
+                        requestAccountId = managementAccountId,
+                        objectAccountId = targetAccountId,
+                        credentials = """
+                            {
+                              "0":${passwordCredential()},
+                              "29":${appPasswordCredential(
+                                  credentialId = newlyObserved.credentialId,
+                                  description = newlyObserved.description,
+                              )},
+                              "49":$sibling
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+                updateResponses = listOf(
+                    registryResponse(
+                        method = "x:Account/set",
+                        payload = """
+                            {
+                              "accountId":"$managementAccountId",
+                              "updated":{"$targetAccountId":null},
+                              "notUpdated":{}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).revokeReserved(
+                accountId = targetAccountId,
+                expected = setOf(expected),
+            )
+
+            assertEquals(
+                StalwartRemoteMutationResult.ReconciliationRequired,
+                result,
+            )
+            assertTrue(registry.updates.isEmpty())
+            assertEquals(1, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleManagementVerifiesAfterPostDispatchCancellation() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val targetAccountId = "account7"
+            val target = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val before = accountGetResponse(
+                requestAccountId = managementAccountId,
+                objectAccountId = targetAccountId,
+                credentials = """
+                    {
+                      "0":${passwordCredential()},
+                      "17":${appPasswordCredential(
+                          credentialId = target.credentialId,
+                          description = target.description,
+                      )}
+                    }
+                """.trimIndent(),
+            )
+            val after = accountGetResponse(
+                requestAccountId = managementAccountId,
+                objectAccountId = targetAccountId,
+                credentials = """{"0":${passwordCredential()}}""",
+            )
+            val updateCancellation =
+                CancellationException("post-dispatch revoke cancellation")
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getResponses = listOf(before, after),
+                updateFailures = listOf(updateCancellation),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).revokeReserved(
+                accountId = targetAccountId,
+                expected = setOf(target),
+            )
+
+            assertEquals(StalwartRemoteMutationResult.Verified, result)
+            assertEquals(1, registry.updates.size)
+            assertEquals(2, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleManagementPropagatesCancellationBeforeMutationDispatch() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val targetAccountId = "account7"
+            val target = StalwartReservedCredential(
+                credentialId = "credential2",
+                description =
+                    "mail-sandbox/debug-dashboard/" +
+                        "0f34f2c8-779f-4cc2-b4be-e3a6ef8f27f8/2",
+            )
+            val preDispatchCancellation =
+                CancellationException("pre-dispatch revoke cancellation")
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                getFailuresByCall = mapOf(1 to preDispatchCancellation),
+            )
+
+            val propagated = assertFailsWith<CancellationException> {
+                GateStalwartCredentialManagementRemote(
+                    registry = registry,
+                    managementAccountId = managementAccountId,
+                    protectedAccountIds = setOf(managementAccountId),
+                ).revokeReserved(
+                    accountId = targetAccountId,
+                    expected = setOf(target),
+                )
+            }
+
+            assertSame(preDispatchCancellation, propagated)
+            assertTrue(registry.updates.isEmpty())
+            assertEquals(1, registry.gets.size)
+        }
+
+    @Test
     fun lifecycleGlobalInventoryRequiresCompleteQueryAndIncludesProtected() =
         runBlocking {
             val managementAccountId = "management7"
@@ -1581,7 +1927,7 @@ class GateAppPasswordClientTest {
         }
 
     @Test
-    fun managementRevocationPropagatesUpdateAndPostFetchCancellation() =
+    fun managementRevocationPropagatesBeforeDispatchAndVerifiesAfterDispatch() =
         runBlocking {
             val managementAccountId = "management7"
             val targetAccountId = "account7"
@@ -1603,19 +1949,44 @@ class GateAppPasswordClientTest {
                     }
                 """.trimIndent(),
             )
+            val after = accountGetResponse(
+                requestAccountId = managementAccountId,
+                objectAccountId = targetAccountId,
+                credentials = """{"0":${passwordCredential()}}""",
+            )
             val session = GateJmapSession(
                 apiUrl = URI("http://127.0.0.1:18443/jmap/"),
                 username = GateBootstrap.MANAGEMENT_ADDRESS,
                 primaryAccountId = managementAccountId,
             )
 
+            val preDispatchCancellation =
+                CancellationException("pre-dispatch cancelled")
+            val preDispatchCancelled = RecordingAppPasswordRegistry(
+                session = session,
+                getFailuresByCall = mapOf(1 to preDispatchCancellation),
+            )
+            val propagated = assertFailsWith<CancellationException> {
+                GateManagementAppPasswordRevoker(
+                    registry = preDispatchCancelled,
+                    managementAccountId = managementAccountId,
+                ).revoke(
+                    targetAccountId = targetAccountId,
+                    targetCredentialId = targetCredentialId,
+                    expectedDescription = targetDescription,
+                )
+            }
+            assertSame(preDispatchCancellation, propagated)
+            assertTrue(preDispatchCancelled.updates.isEmpty())
+            assertEquals(1, preDispatchCancelled.gets.size)
+
             val updateCancellation = CancellationException("update cancelled")
             val updateCancelled = RecordingAppPasswordRegistry(
                 session = session,
-                getResponses = listOf(before),
+                getResponses = listOf(before, after),
                 updateFailures = listOf(updateCancellation),
             )
-            val propagatedUpdate = assertFailsWith<CancellationException> {
+            val reconciledUpdate =
                 GateManagementAppPasswordRevoker(
                     registry = updateCancelled,
                     managementAccountId = managementAccountId,
@@ -1624,10 +1995,12 @@ class GateAppPasswordClientTest {
                     targetCredentialId = targetCredentialId,
                     expectedDescription = targetDescription,
                 )
-            }
-            assertSame(updateCancellation, propagatedUpdate)
+            assertEquals(
+                GateTargetedRevocationResult.Revoked,
+                reconciledUpdate,
+            )
             assertEquals(1, updateCancelled.updates.size)
-            assertEquals(1, updateCancelled.gets.size)
+            assertEquals(2, updateCancelled.gets.size)
 
             val postFetchCancellation = CancellationException("post-fetch cancelled")
             val postFetchCancelled = RecordingAppPasswordRegistry(
@@ -1647,7 +2020,7 @@ class GateAppPasswordClientTest {
                     ),
                 ),
             )
-            val propagatedPostFetch = assertFailsWith<CancellationException> {
+            val reconciledPostFetch =
                 GateManagementAppPasswordRevoker(
                     registry = postFetchCancelled,
                     managementAccountId = managementAccountId,
@@ -1656,8 +2029,10 @@ class GateAppPasswordClientTest {
                     targetCredentialId = targetCredentialId,
                     expectedDescription = targetDescription,
                 )
-            }
-            assertSame(postFetchCancellation, propagatedPostFetch)
+            assertEquals(
+                GateTargetedRevocationResult.ReconciliationRequired,
+                reconciledPostFetch,
+            )
             assertEquals(1, postFetchCancelled.updates.size)
             assertEquals(2, postFetchCancelled.gets.size)
         }
@@ -1914,12 +2289,14 @@ class GateAppPasswordClientTest {
 
     private class RecordingGateHttpTransport(
         responses: List<GateHttpResponse>,
+        private val failuresByCall: Map<Int, Exception> = emptyMap(),
     ) : GateHttpTransport {
         private val responses = ArrayDeque(responses)
         val requests = mutableListOf<GateHttpRequest>()
 
         override suspend fun execute(request: GateHttpRequest): GateHttpResponse {
             requests += request
+            failuresByCall[requests.size]?.let { throw it }
             return responses.removeFirst()
         }
     }

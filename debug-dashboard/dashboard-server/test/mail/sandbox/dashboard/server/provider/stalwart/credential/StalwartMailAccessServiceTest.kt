@@ -6,6 +6,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -121,6 +126,52 @@ class StalwartMailAccessServiceTest {
     }
 
     @Test
+    fun retiringProjectionStaysRotatingWhenOnlyTheSuccessorRemainsRemote() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "retiring-projection",
+                address = "retiring-projection@local.test",
+            )
+            val store = FakeCredentialStore()
+            val old = generationSpec(store.storeId, 4)
+            val successor = generationSpec(store.storeId, 5)
+            store.record = recordSpec(
+                account = account,
+                phase = CredentialPhase.Retiring,
+                active = successor,
+                other = old,
+            )
+            val management = FakeManagementRemote().also {
+                it.inventory = availableInventory(
+                    account.accountId,
+                    reserved(successor),
+                )
+            }
+            val service = service(
+                store = store,
+                management = management,
+                probe = FakeProbeRemote(),
+            )
+
+            assertEquals(
+                projection(StalwartMailAccessState.Rotating),
+                service.project(account),
+            )
+
+            management.inventory = availableInventory(
+                account.accountId,
+                reserved(old),
+            )
+            assertEquals(
+                projection(
+                    StalwartMailAccessState.RecoveryRequired,
+                    StalwartMailAccessAction.Repair,
+                ),
+                service.project(account),
+            )
+        }
+
+    @Test
     fun malformedMismatchedUncapturedAndOrphanReservedCredentialsNeedRecovery() =
         runBlocking {
             val storeId = UUID.fromString("94c97c02-2960-4550-8d43-15bbde1a27d4")
@@ -213,6 +264,46 @@ class StalwartMailAccessServiceTest {
                 service.project(protectedAccount),
             )
             assertEquals(0, management.inventoryCalls)
+        }
+
+    @Test
+    fun unavailableStoreSupersedesEnrollmentBeforeAnyRemoteMutation() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "unavailable-enrollment",
+                address = "unavailable-enrollment@local.test",
+            )
+            val store = FakeCredentialStore().also {
+                it.available = false
+            }
+            val management = FakeManagementRemote()
+            val owner = FakeOwnerRemote()
+            val passwordChars = "unavailable-password".toCharArray()
+
+            val result = service(
+                store = store,
+                management = management,
+                probe = FakeProbeRemote(),
+                owner = owner,
+            ).enroll(
+                account,
+                StalwartNormalPassword.takeOwnership(passwordChars),
+            )
+
+            val reconciliation =
+                assertIs<StalwartMailAccessResult.ReconciliationRequired>(result)
+            assertEquals(
+                projection(StalwartMailAccessState.StoreUnavailable),
+                reconciliation.projection,
+            )
+            assertEquals(
+                StalwartMailAccessReason.LocalStoreUnavailable,
+                reconciliation.reason,
+            )
+            assertEquals(0, management.inventoryCalls)
+            assertEquals(0, owner.createCalls)
+            assertEquals(0, store.replaceCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
         }
 
     @Test
@@ -544,6 +635,54 @@ class StalwartMailAccessServiceTest {
         }
 
     @Test
+    fun postDispatchCreateCancellationCompletesOnlyUncertainCleanup() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "cancelled-create",
+                address = "cancelled-create@local.test",
+            )
+            val store = FakeCredentialStore()
+            val orphan = StalwartReservedCredential(
+                credentialId = "cancelled-created-id",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/1",
+            )
+            val management = FakeManagementRemote().also {
+                it.inventoryResults += availableInventory(account.accountId)
+                it.inventoryResults +=
+                    availableInventory(account.accountId, orphan)
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.requireActiveAfterInventoryCall = 1
+            }
+            val cancellation =
+                CancellationException("post-dispatch create cancellation")
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.ResponseLost
+                it.cancellationAfterDispatch = cancellation
+            }
+            val passwordChars = "cancelled-create-password".toCharArray()
+
+            val operation = launch {
+                service(
+                    store = store,
+                    management = management,
+                    probe = FakeProbeRemote(),
+                    owner = owner,
+                ).enroll(
+                    account,
+                    StalwartNormalPassword.takeOwnership(passwordChars),
+                )
+            }
+            operation.join()
+
+            assertTrue(operation.isCancelled)
+            assertEquals(2, management.inventoryCalls)
+            assertEquals(listOf(setOf(orphan)), management.revocations)
+            assertEquals(0, store.replaceCalls)
+            assertTrue(passwordChars.all { it == '\u0000' })
+        }
+
+    @Test
     fun captureFailureCleansRemoteAndAmbiguousCleanupStaysRecoveryRequired() =
         runBlocking {
             val account = StalwartMailAccount(
@@ -652,6 +791,86 @@ class StalwartMailAccessServiceTest {
             )
             assertEquals(2, store.replaceCalls)
             assertTrue(store.recordSpecs.isEmpty())
+            assertEquals(listOf(setOf(remoteCredential)), management.revocations)
+        }
+
+    @Test
+    fun uncertainCaptureNeverErasesPubliclyMatchingRecordWithDifferentSecret() =
+        runBlocking {
+            val account = StalwartMailAccount(
+                accountId = "uncertain-secret-race",
+                address = "uncertain-secret-race@local.test",
+            )
+            val store = FakeCredentialStore().also {
+                it.applyThenUnavailableOnce = true
+            }
+            val remoteCredential = StalwartReservedCredential(
+                credentialId = "uncertain-secret-created",
+                description =
+                    "mail-sandbox/debug-dashboard/${store.storeId}/1",
+            )
+            val concurrentSecret =
+                "app_concurrent_uncertain_secret".encodeToByteArray()
+            val management = FakeManagementRemote().also {
+                it.inventoryResults += availableInventory(account.accountId)
+                it.inventoryResults +=
+                    availableInventory(account.accountId, remoteCredential)
+                it.mutationResult = StalwartRemoteMutationResult.Verified
+                it.onRevoke = {
+                    store.record = recordSpec(
+                        account = account,
+                        phase = CredentialPhase.Active,
+                        active = GenerationSpec(
+                            credentialId = remoteCredential.credentialId,
+                            description = remoteCredential.description,
+                            generation = 1,
+                            secret = concurrentSecret,
+                        ),
+                    )
+                    store.revision += 1
+                }
+            }
+            val owner = FakeOwnerRemote().also {
+                it.results += StalwartRemoteCreateResult.Created(
+                    StalwartCreatedCredential(
+                        credentialId = remoteCredential.credentialId,
+                        description = remoteCredential.description,
+                        secret = "app_uncertain_original".encodeToByteArray(),
+                    ),
+                )
+            }
+
+            val result = service(
+                store = store,
+                management = management,
+                probe = FakeProbeRemote(),
+                owner = owner,
+            ).enroll(
+                account,
+                StalwartNormalPassword.takeOwnership(
+                    "uncertain-secret-password".toCharArray(),
+                ),
+            )
+
+            val reconciliation =
+                assertIs<StalwartMailAccessResult.ReconciliationRequired>(result)
+            assertEquals(
+                StalwartMailAccessState.RecoveryRequired,
+                reconciliation.projection.state,
+            )
+            assertEquals(
+                StalwartMailAccessReason.CleanupUnproven,
+                reconciliation.reason,
+            )
+            assertEquals(1, store.replaceCalls)
+            assertEquals(
+                remoteCredential.credentialId,
+                store.record?.active?.credentialId,
+            )
+            assertContentEquals(
+                concurrentSecret,
+                store.record?.active?.secret,
+            )
             assertEquals(listOf(setOf(remoteCredential)), management.revocations)
         }
 
@@ -1093,6 +1312,10 @@ class StalwartMailAccessServiceTest {
                 events,
             )
             assertEquals(listOf(setOf(reserved(old))), management.revocations)
+            assertEquals(
+                listOf(setOf(reserved(old), successor)),
+                management.revocationExpectedInventories,
+            )
             assertEquals(CredentialPhase.Active, store.record?.phase)
             assertEquals(successor.credentialId, store.record?.active?.credentialId)
             assertEquals(2, store.record?.active?.generation)
@@ -1238,6 +1461,10 @@ class StalwartMailAccessServiceTest {
 
         assertIs<StalwartMailAccessResult.ReconciliationRequired>(result)
         assertEquals(listOf(setOf(successor)), management.revocations)
+        assertEquals(
+            listOf(setOf(reserved(old), successor)),
+            management.revocationExpectedInventories,
+        )
         assertEquals(1, owner.createCalls)
         assertEquals(1, store.replaceCalls)
         assertEquals(CredentialPhase.Active, store.record?.phase)
@@ -1413,6 +1640,10 @@ class StalwartMailAccessServiceTest {
             )
             assertEquals(0, owner.createCalls)
             assertEquals(listOf(setOf(reserved(old))), management.revocations)
+            assertEquals(
+                listOf(setOf(reserved(old), reserved(successor))),
+                management.revocationExpectedInventories,
+            )
             assertEquals(CredentialPhase.Active, store.record?.phase)
             assertEquals(successor.credentialId, store.record?.active?.credentialId)
             assertNull(store.record?.other)
@@ -1475,6 +1706,10 @@ class StalwartMailAccessServiceTest {
             assertEquals(
                 listOf(setOf(reserved(successor))),
                 management.revocations,
+            )
+            assertEquals(
+                listOf(setOf(reserved(old), reserved(successor))),
+                management.revocationExpectedInventories,
             )
             assertEquals(CredentialPhase.Active, store.record?.phase)
             assertEquals(old.credentialId, store.record?.active?.credentialId)
@@ -2017,6 +2252,77 @@ class StalwartMailAccessServiceTest {
             assertEquals(listOf(setOf(createdRemote)), management.revocations)
         }
 
+    @Test
+    fun secretOnlySameAccountCasConflictIsNeverOverwritten() = runBlocking {
+        val account = StalwartMailAccount(
+            accountId = "same-account-secret-race",
+            address = "same-account-secret-race@local.test",
+        )
+        val store = FakeCredentialStore()
+        val old = generationSpec(store.storeId, 1)
+        val concurrentSecret = "app_concurrent_secret_only".encodeToByteArray()
+        store.record = recordSpec(account, CredentialPhase.Active, old)
+        store.beforeFirstReplace = {
+            it.putRecord(
+                recordSpec(
+                    account = account,
+                    phase = CredentialPhase.Active,
+                    active = old.copy(secret = concurrentSecret),
+                ),
+            )
+            it.revision += 1
+        }
+        val successor = StalwartReservedCredential(
+            credentialId = "same-secret-successor",
+            description =
+                "mail-sandbox/debug-dashboard/${store.storeId}/2",
+        )
+        val management = FakeManagementRemote().also {
+            it.inventory = availableInventory(
+                account.accountId,
+                reserved(old),
+            )
+            it.mutationResult = StalwartRemoteMutationResult.Verified
+        }
+        val owner = FakeOwnerRemote().also {
+            it.results += StalwartRemoteCreateResult.Created(
+                StalwartCreatedCredential(
+                    credentialId = successor.credentialId,
+                    description = successor.description,
+                    secret = "app_same_secret_successor".encodeToByteArray(),
+                ),
+            )
+        }
+
+        val result = service(
+            store = store,
+            management = management,
+            probe = FakeProbeRemote(),
+            owner = owner,
+        ).rotate(
+            account,
+            StalwartNormalPassword.takeOwnership(
+                "same-secret-race-password".toCharArray(),
+            ),
+        )
+
+        val reconciliation =
+            assertIs<StalwartMailAccessResult.ReconciliationRequired>(result)
+        assertEquals(
+            StalwartMailAccessState.RecoveryRequired,
+            reconciliation.projection.state,
+        )
+        assertEquals(
+            StalwartMailAccessReason.CaptureFailed,
+            reconciliation.reason,
+        )
+        assertEquals(1, owner.createCalls)
+        assertEquals(1, store.replaceCalls)
+        assertEquals(CredentialPhase.Active, store.record?.phase)
+        assertContentEquals(concurrentSecret, store.record?.active?.secret)
+        assertEquals(listOf(setOf(successor)), management.revocations)
+    }
+
     private fun acquiredLease(
         registry: StalwartCredentialLeaseRegistry,
         accountId: String,
@@ -2308,6 +2614,10 @@ class StalwartMailAccessServiceTest {
         var mutationResult = StalwartRemoteMutationResult.Verified
         val revocations =
             mutableListOf<Set<StalwartReservedCredential>>()
+        val revocationExpectedInventories =
+            mutableListOf<Set<StalwartReservedCredential>>()
+        var onRevoke: (() -> Unit)? = null
+        var requireActiveAfterInventoryCall: Int? = null
         var globalInventory:
             StalwartRemoteRead<StalwartGlobalReservedInventory> =
             StalwartRemoteRead.Unavailable
@@ -2319,6 +2629,9 @@ class StalwartMailAccessServiceTest {
             accountId: String,
         ): StalwartRemoteRead<StalwartReservedInventory> {
             inventoryCalls += 1
+            requireActiveAfterInventoryCall
+                ?.takeIf { inventoryCalls > it }
+                ?.let { currentCoroutineContext().ensureActive() }
             events?.add("inventory:$accountId")
             return inventoryResults.removeFirstOrNull() ?: inventory
         }
@@ -2334,9 +2647,15 @@ class StalwartMailAccessServiceTest {
         override suspend fun revokeReserved(
             accountId: String,
             expected: Set<StalwartReservedCredential>,
+            targets: Set<StalwartReservedCredential>,
         ): StalwartRemoteMutationResult {
-            revocations += expected
+            revocationExpectedInventories += expected
+            revocations += targets
             events?.add("revoke:$accountId")
+            onRevoke?.also {
+                onRevoke = null
+                it()
+            }
             return mutationResult
         }
     }
@@ -2366,6 +2685,7 @@ class StalwartMailAccessServiceTest {
     ) : StalwartCredentialOwnerRemote {
         val results = mutableListOf<StalwartRemoteCreateResult>()
         var onCreate: (() -> Unit)? = null
+        var cancellationAfterDispatch: CancellationException? = null
         var createCalls = 0
 
         override suspend fun createOwned(
@@ -2381,6 +2701,10 @@ class StalwartMailAccessServiceTest {
             onCreate?.also {
                 onCreate = null
                 it()
+            }
+            cancellationAfterDispatch?.also {
+                cancellationAfterDispatch = null
+                currentCoroutineContext().cancel(it)
             }
             return results.removeFirstOrNull()
                 ?: error("Unexpected owner credential create")

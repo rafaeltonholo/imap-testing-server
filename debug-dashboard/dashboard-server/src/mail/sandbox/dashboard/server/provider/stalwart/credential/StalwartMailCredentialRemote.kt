@@ -166,11 +166,14 @@ internal interface StalwartCredentialManagementRemote {
 
     /**
      * The implementation must perform one fresh Account fetch, one batch patch,
-     * and one authoritative verification while preserving every unrelated value.
+     * and one authoritative verification. The fresh reserved inventory must
+     * exactly match [expected], [targets] must be a non-empty subset, and every
+     * non-target value must be preserved.
      */
     suspend fun revokeReserved(
         accountId: String,
         expected: Set<StalwartReservedCredential>,
+        targets: Set<StalwartReservedCredential> = expected,
     ): StalwartRemoteMutationResult
 }
 

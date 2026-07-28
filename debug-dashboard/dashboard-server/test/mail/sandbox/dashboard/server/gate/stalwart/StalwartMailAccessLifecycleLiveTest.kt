@@ -728,7 +728,11 @@ internal class GateStalwartCredentialOwnerRemote(
                 }
             }
         } catch (failure: CancellationException) {
-            throw failure
+            if (dispatched) {
+                StalwartRemoteCreateResult.ResponseLost
+            } else {
+                throw failure
+            }
         } catch (failure: GateJmapException) {
             if (dispatched) {
                 StalwartRemoteCreateResult.ResponseLost

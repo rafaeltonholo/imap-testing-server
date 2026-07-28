@@ -1,6 +1,9 @@
 package mail.sandbox.dashboard.server.provider.stalwart.credential
 
+import java.security.MessageDigest
 import java.util.concurrent.locks.ReentrantLock
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
 
 internal fun interface StalwartDurableCredentialPhaseObserver {
@@ -276,9 +279,19 @@ internal class StalwartMailAccessService(
     ): StalwartMailAccessResult {
         val local = enrollmentLocalContext(account)
             ?: return StalwartMailAccessResult.ReconciliationRequired(
-                projection(account, StalwartMailAccessState.RecoveryRequired),
+                projection(account, StalwartMailAccessState.StoreUnavailable),
                 StalwartMailAccessReason.LocalStoreUnavailable,
             )
+        return local.use { owned ->
+            enrollExclusive(account, normalPassword, owned)
+        }
+    }
+
+    private suspend fun enrollExclusive(
+        account: StalwartMailAccount,
+        normalPassword: StalwartNormalPassword,
+        local: EnrollmentLocalContext,
+    ): StalwartMailAccessResult {
         if (local.expected != null) {
             return StalwartMailAccessResult.ReconciliationRequired(
                 projection(account, StalwartMailAccessState.RecoveryRequired),
@@ -336,11 +349,13 @@ internal class StalwartMailAccessService(
                     created = create.credential,
                 )
             StalwartRemoteCreateResult.ResponseLost ->
-                cleanupUncaptured(
-                    account = account,
-                    cleanReason = StalwartMailAccessReason.CaptureFailed,
-                    createdStamp = null,
-                )
+                withContext(NonCancellable) {
+                    cleanupUncaptured(
+                        account = account,
+                        cleanReason = StalwartMailAccessReason.CaptureFailed,
+                        createdStamp = null,
+                    )
+                }
             StalwartRemoteCreateResult.Rejected ->
                 StalwartMailAccessResult.RetryableFailure(
                     projection(
@@ -369,6 +384,16 @@ internal class StalwartMailAccessService(
                 projection(account, StalwartMailAccessState.StoreUnavailable),
                 StalwartMailAccessReason.LocalStoreUnavailable,
             )
+        return local.use { owned ->
+            repairExclusive(account, normalPassword, owned)
+        }
+    }
+
+    private suspend fun repairExclusive(
+        account: StalwartMailAccount,
+        normalPassword: StalwartNormalPassword,
+        local: EnrollmentLocalContext,
+    ): StalwartMailAccessResult {
         val inventory = when (
             val remote = management.inventory(account.accountId)
         ) {
@@ -427,11 +452,13 @@ internal class StalwartMailAccessService(
                     created = create.credential,
                 )
             StalwartRemoteCreateResult.ResponseLost ->
-                cleanupUncaptured(
-                    account = account,
-                    cleanReason = StalwartMailAccessReason.CaptureFailed,
-                    createdStamp = null,
-                )
+                withContext(NonCancellable) {
+                    cleanupUncaptured(
+                        account = account,
+                        cleanReason = StalwartMailAccessReason.CaptureFailed,
+                        createdStamp = null,
+                    )
+                }
             StalwartRemoteCreateResult.Rejected ->
                 StalwartMailAccessResult.ReconciliationRequired(
                     projection(
@@ -454,86 +481,93 @@ internal class StalwartMailAccessService(
     private suspend fun removeExclusive(
         account: StalwartMailAccount,
     ): StalwartMailAccessResult {
-        val expected = localRecordStamp(account)
+        val local = localRecordStamp(account)
             ?: return StalwartMailAccessResult.ReconciliationRequired(
                 projection(account, StalwartMailAccessState.StoreUnavailable),
                 StalwartMailAccessReason.LocalStoreUnavailable,
             )
-        val inventory = when (
-            val remote = management.inventory(account.accountId)
-        ) {
-            is StalwartRemoteRead.Available -> remote.value
-            StalwartRemoteRead.Unavailable ->
-                return StalwartMailAccessResult.RetryableFailure(
+        try {
+            val inventory = when (
+                val remote = management.inventory(account.accountId)
+            ) {
+                is StalwartRemoteRead.Available -> remote.value
+                StalwartRemoteRead.Unavailable ->
+                    return StalwartMailAccessResult.RetryableFailure(
+                        projection(
+                            account,
+                            StalwartMailAccessState.RecoveryRequired,
+                        ),
+                        StalwartMailAccessReason.RemoteUnavailable,
+                    )
+            }
+            if (inventory.accountId != account.accountId) {
+                return StalwartMailAccessResult.ReconciliationRequired(
                     projection(
                         account,
                         StalwartMailAccessState.RecoveryRequired,
                     ),
-                    StalwartMailAccessReason.RemoteUnavailable,
+                    StalwartMailAccessReason.RemoteStateChanged,
                 )
-        }
-        if (inventory.accountId != account.accountId) {
-            return StalwartMailAccessResult.ReconciliationRequired(
-                projection(account, StalwartMailAccessState.RecoveryRequired),
-                StalwartMailAccessReason.RemoteStateChanged,
-            )
-        }
-        if (
-            inventory.reserved.isNotEmpty() &&
-            management.revokeReserved(
-                accountId = account.accountId,
-                expected = inventory.reserved.toSet(),
-            ) != StalwartRemoteMutationResult.Verified
-        ) {
-            return cleanupUnproven(account)
-        }
-        if (expected.stamp == null) {
-            return StalwartMailAccessResult.Completed(
-                projection(
-                    account,
-                    StalwartMailAccessState.EnrollmentRequired,
-                ),
-            )
-        }
+            }
+            if (
+                inventory.reserved.isNotEmpty() &&
+                management.revokeReserved(
+                    accountId = account.accountId,
+                    expected = inventory.reserved.toSet(),
+                ) != StalwartRemoteMutationResult.Verified
+            ) {
+                return cleanupUnproven(account)
+            }
+            val expected = local.stamp
+                ?: return StalwartMailAccessResult.Completed(
+                    projection(
+                        account,
+                        StalwartMailAccessState.EnrollmentRequired,
+                    ),
+                )
 
-        val marker = removalPendingRecord(
-            account = account,
-            expected = expected.stamp,
-        ) ?: return cleanupUnproven(account)
-        val markerStamp = marker.stamp()
-        val marked = commitAccount(
-            accountId = account.accountId,
-            expected = expected.stamp,
-            replacement = marker,
-        )
-        if (marked != LocalCommitResult.Committed) {
-            return removalFailureAfterWrite(
+            val marker = removalPendingRecord(
                 account = account,
-                markerStamp = markerStamp,
-            )
-        }
-        durablePhaseObserver.persisted(
-            account.accountId,
-            CredentialPhase.RemovalPending,
-        )
+                expected = expected,
+            ) ?: return cleanupUnproven(account)
+            marker.stamp().use { markerStamp ->
+                val marked = commitAccount(
+                    accountId = account.accountId,
+                    expected = expected,
+                    replacement = marker,
+                )
+                if (marked != LocalCommitResult.Committed) {
+                    return removalFailureAfterWrite(
+                        account = account,
+                        markerStamp = markerStamp,
+                    )
+                }
+                durablePhaseObserver.persisted(
+                    account.accountId,
+                    CredentialPhase.RemovalPending,
+                )
 
-        val erased = commitAccount(
-            accountId = account.accountId,
-            expected = markerStamp,
-            replacement = null,
-        )
-        if (erased == LocalCommitResult.Committed) {
-            return StalwartMailAccessResult.Completed(
-                projection(
-                    account,
-                    StalwartMailAccessState.EnrollmentRequired,
-                ),
-            )
+                val erased = commitAccount(
+                    accountId = account.accountId,
+                    expected = markerStamp,
+                    replacement = null,
+                )
+                if (erased == LocalCommitResult.Committed) {
+                    return StalwartMailAccessResult.Completed(
+                        projection(
+                            account,
+                            StalwartMailAccessState.EnrollmentRequired,
+                        ),
+                    )
+                }
+                return removalFailureAfterWrite(
+                    account = account,
+                    markerStamp = markerStamp,
+                )
+            }
+        } finally {
+            local.close()
         }
-        return removalFailureAfterWrite(
-            account = account,
-            markerStamp = markerStamp,
-        )
     }
 
     private suspend fun rotateExclusive(
@@ -616,11 +650,13 @@ internal class StalwartMailAccessService(
                         created = create.credential,
                     )
                 StalwartRemoteCreateResult.ResponseLost ->
-                    cleanupLostRotationResponse(
-                        account = account,
-                        local = local,
-                        expectedDescription = description,
-                    )
+                    withContext(NonCancellable) {
+                        cleanupLostRotationResponse(
+                            account = account,
+                            local = local,
+                            expectedDescription = description,
+                        )
+                    }
                 StalwartRemoteCreateResult.Rejected ->
                     StalwartMailAccessResult.RetryableFailure(
                         projection(
@@ -687,149 +723,153 @@ internal class StalwartMailAccessService(
                 active = local.old,
                 other = successor,
             )
-            val stagedStamp = staged.stamp()
-            if (
-                commitAccount(
-                    accountId = account.accountId,
-                    expected = local.expected,
-                    replacement = staged,
-                ) != LocalCommitResult.Committed
-            ) {
-                return cleanupRotationSuccessor(
-                    account = account,
-                    local = local,
-                    successor = successor.reserved,
+            staged.stamp().use { stagedStamp ->
+                if (
+                    commitAccount(
+                        accountId = account.accountId,
+                        expected = local.expected,
+                        replacement = staged,
+                    ) != LocalCommitResult.Committed
+                ) {
+                    return cleanupRotationSuccessor(
+                        account = account,
+                        local = local,
+                        successor = successor.reserved,
+                    )
+                }
+                durablePhaseObserver.persisted(
+                    account.accountId,
+                    CredentialPhase.Staged,
                 )
-            }
-            durablePhaseObserver.persisted(
-                account.accountId,
-                CredentialPhase.Staged,
-            )
 
-            when (
-                val successorProbe = probeGeneration(account, successor)
-            ) {
-                is StalwartCredentialProbeResult.Authenticated ->
-                    if (
-                        !successorProbe.capabilities.containsAll(
-                            STALWART_REQUIRED_MAIL_CAPABILITIES,
-                        )
-                    ) {
+                when (
+                    val successorProbe = probeGeneration(account, successor)
+                ) {
+                    is StalwartCredentialProbeResult.Authenticated ->
+                        if (
+                            !successorProbe.capabilities.containsAll(
+                                STALWART_REQUIRED_MAIL_CAPABILITIES,
+                            )
+                        ) {
+                            return rotationPhaseFailure(
+                                account,
+                                StalwartMailAccessReason.CredentialRejected,
+                            )
+                        }
+                    StalwartCredentialProbeResult.Rejected ->
                         return rotationPhaseFailure(
                             account,
                             StalwartMailAccessReason.CredentialRejected,
                         )
-                    }
-                StalwartCredentialProbeResult.Rejected ->
-                    return rotationPhaseFailure(
-                        account,
-                        StalwartMailAccessReason.CredentialRejected,
-                    )
-                StalwartCredentialProbeResult.Unavailable ->
-                    return rotationPhaseFailure(
-                        account,
-                        StalwartMailAccessReason.RemoteUnavailable,
-                    )
-            }
-
-            val retiring = rotationRecord(
-                account = account,
-                phase = CredentialPhase.Retiring,
-                active = successor,
-                other = local.old,
-            )
-            val retiringStamp = retiring.stamp()
-            if (
-                commitAccount(
-                    accountId = account.accountId,
-                    expected = stagedStamp,
-                    replacement = retiring,
-                ) != LocalCommitResult.Committed
-            ) {
-                return rotationPhaseFailure(
-                    account,
-                    StalwartMailAccessReason.LocalRevisionChanged,
-                )
-            }
-            durablePhaseObserver.persisted(
-                account.accountId,
-                CredentialPhase.Retiring,
-            )
-
-            val freshInventory = when (
-                val remote = management.inventory(account.accountId)
-            ) {
-                is StalwartRemoteRead.Available -> remote.value
-                StalwartRemoteRead.Unavailable ->
-                    return rotationPhaseFailure(
-                        account,
-                        StalwartMailAccessReason.RemoteUnavailable,
-                    )
-            }
-            if (
-                freshInventory.accountId != account.accountId ||
-                freshInventory.reserved.toSet() !=
-                setOf(local.old.reserved, successor.reserved) ||
-                freshInventory.reserved.size != 2
-            ) {
-                return rotationPhaseFailure(
-                    account,
-                    StalwartMailAccessReason.RemoteStateChanged,
-                )
-            }
-            if (
-                management.revokeReserved(
-                    accountId = account.accountId,
-                    expected = setOf(local.old.reserved),
-                ) != StalwartRemoteMutationResult.Verified
-            ) {
-                return rotationPhaseFailure(
-                    account,
-                    StalwartMailAccessReason.CleanupUnproven,
-                )
-            }
-
-            val oldProbe = probeGeneration(account, local.old)
-            val newProbe = probeGeneration(account, successor)
-            if (
-                oldProbe != StalwartCredentialProbeResult.Rejected ||
-                newProbe !is StalwartCredentialProbeResult.Authenticated ||
-                !newProbe.capabilities.containsAll(
-                    STALWART_REQUIRED_MAIL_CAPABILITIES,
-                )
-            ) {
-                val reason = if (
-                    oldProbe == StalwartCredentialProbeResult.Unavailable ||
-                    newProbe == StalwartCredentialProbeResult.Unavailable
-                ) {
-                    StalwartMailAccessReason.RemoteUnavailable
-                } else {
-                    StalwartMailAccessReason.CredentialRejected
+                    StalwartCredentialProbeResult.Unavailable ->
+                        return rotationPhaseFailure(
+                            account,
+                            StalwartMailAccessReason.RemoteUnavailable,
+                        )
                 }
-                return rotationPhaseFailure(account, reason)
-            }
 
-            val active = rotationRecord(
-                account = account,
-                phase = CredentialPhase.Active,
-                active = successor,
-                other = null,
-            )
-            if (
-                commitAccount(
-                    accountId = account.accountId,
-                    expected = retiringStamp,
-                    replacement = active,
-                ) != LocalCommitResult.Committed
-            ) {
-                return rotationPhaseFailure(
-                    account,
-                    StalwartMailAccessReason.LocalRevisionChanged,
+                val retiring = rotationRecord(
+                    account = account,
+                    phase = CredentialPhase.Retiring,
+                    active = successor,
+                    other = local.old,
                 )
+                retiring.stamp().use { retiringStamp ->
+                    if (
+                        commitAccount(
+                            accountId = account.accountId,
+                            expected = stagedStamp,
+                            replacement = retiring,
+                        ) != LocalCommitResult.Committed
+                    ) {
+                        return rotationPhaseFailure(
+                            account,
+                            StalwartMailAccessReason.LocalRevisionChanged,
+                        )
+                    }
+                    durablePhaseObserver.persisted(
+                        account.accountId,
+                        CredentialPhase.Retiring,
+                    )
+
+                    val freshInventory = when (
+                        val remote = management.inventory(account.accountId)
+                    ) {
+                        is StalwartRemoteRead.Available -> remote.value
+                        StalwartRemoteRead.Unavailable ->
+                            return rotationPhaseFailure(
+                                account,
+                                StalwartMailAccessReason.RemoteUnavailable,
+                            )
+                    }
+                    if (
+                        freshInventory.accountId != account.accountId ||
+                        freshInventory.reserved.toSet() !=
+                        setOf(local.old.reserved, successor.reserved) ||
+                        freshInventory.reserved.size != 2
+                    ) {
+                        return rotationPhaseFailure(
+                            account,
+                            StalwartMailAccessReason.RemoteStateChanged,
+                        )
+                    }
+                    if (
+                        management.revokeReserved(
+                            accountId = account.accountId,
+                            expected =
+                                setOf(local.old.reserved, successor.reserved),
+                            targets = setOf(local.old.reserved),
+                        ) != StalwartRemoteMutationResult.Verified
+                    ) {
+                        return rotationPhaseFailure(
+                            account,
+                            StalwartMailAccessReason.CleanupUnproven,
+                        )
+                    }
+
+                    val oldProbe = probeGeneration(account, local.old)
+                    val newProbe = probeGeneration(account, successor)
+                    if (
+                        oldProbe != StalwartCredentialProbeResult.Rejected ||
+                        newProbe !is StalwartCredentialProbeResult.Authenticated ||
+                        !newProbe.capabilities.containsAll(
+                            STALWART_REQUIRED_MAIL_CAPABILITIES,
+                        )
+                    ) {
+                        val reason = if (
+                            oldProbe == StalwartCredentialProbeResult.Unavailable ||
+                            newProbe == StalwartCredentialProbeResult.Unavailable
+                        ) {
+                            StalwartMailAccessReason.RemoteUnavailable
+                        } else {
+                            StalwartMailAccessReason.CredentialRejected
+                        }
+                        return rotationPhaseFailure(account, reason)
+                    }
+
+                    val active = rotationRecord(
+                        account = account,
+                        phase = CredentialPhase.Active,
+                        active = successor,
+                        other = null,
+                    )
+                    if (
+                        commitAccount(
+                            accountId = account.accountId,
+                            expected = retiringStamp,
+                            replacement = active,
+                        ) != LocalCommitResult.Committed
+                    ) {
+                        return rotationPhaseFailure(
+                            account,
+                            StalwartMailAccessReason.LocalRevisionChanged,
+                        )
+                    }
+                    return StalwartMailAccessResult.Completed(
+                        projection(account, StalwartMailAccessState.Ready),
+                    )
+                }
             }
-            return StalwartMailAccessResult.Completed(
-                projection(account, StalwartMailAccessState.Ready),
-            )
         }
     }
 
@@ -919,30 +959,31 @@ internal class StalwartMailAccessService(
                 active = successor,
                 other = old,
             )
-            val retiringStamp = retiring.stamp()
-            if (
-                commitAccount(
-                    accountId = account.accountId,
-                    expected = local.expected,
-                    replacement = retiring,
-                ) != LocalCommitResult.Committed
-            ) {
-                return rotationPhaseFailure(
-                    account,
-                    StalwartMailAccessReason.LocalRevisionChanged,
+            retiring.stamp().use { retiringStamp ->
+                if (
+                    commitAccount(
+                        accountId = account.accountId,
+                        expected = local.expected,
+                        replacement = retiring,
+                    ) != LocalCommitResult.Committed
+                ) {
+                    return rotationPhaseFailure(
+                        account,
+                        StalwartMailAccessReason.LocalRevisionChanged,
+                    )
+                }
+                durablePhaseObserver.persisted(
+                    account.accountId,
+                    CredentialPhase.Retiring,
+                )
+                return finishRetiring(
+                    account = account,
+                    expected = retiringStamp,
+                    successor = successor,
+                    old = old,
+                    inventory = null,
                 )
             }
-            durablePhaseObserver.persisted(
-                account.accountId,
-                CredentialPhase.Retiring,
-            )
-            return finishRetiring(
-                account = account,
-                expected = retiringStamp,
-                successor = successor,
-                old = old,
-                inventory = null,
-            )
         }
         if (successorProbe == StalwartCredentialProbeResult.Unavailable) {
             return rotationPhaseFailure(
@@ -964,7 +1005,8 @@ internal class StalwartMailAccessService(
         if (
             management.revokeReserved(
                 accountId = account.accountId,
-                expected = setOf(successor.reserved),
+                expected = setOf(old.reserved, successor.reserved),
+                targets = setOf(successor.reserved),
             ) != StalwartRemoteMutationResult.Verified
         ) {
             return rotationPhaseFailure(
@@ -1063,7 +1105,8 @@ internal class StalwartMailAccessService(
             actual == both &&
             management.revokeReserved(
                 accountId = account.accountId,
-                expected = setOf(old.reserved),
+                expected = both,
+                targets = setOf(old.reserved),
             ) != StalwartRemoteMutationResult.Verified
         ) {
             return rotationPhaseFailure(
@@ -1281,40 +1324,49 @@ internal class StalwartMailAccessService(
                 persistentBytes.fill(0)
                 throw failure
             }
-            val createdStamp = replacement.stamp()
-            val commit = commitAccount(
-                accountId = account.accountId,
-                expected = local.expected,
-                replacement = replacement,
-            )
-            if (commit != LocalCommitResult.Committed) {
-                return cleanupUncaptured(
-                    account = account,
-                    cleanReason = StalwartMailAccessReason.CaptureFailed,
-                    createdStamp = createdStamp,
-                )
-            }
-
-            return when (
-                val result = probe.probe(
+            replacement.stamp().use { createdStamp ->
+                val commit = commitAccount(
                     accountId = account.accountId,
-                    address = account.address,
-                    secret = captured,
+                    expected = local.expected,
+                    replacement = replacement,
                 )
-            ) {
-                is StalwartCredentialProbeResult.Authenticated ->
-                    if (
-                        result.capabilities.containsAll(
-                            STALWART_REQUIRED_MAIL_CAPABILITIES,
-                        )
-                    ) {
-                        StalwartMailAccessResult.Completed(
-                            projection(
-                                account,
-                                StalwartMailAccessState.Ready,
-                            ),
-                        )
-                    } else {
+                if (commit != LocalCommitResult.Committed) {
+                    return cleanupUncaptured(
+                        account = account,
+                        cleanReason = StalwartMailAccessReason.CaptureFailed,
+                        createdStamp = createdStamp,
+                    )
+                }
+
+                return when (
+                    val result = probe.probe(
+                        accountId = account.accountId,
+                        address = account.address,
+                        secret = captured,
+                    )
+                ) {
+                    is StalwartCredentialProbeResult.Authenticated ->
+                        if (
+                            result.capabilities.containsAll(
+                                STALWART_REQUIRED_MAIL_CAPABILITIES,
+                            )
+                        ) {
+                            StalwartMailAccessResult.Completed(
+                                projection(
+                                    account,
+                                    StalwartMailAccessState.Ready,
+                                ),
+                            )
+                        } else {
+                            StalwartMailAccessResult.ReconciliationRequired(
+                                projection(
+                                    account,
+                                    StalwartMailAccessState.RecoveryRequired,
+                                ),
+                                StalwartMailAccessReason.CredentialRejected,
+                            )
+                        }
+                    StalwartCredentialProbeResult.Rejected ->
                         StalwartMailAccessResult.ReconciliationRequired(
                             projection(
                                 account,
@@ -1322,23 +1374,15 @@ internal class StalwartMailAccessService(
                             ),
                             StalwartMailAccessReason.CredentialRejected,
                         )
-                    }
-                StalwartCredentialProbeResult.Rejected ->
-                    StalwartMailAccessResult.ReconciliationRequired(
-                        projection(
-                            account,
-                            StalwartMailAccessState.RecoveryRequired,
-                        ),
-                        StalwartMailAccessReason.CredentialRejected,
-                    )
-                StalwartCredentialProbeResult.Unavailable ->
-                    StalwartMailAccessResult.ReconciliationRequired(
-                        projection(
-                            account,
-                            StalwartMailAccessState.RecoveryRequired,
-                        ),
-                        StalwartMailAccessReason.RemoteUnavailable,
-                    )
+                    StalwartCredentialProbeResult.Unavailable ->
+                        StalwartMailAccessResult.ReconciliationRequired(
+                            projection(
+                                account,
+                                StalwartMailAccessState.RecoveryRequired,
+                            ),
+                            StalwartMailAccessReason.RemoteUnavailable,
+                        )
+                }
             }
         }
     }
@@ -1388,13 +1432,15 @@ internal class StalwartMailAccessService(
     ): StalwartMailAccessResult {
         val loaded = store.load() as? CredentialStoreLoadResult.Available
             ?: return cleanupUnproven(account)
-        val currentStamp = loaded.snapshot.use { snapshot ->
-            snapshot.records[account.accountId]?.stamp()
+        val currentMatchesCreated = loaded.snapshot.use { snapshot ->
+            val current = snapshot.records[account.accountId]
+                ?: return@use null
+            createdStamp != null && current.matchesStamp(createdStamp)
         }
-        if (currentStamp == null) {
+        if (currentMatchesCreated == null) {
             return enrollmentRequiredAfterCleanup(account, cleanReason)
         }
-        if (createdStamp == null || currentStamp != createdStamp) {
+        if (!currentMatchesCreated) {
             return cleanupUnproven(account)
         }
 
@@ -1445,14 +1491,18 @@ internal class StalwartMailAccessService(
         val loaded = store.load() as? CredentialStoreLoadResult.Available
             ?: return null
         loaded.snapshot.use { snapshot ->
-            return EnrollmentLocalContext(
-                storeId = snapshot.storeId,
-                expected = snapshot.records[account.accountId]?.stamp(),
-                maxLocalGeneration =
-                    snapshot.records[account.accountId]
-                        ?.let(::maxGeneration)
-                        ?: 0,
-            )
+            val record = snapshot.records[account.accountId]
+            val expected = record?.stamp()
+            return try {
+                EnrollmentLocalContext(
+                    storeId = snapshot.storeId,
+                    expected = expected,
+                    maxLocalGeneration = record?.let(::maxGeneration) ?: 0,
+                )
+            } catch (failure: Throwable) {
+                expected?.close()
+                throw failure
+            }
         }
     }
 
@@ -1462,9 +1512,13 @@ internal class StalwartMailAccessService(
         val loaded = store.load() as? CredentialStoreLoadResult.Available
             ?: return null
         loaded.snapshot.use { snapshot ->
-            return LocalRecordContext(
-                stamp = snapshot.records[account.accountId]?.stamp(),
-            )
+            val stamp = snapshot.records[account.accountId]?.stamp()
+            return try {
+                LocalRecordContext(stamp)
+            } catch (failure: Throwable) {
+                stamp?.close()
+                throw failure
+            }
         }
     }
 
@@ -1507,7 +1561,7 @@ internal class StalwartMailAccessService(
             ?: return null
         loaded.snapshot.use { snapshot ->
             val current = snapshot.records[account.accountId]
-                ?.takeIf { it.stamp() == expected }
+                ?.takeIf { it.matchesStamp(expected) }
                 ?: return null
             val active = current.active ?: return null
             val copied = active.copyGeneration()
@@ -1546,24 +1600,25 @@ internal class StalwartMailAccessService(
                 projection(account, StalwartMailAccessState.StoreUnavailable),
                 StalwartMailAccessReason.LocalStoreUnavailable,
             )
-        val current = loaded.snapshot.use { snapshot ->
-            snapshot.records[account.accountId]?.stamp()
-        }
-        return when (current) {
-            null -> StalwartMailAccessResult.Completed(
-                projection(
-                    account,
-                    StalwartMailAccessState.EnrollmentRequired,
-                ),
-            )
-            markerStamp -> StalwartMailAccessResult.ReconciliationRequired(
-                projection(
-                    account,
-                    StalwartMailAccessState.RemovalPending,
-                ),
-                StalwartMailAccessReason.LocalStoreUnavailable,
-            )
-            else -> cleanupUnproven(account)
+        return loaded.snapshot.use { snapshot ->
+            val current = snapshot.records[account.accountId]
+            when {
+                current == null -> StalwartMailAccessResult.Completed(
+                    projection(
+                        account,
+                        StalwartMailAccessState.EnrollmentRequired,
+                    ),
+                )
+                current.matchesStamp(markerStamp) ->
+                    StalwartMailAccessResult.ReconciliationRequired(
+                        projection(
+                            account,
+                            StalwartMailAccessState.RemovalPending,
+                        ),
+                        StalwartMailAccessReason.LocalStoreUnavailable,
+                    )
+                else -> cleanupUnproven(account)
+            }
         }
     }
 
@@ -1602,18 +1657,31 @@ internal class StalwartMailAccessService(
                 copied.fill(0)
                 throw failure
             }
-            RotationLocalRead.Available(
-                RotationLocalContext(
-                    storeId = snapshot.storeId,
-                    expected = record.stamp(),
-                    old = GenerationMaterial(
-                        credentialId = active.credentialId,
-                        description = active.description,
-                        generation = active.generation,
-                        secret = borrowed,
-                    ),
-                ),
+            val old = GenerationMaterial(
+                credentialId = active.credentialId,
+                description = active.description,
+                generation = active.generation,
+                secret = borrowed,
             )
+            val expected = try {
+                record.stamp()
+            } catch (failure: Throwable) {
+                old.secret.close()
+                throw failure
+            }
+            try {
+                RotationLocalRead.Available(
+                    RotationLocalContext(
+                        storeId = snapshot.storeId,
+                        expected = expected,
+                        old = old,
+                    ),
+                )
+            } catch (failure: Throwable) {
+                expected.close()
+                old.secret.close()
+                throw failure
+            }
         }
     }
 
@@ -1641,14 +1709,28 @@ internal class StalwartMailAccessService(
                         return@use RestartLocalRead.Invalid
                     }
             }
-            RestartLocalRead.Available(
-                RestartLocalContext(
-                    expected = record.stamp(),
-                    phase = record.phase,
-                    active = active,
-                    other = other,
-                ),
-            )
+            val expected = try {
+                record.stamp()
+            } catch (failure: Throwable) {
+                active.secret.close()
+                other?.secret?.close()
+                throw failure
+            }
+            try {
+                RestartLocalRead.Available(
+                    RestartLocalContext(
+                        expected = expected,
+                        phase = record.phase,
+                        active = active,
+                        other = other,
+                    ),
+                )
+            } catch (failure: Throwable) {
+                expected.close()
+                active.secret.close()
+                other?.secret?.close()
+                throw failure
+            }
         }
     }
 
@@ -1701,7 +1783,8 @@ internal class StalwartMailAccessService(
         if (
             management.revokeReserved(
                 accountId = account.accountId,
-                expected = setOf(successor),
+                expected = setOf(local.old.reserved, successor),
+                targets = setOf(successor),
             ) != StalwartRemoteMutationResult.Verified
         ) {
             return cleanupUnproven(account)
@@ -1881,7 +1964,7 @@ internal class StalwartMailAccessService(
                 val loaded = store.load() as? CredentialStoreLoadResult.Available
                     ?: return@withLock LocalCommitResult.StoreUnavailable
                 loaded.snapshot.use { snapshot ->
-                    if (snapshot.records[accountId]?.stamp() != expected) {
+                    if (!snapshot.records[accountId].matchesStamp(expected)) {
                         return@withLock LocalCommitResult.TargetChanged
                     }
                     val merged = LinkedHashMap(snapshot.records)
@@ -1910,21 +1993,57 @@ internal class StalwartMailAccessService(
         replacement?.close()
     }
 
-    private fun StalwartCredentialRecord.stamp(): RecordStamp =
-        RecordStamp(
-            accountId = accountId,
-            addressAtCapture = addressAtCapture,
-            phase = phase,
-            active = active?.stamp(),
-            other = other?.stamp(),
-        )
+    private fun StalwartCredentialRecord.stamp(): RecordStamp {
+        val activeStamp = active?.stamp()
+        val otherStamp = try {
+            other?.stamp()
+        } catch (failure: Throwable) {
+            activeStamp?.close()
+            throw failure
+        }
+        return try {
+            RecordStamp(
+                accountId = accountId,
+                addressAtCapture = addressAtCapture,
+                phase = phase,
+                active = activeStamp,
+                other = otherStamp,
+            )
+        } catch (failure: Throwable) {
+            activeStamp?.close()
+            otherStamp?.close()
+            throw failure
+        }
+    }
 
-    private fun CredentialGeneration.stamp(): GenerationStamp =
-        GenerationStamp(
-            credentialId = credentialId,
-            description = description,
-            generation = generation,
-        )
+    private fun StalwartCredentialRecord?.matchesStamp(
+        expected: RecordStamp?,
+    ): Boolean {
+        if (this == null || expected == null) {
+            return this == null && expected == null
+        }
+        return stamp().use { current ->
+            current == expected
+        }
+    }
+
+    private fun CredentialGeneration.stamp(): GenerationStamp {
+        val fingerprintBytes = secret.read { secretBytes ->
+            MessageDigest.getInstance("SHA-256").digest(secretBytes)
+        }
+        val fingerprint = SecretFingerprint.takeOwnership(fingerprintBytes)
+        return try {
+            GenerationStamp(
+                credentialId = credentialId,
+                description = description,
+                generation = generation,
+                secretFingerprint = fingerprint,
+            )
+        } catch (failure: Throwable) {
+            fingerprint.close()
+            throw failure
+        }
+    }
 
     private fun currentLocalStateOrRecovery(
         account: StalwartMailAccount,
@@ -2004,11 +2123,18 @@ internal class StalwartMailAccessService(
         }
 
         return when (record.phase) {
-            CredentialPhase.Staged,
-            CredentialPhase.Retiring,
-            -> projection(
+            CredentialPhase.Staged -> projection(
                 account,
                 if (matchesExactly(snapshot, record, inventory)) {
+                    StalwartMailAccessState.Rotating
+                } else {
+                    StalwartMailAccessState.RecoveryRequired
+                },
+            )
+
+            CredentialPhase.Retiring -> projection(
+                account,
+                if (matchesRetiring(snapshot, record, inventory)) {
                     StalwartMailAccessState.Rotating
                 } else {
                     StalwartMailAccessState.RecoveryRequired
@@ -2043,8 +2169,33 @@ internal class StalwartMailAccessService(
         snapshot: StalwartCredentialSnapshot,
         record: StalwartCredentialRecord,
         inventory: StalwartReservedInventory,
+    ): Boolean = matchesGenerationsExactly(
+        snapshot = snapshot,
+        expected = listOfNotNull(record.active, record.other),
+        inventory = inventory,
+    )
+
+    private fun matchesRetiring(
+        snapshot: StalwartCredentialSnapshot,
+        record: StalwartCredentialRecord,
+        inventory: StalwartReservedInventory,
     ): Boolean {
-        val expected = listOfNotNull(record.active, record.other)
+        val successor = record.active ?: return false
+        val old = record.other ?: return false
+        if (successor.generation <= old.generation) return false
+        return matchesExactly(snapshot, record, inventory) ||
+            matchesGenerationsExactly(
+                snapshot = snapshot,
+                expected = listOf(successor),
+                inventory = inventory,
+            )
+    }
+
+    private fun matchesGenerationsExactly(
+        snapshot: StalwartCredentialSnapshot,
+        expected: List<CredentialGeneration>,
+        inventory: StalwartReservedInventory,
+    ): Boolean {
         if (expected.size != inventory.reserved.size) return false
         val remoteById = inventory.reserved.associateBy { it.credentialId }
         if (remoteById.size != inventory.reserved.size) return false
@@ -2092,15 +2243,23 @@ internal class StalwartMailAccessService(
             StalwartMailAccessProjection.ordinary(state)
         }
 
-    private data class EnrollmentLocalContext(
+    private class EnrollmentLocalContext(
         val storeId: java.util.UUID,
         val expected: RecordStamp?,
         val maxLocalGeneration: Long,
-    )
+    ) : AutoCloseable {
+        override fun close() {
+            expected?.close()
+        }
+    }
 
-    private data class LocalRecordContext(
+    private class LocalRecordContext(
         val stamp: RecordStamp?,
-    )
+    ) : AutoCloseable {
+        override fun close() {
+            stamp?.close()
+        }
+    }
 
     private sealed interface RotationLocalRead {
         data class Available(
@@ -2128,6 +2287,7 @@ internal class StalwartMailAccessService(
         val old: GenerationMaterial,
     ) : AutoCloseable {
         override fun close() {
+            expected.close()
             old.secret.close()
         }
     }
@@ -2139,6 +2299,7 @@ internal class StalwartMailAccessService(
         val other: GenerationMaterial?,
     ) : AutoCloseable {
         override fun close() {
+            expected.close()
             active.secret.close()
             other?.secret?.close()
         }
@@ -2156,19 +2317,124 @@ internal class StalwartMailAccessService(
         )
     }
 
-    private data class RecordStamp(
+    private class RecordStamp(
         val accountId: String,
         val addressAtCapture: String,
         val phase: CredentialPhase,
         val active: GenerationStamp?,
         val other: GenerationStamp?,
-    )
+    ) : AutoCloseable {
+        override fun equals(other: Any?): Boolean =
+            other is RecordStamp &&
+                accountId == other.accountId &&
+                addressAtCapture == other.addressAtCapture &&
+                phase == other.phase &&
+                active == other.active &&
+                this.other == other.other
 
-    private data class GenerationStamp(
+        override fun hashCode(): Int {
+            var result = accountId.hashCode()
+            result = 31 * result + addressAtCapture.hashCode()
+            result = 31 * result + phase.hashCode()
+            result = 31 * result + (active?.hashCode() ?: 0)
+            return 31 * result + (other?.hashCode() ?: 0)
+        }
+
+        override fun close() {
+            active?.close()
+            other?.close()
+        }
+
+        override fun toString(): String = "RecordStamp(redacted)"
+    }
+
+    private class GenerationStamp(
         val credentialId: String,
         val description: String,
         val generation: Long,
-    )
+        val secretFingerprint: SecretFingerprint,
+    ) : AutoCloseable {
+        override fun equals(other: Any?): Boolean =
+            other is GenerationStamp &&
+                credentialId == other.credentialId &&
+                description == other.description &&
+                generation == other.generation &&
+                secretFingerprint == other.secretFingerprint
+
+        override fun hashCode(): Int {
+            var result = credentialId.hashCode()
+            result = 31 * result + description.hashCode()
+            result = 31 * result + generation.hashCode()
+            return 31 * result + secretFingerprint.hashCode()
+        }
+
+        override fun close() {
+            secretFingerprint.close()
+        }
+
+        override fun toString(): String = "GenerationStamp(redacted)"
+    }
+
+    private class SecretFingerprint private constructor(
+        private val digest: ByteArray,
+    ) : AutoCloseable {
+        private var closed = false
+
+        override fun equals(other: Any?): Boolean {
+            if (other !is SecretFingerprint) return false
+            if (this === other) {
+                synchronized(this) {
+                    check(!closed) { "Secret fingerprint is closed" }
+                }
+                return true
+            }
+            val left = copyDigest()
+            val right = try {
+                other.copyDigest()
+            } catch (failure: Throwable) {
+                left.fill(0)
+                throw failure
+            }
+            return try {
+                MessageDigest.isEqual(left, right)
+            } finally {
+                left.fill(0)
+                right.fill(0)
+            }
+        }
+
+        override fun hashCode(): Int {
+            synchronized(this) {
+                check(!closed) { "Secret fingerprint is closed" }
+            }
+            return 0
+        }
+
+        @Synchronized
+        private fun copyDigest(): ByteArray {
+            check(!closed) { "Secret fingerprint is closed" }
+            return digest.copyOf()
+        }
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            digest.fill(0)
+        }
+
+        override fun toString(): String = "SecretFingerprint(redacted)"
+
+        companion object {
+            fun takeOwnership(digest: ByteArray): SecretFingerprint {
+                require(digest.isNotEmpty()) {
+                    digest.fill(0)
+                    "Secret fingerprint is absent"
+                }
+                return SecretFingerprint(digest)
+            }
+        }
+    }
 
     private enum class LocalCommitResult {
         Committed,
