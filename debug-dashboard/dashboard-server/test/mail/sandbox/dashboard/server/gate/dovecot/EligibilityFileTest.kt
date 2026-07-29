@@ -25,6 +25,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class EligibilityFileTest {
@@ -487,20 +488,92 @@ class EligibilityFileTest {
     }
 
     @Test
-    fun failureBeforeReplaceLeavesOldTruthAndNextOpenCleansTemporary() {
+    fun ordinaryFailureBeforeReplaceDeletesItsExactTemporaryImmediately() {
         val fixture = temporaryRepository()
         EligibilityFile(fixture.paths).add("alpha@local.test", HASH_A)
+        val primary = OrdinaryEligibilityWriteFailure()
+        var createdTemporary: Path? = null
+        var cleanupMadeDurable = false
         val interrupted = EligibilityFile(
             fixture.paths,
-            EligibilityFileObserver { point, _, _ ->
+            EligibilityFileObserver { point, _, temporary ->
                 if (point == EligibilityFileCommitPoint.BeforeReplace) {
-                    throw SimulatedEligibilityCrash()
+                    createdTemporary = requireNotNull(temporary)
+                    throw primary
+                }
+                if (point == EligibilityFileCommitPoint.FailedTemporaryCleanupDurable) {
+                    cleanupMadeDurable = true
                 }
             },
         )
 
-        assertFailsWith<SimulatedEligibilityCrash> {
+        val thrown = assertFailsWith<OrdinaryEligibilityWriteFailure> {
             interrupted.reset("alpha@local.test", HASH_B)
+        }
+
+        assertSame(primary, thrown)
+        assertEquals(
+            "alpha@local.test:$HASH_A\n",
+            Files.readString(fixture.paths.users),
+        )
+        assertFalse(
+            Files.exists(requireNotNull(createdTemporary), LinkOption.NOFOLLOW_LINKS),
+        )
+        assertTrue(cleanupMadeDurable)
+        assertTrue(recognizedTemporaries(fixture.paths).isEmpty())
+    }
+
+    @Test
+    fun ordinaryFailurePreservesPrimaryWhenPostCleanupObservationFails() {
+        val fixture = temporaryRepository()
+        EligibilityFile(fixture.paths).add("alpha@local.test", HASH_A)
+        val primary = OrdinaryEligibilityWriteFailure()
+        val cleanupFailure = EligibilityCleanupFailure()
+        var createdTemporary: Path? = null
+        val interrupted = EligibilityFile(
+            fixture.paths,
+            EligibilityFileObserver { point, _, temporary ->
+                when (point) {
+                    EligibilityFileCommitPoint.BeforeReplace -> {
+                        createdTemporary = requireNotNull(temporary)
+                        throw primary
+                    }
+                    EligibilityFileCommitPoint.FailedTemporaryCleanupDurable ->
+                        throw cleanupFailure
+                    else -> Unit
+                }
+            },
+        )
+
+        val thrown = assertFailsWith<OrdinaryEligibilityWriteFailure> {
+            interrupted.reset("alpha@local.test", HASH_B)
+        }
+
+        assertSame(primary, thrown)
+        assertEquals(listOf(cleanupFailure), thrown.suppressed.toList())
+        assertFalse(
+            Files.exists(requireNotNull(createdTemporary), LinkOption.NOFOLLOW_LINKS),
+        )
+        assertEquals(
+            "alpha@local.test:$HASH_A\n",
+            Files.readString(fixture.paths.users),
+        )
+    }
+
+    @Test
+    fun genuineCrashBeforeReplaceLeavesOldTruthAndNextOpenCleansTemporary() {
+        val fixture = temporaryRepository()
+        EligibilityFile(fixture.paths).add("alpha@local.test", HASH_A)
+        val crashed = startWorker(
+            fixture = fixture,
+            address = "alpha@local.test",
+            crashPoint = EligibilityFileCommitPoint.BeforeReplace,
+        )
+        try {
+            assertTrue(crashed.waitFor(10, TimeUnit.SECONDS))
+            assertNotEquals(0, crashed.exitValue())
+        } finally {
+            crashed.destroyForcibly()
         }
         assertEquals(
             "alpha@local.test:$HASH_A\n",
@@ -516,20 +589,19 @@ class EligibilityFileTest {
     }
 
     @Test
-    fun failureAfterReplaceLeavesNewTruth() {
+    fun genuineCrashAfterReplaceLeavesNewTruth() {
         val fixture = temporaryRepository()
         EligibilityFile(fixture.paths).add("alpha@local.test", HASH_A)
-        val interrupted = EligibilityFile(
-            fixture.paths,
-            EligibilityFileObserver { point, _, _ ->
-                if (point == EligibilityFileCommitPoint.AfterReplace) {
-                    throw SimulatedEligibilityCrash()
-                }
-            },
+        val crashed = startWorker(
+            fixture = fixture,
+            address = "alpha@local.test",
+            crashPoint = EligibilityFileCommitPoint.AfterReplace,
         )
-
-        assertFailsWith<SimulatedEligibilityCrash> {
-            interrupted.reset("alpha@local.test", HASH_B)
+        try {
+            assertTrue(crashed.waitFor(10, TimeUnit.SECONDS))
+            assertNotEquals(0, crashed.exitValue())
+        } finally {
+            crashed.destroyForcibly()
         }
 
         assertEquals(
@@ -563,30 +635,35 @@ class EligibilityFileTest {
     @Test
     fun stableFileChannelLockSerializesProcessesThroughPostWriteVerification() {
         val fixture = temporaryRepository()
-        val ready = fixture.repositoryRoot.resolve("worker-a.ready")
+        val holdingLock = fixture.repositoryRoot.resolve("worker-a.holding-lock")
         val release = fixture.repositoryRoot.resolve("worker-a.release")
         val first = startWorker(
             fixture = fixture,
             address = "alpha@local.test",
-            ready = ready,
+            postWriteReady = holdingLock,
             release = release,
         )
         try {
-            awaitPath(ready)
-            val secondReady = fixture.repositoryRoot.resolve("worker-b.ready")
+            awaitPath(holdingLock)
+            val attemptingLock = fixture.repositoryRoot.resolve("worker-b.attempting-lock")
+            val lockAcquired = fixture.repositoryRoot.resolve("worker-b.lock-acquired")
             val second = startWorker(
                 fixture = fixture,
                 address = "beta@local.test",
-                ready = secondReady,
+                beforeStableLock = attemptingLock,
+                stableLockAcquired = lockAcquired,
             )
             try {
-                awaitPath(secondReady)
-                Thread.sleep(400)
+                awaitPath(attemptingLock)
+                assertEquals("attempting-lock", Files.readString(attemptingLock))
+                assertPathRemainsAbsent(lockAcquired, Duration.ofMillis(400))
                 assertTrue(
                     second.isAlive,
-                    "the second process must block on the stable OS-visible lock",
+                    "the second process must remain blocked in FileChannel.lock()",
                 )
                 Files.writeString(release, "release")
+                awaitPath(lockAcquired)
+                assertEquals("lock-acquired", Files.readString(lockAcquired))
                 assertTrue(first.waitFor(10, TimeUnit.SECONDS))
                 assertTrue(second.waitFor(10, TimeUnit.SECONDS))
                 assertEquals(0, first.exitValue())
@@ -991,8 +1068,11 @@ class EligibilityFileTest {
     private fun startWorker(
         fixture: EligibilityFixture,
         address: String,
-        ready: Path? = null,
+        beforeStableLock: Path? = null,
+        stableLockAcquired: Path? = null,
+        postWriteReady: Path? = null,
         release: Path? = null,
+        crashPoint: EligibilityFileCommitPoint? = null,
     ): Process {
         val java = Path.of(
             System.getProperty("java.home"),
@@ -1006,8 +1086,11 @@ class EligibilityFileTest {
             EligibilityFileProcessWorker::class.java.name,
             fixture.repositoryRoot.toString(),
             address,
-            ready?.toString() ?: "-",
+            beforeStableLock?.toString() ?: "-",
+            stableLockAcquired?.toString() ?: "-",
+            postWriteReady?.toString() ?: "-",
             release?.toString() ?: "-",
+            crashPoint?.name ?: "-",
         )
         return ProcessBuilder(command)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
@@ -1021,6 +1104,20 @@ class EligibilityFileTest {
             check(System.nanoTime() < deadline) {
                 "timed out waiting for worker synchronization"
             }
+            Thread.sleep(20)
+        }
+    }
+
+    private fun assertPathRemainsAbsent(
+        path: Path,
+        duration: Duration,
+    ) {
+        val deadline = System.nanoTime() + duration.toNanos()
+        while (System.nanoTime() < deadline) {
+            assertFalse(
+                Files.exists(path, LinkOption.NOFOLLOW_LINKS),
+                "unexpected marker appeared while the stable lock was held",
+            )
             Thread.sleep(20)
         }
     }
@@ -1189,7 +1286,8 @@ class EligibilityFileTest {
         override fun isAlive(): Boolean = alive
     }
 
-    private class SimulatedEligibilityCrash : RuntimeException()
+    private class OrdinaryEligibilityWriteFailure : RuntimeException()
+    private class EligibilityCleanupFailure : RuntimeException()
 
     companion object {
         private const val HASH_A =
@@ -1204,36 +1302,52 @@ class EligibilityFileTest {
 object EligibilityFileProcessWorker {
     @JvmStatic
     fun main(args: Array<String>) {
-        require(args.size == 4)
+        require(args.size == 7)
         val repositoryRoot = Path.of(args[0])
         val address = EligibilityAddress.requireCanonical(args[1])
-        val ready = args[2].takeUnless { it == "-" }?.let(Path::of)
-        val release = args[3].takeUnless { it == "-" }?.let(Path::of)
+        val beforeStableLock = args[2].takeUnless { it == "-" }?.let(Path::of)
+        val stableLockAcquired = args[3].takeUnless { it == "-" }?.let(Path::of)
+        val postWriteReady = args[4].takeUnless { it == "-" }?.let(Path::of)
+        val release = args[5].takeUnless { it == "-" }?.let(Path::of)
+        val crashPoint = args[6].takeUnless { it == "-" }
+            ?.let(EligibilityFileCommitPoint::valueOf)
         val file = EligibilityFile(
             EligibilityPaths.testing(repositoryRoot),
             EligibilityFileObserver { point, _, _ ->
-                if (
-                    ready != null &&
-                    release != null &&
-                    point == EligibilityFileCommitPoint.PostWriteVerified
-                ) {
-                    Files.writeString(ready, "ready")
-                    val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
-                    while (!Files.exists(release, LinkOption.NOFOLLOW_LINKS)) {
-                        check(System.nanoTime() < deadline)
-                        Thread.sleep(20)
+                if (point == crashPoint) {
+                    Runtime.getRuntime().halt(CRASH_EXIT_CODE)
+                }
+                when (point) {
+                    EligibilityFileCommitPoint.BeforeStableLock ->
+                        beforeStableLock?.let { Files.writeString(it, "attempting-lock") }
+                    EligibilityFileCommitPoint.StableLockAcquired ->
+                        stableLockAcquired?.let { Files.writeString(it, "lock-acquired") }
+                    EligibilityFileCommitPoint.PostWriteVerified -> {
+                        postWriteReady?.let { Files.writeString(it, "holding-lock") }
+                        if (postWriteReady != null && release != null) {
+                            val deadline =
+                                System.nanoTime() + Duration.ofSeconds(10).toNanos()
+                            while (!Files.exists(release, LinkOption.NOFOLLOW_LINKS)) {
+                                check(System.nanoTime() < deadline)
+                                Thread.sleep(20)
+                            }
+                        }
                     }
+                    else -> Unit
                 }
             },
         )
-        if (ready != null && release == null) {
-            Files.writeString(ready, "attempting-mutation")
-        }
         val hash = if (address.startsWith("alpha")) {
-            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$YQ\$YQ"
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdEI\$aGFzaEI"
         } else {
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$Yg\$Yg"
         }
-        file.add(address, hash)
+        if (crashPoint == null) {
+            file.add(address, hash)
+        } else {
+            file.reset(address, hash)
+        }
     }
+
+    private const val CRASH_EXIT_CODE = 97
 }

@@ -128,10 +128,12 @@ The fixed production authority is
 The writer rejects symbolic fixed-path components and non-regular or
 incorrectly permissioned target, lock, and temporary files. Its owned
 directory is mode `0700`; target, lock, and recognized same-directory
-temporaries are mode `0600` on POSIX. Tests cover concurrent JVM processes,
-metadata preservation, cleanup of only fixed recognizable abandoned
-temporaries, failure before replace (old truth remains), and failure after
-replace (new truth remains).
+temporaries are mode `0600` on POSIX. Tests tie concurrent JVM-process markers
+to immediately before and after the real `FileChannel.lock()` call, cover
+metadata preservation and cleanup of only fixed recognizable abandoned
+temporaries, prove ordinary pre-move failures durably delete their exact
+temporary, and distinguish a genuine crash before replace (old truth plus a
+cleanable temporary) from a genuine crash after replace (new truth).
 
 Ordinary Dovecot mounts the containing
 `./debug-dashboard/.runtime/dovecot` directory read-only at
@@ -171,9 +173,9 @@ review then identified a non-wiping process-output accumulator; its focused
 regression was RED at test compilation before the wipeable collector existed.
 Spec-review regressions subsequently rejected unproven ARGON2ID versions,
 parameter forms, and Base64 variants, and proved that a late output reader
-cannot repopulate a closed capture. The final focused run passed 22/22, the
+cannot repopulate a closed capture. The final focused run passed 24/24, the
 updated Task 1 audit passed 4/4, and the permitted non-live dashboard-server
-suite passed 291/291. The audit no longer expects the Task 2 static-userdb
+suite passed 293/293. The audit no longer expects the Task 2 static-userdb
 hazard. `docker compose config --quiet` exited `0`.
 
 The permitted dependency-free pinned-image check:
@@ -212,7 +214,7 @@ The broad non-live dashboard-server command:
   'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
 ```
 
-passed 291/291. An earlier unfiltered dashboard-server attempt ran 302 tests:
+passed 293/293. An earlier unfiltered dashboard-server attempt ran 302 tests:
 the then-current 288 passed and 14 environment-gated Stalwart action/live or
 production browser tests failed only because their explicit
 live/action/assets variables were absent. Those tests were not enabled because

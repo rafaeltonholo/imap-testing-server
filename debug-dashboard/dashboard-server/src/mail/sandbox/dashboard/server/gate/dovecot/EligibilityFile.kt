@@ -123,6 +123,9 @@ internal class EligibilityPaths private constructor(
 }
 
 internal enum class EligibilityFileCommitPoint {
+    BeforeStableLock,
+    StableLockAcquired,
+    FailedTemporaryCleanupDurable,
     BeforeReplace,
     AfterReplace,
     BeforePostWriteVerification,
@@ -211,7 +214,17 @@ internal class EligibilityFile(
                 StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS,
             ).use { channel ->
+                observer.reached(
+                    EligibilityFileCommitPoint.BeforeStableLock,
+                    paths.users,
+                    null,
+                )
                 channel.lock().use {
+                    observer.reached(
+                        EligibilityFileCommitPoint.StableLockAcquired,
+                        paths.users,
+                        null,
+                    )
                     paths.revalidate()
                     requireSafeRuntimeRoot()
                     requireSecureDirectory(paths.dovecotDirectory)
@@ -278,14 +291,17 @@ internal class EligibilityFile(
             null
         }
         val bytes = expected.toByteArray(StandardCharsets.UTF_8)
-        val temporary = createTemporary()
+        var temporary: Path? = null
+        var replaced = false
         try {
+            val createdTemporary = createTemporary()
+            temporary = createdTemporary
             if (intendedMetadata != null) {
-                applyMetadata(temporary, intendedMetadata)
+                applyMetadata(createdTemporary, intendedMetadata)
             }
-            requireSecureRegularFile(temporary)
+            requireSecureRegularFile(createdTemporary)
             FileChannel.open(
-                temporary,
+                createdTemporary,
                 StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS,
             ).use { channel ->
@@ -295,16 +311,16 @@ internal class EligibilityFile(
                 }
                 channel.force(true)
             }
-            requireSecureRegularFile(temporary)
-            val expectedMetadata = readMetadata(temporary)
+            requireSecureRegularFile(createdTemporary)
+            val expectedMetadata = readMetadata(createdTemporary)
             observer.reached(
                 EligibilityFileCommitPoint.BeforeReplace,
                 paths.users,
-                temporary,
+                createdTemporary,
             )
             try {
                 Files.move(
-                    temporary,
+                    createdTemporary,
                     paths.users,
                     StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING,
@@ -315,6 +331,7 @@ internal class EligibilityFile(
                     unsupported,
                 )
             }
+            replaced = true
             observer.reached(
                 EligibilityFileCommitPoint.AfterReplace,
                 paths.users,
@@ -338,8 +355,40 @@ internal class EligibilityFile(
                 paths.users,
                 null,
             )
+        } catch (primary: Throwable) {
+            val failedTemporary = temporary
+            if (failedTemporary != null && !replaced) {
+                cleanupFailedTemporary(failedTemporary, primary)
+            }
+            throw primary
         } finally {
             bytes.fill(0)
+        }
+    }
+
+    private fun cleanupFailedTemporary(
+        temporary: Path,
+        primary: Throwable,
+    ) {
+        try {
+            safetyCheck(
+                temporary.parent == paths.dovecotDirectory &&
+                    isRecognizedTemporary(temporary.fileName.toString()),
+            ) {
+                "Eligibility temporary cleanup path is invalid"
+            }
+            requireSecureRegularFile(temporary)
+            Files.delete(temporary)
+            fsyncDirectory(paths.dovecotDirectory)
+            observer.reached(
+                EligibilityFileCommitPoint.FailedTemporaryCleanupDurable,
+                paths.users,
+                temporary,
+            )
+        } catch (cleanupFailure: Throwable) {
+            if (cleanupFailure !== primary) {
+                primary.addSuppressed(cleanupFailure)
+            }
         }
     }
 
