@@ -143,7 +143,8 @@ docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbo
 
 ### Scripts
 
-All scripts are Python 3 (no external dependencies) and share `scripts/lib.py` which provides:
+The everyday Python 3 mail-seeding scripts generally share `scripts/lib.py`,
+which provides:
 
 - `inject_mail(email, file_path, mailbox, delay)` — copies a file into the container and saves it via `doveadm save`
 - `create_mailbox(email, folder)` — creates a mailbox folder via `doveadm`
@@ -151,6 +152,13 @@ All scripts are Python 3 (no external dependencies) and share `scripts/lib.py` w
 - `display_name(addr)` / `make_slug(text)` — address and filename utilities
 - `parse_date_arg(date_str)` / `epoch_to_rfc2822(epoch)` — date conversion helpers
 - Project path constants: `ROOT_DIR`, `MAILS_DIR`, `THREADS_DIR`, `VMAIL_DIR`, etc.
+
+The receipt-bound Stalwart migration tools (`capture_stalwart_v015.py`,
+`stalwart_v016.py`, and `bootstrap_stalwart_v016.py`) and their supporting
+`stalwart_v016_registry.py` module are standalone stdlib code; their
+authoritative workflow is in `docs/stalwart-v016-migration.md`. The pre-existing
+optional `convert_msg.py` helper is the sole exception to the stdlib-only rule
+and requires `extract-msg`.
 
 The default injection delay (2.5s) between successive injections prevents Dovecot file-lock conflicts when bulk-loading mail.
 

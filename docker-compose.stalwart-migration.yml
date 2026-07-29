@@ -1,0 +1,71 @@
+services:
+  stalwart-migration-data-owner:
+    image: stalwartlabs/stalwart:v0.16.14
+    profiles:
+      - stalwart-migration
+    user: "0:0"
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - chown -R 2000:2000 /var/lib/stalwart && chmod 0700 /var/lib/stalwart
+    volumes:
+      - type: bind
+        source: ${STALWART_MIGRATION_CONFIG_DIR:?required}
+        target: /etc/stalwart
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STALWART_MIGRATION_DATA_DIR:?required}
+        target: /var/lib/stalwart
+        read_only: false
+        bind:
+          create_host_path: false
+
+  stalwart: !override
+    image: stalwartlabs/stalwart:v0.16.14
+    container_name: mail-sandbox-stalwart-migration
+    profiles:
+      - stalwart-migration
+    user: "2000:2000"
+    restart: "no"
+    depends_on:
+      stalwart-migration-data-owner:
+        condition: service_completed_successfully
+    ports:
+      - target: 8080
+        published: "18080"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    env_file:
+      - path: ${STALWART_MIGRATION_RECOVERY_ENV_FILE:?required}
+        required: true
+    environment:
+      STALWART_PUBLIC_URL: http://127.0.0.1:18080
+      STALWART_RECOVERY_MODE: "1"
+      STALWART_RECOVERY_MODE_PORT: "8080"
+    volumes:
+      - type: bind
+        source: ${STALWART_MIGRATION_CONFIG_DIR:?required}
+        target: /etc/stalwart
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STALWART_MIGRATION_DATA_DIR:?required}
+        target: /var/lib/stalwart
+        read_only: false
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8080/healthz/ready
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s

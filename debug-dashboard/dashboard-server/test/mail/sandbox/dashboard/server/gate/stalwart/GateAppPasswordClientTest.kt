@@ -2,6 +2,10 @@ package mail.sandbox.dashboard.server.gate.stalwart
 
 import java.net.URI
 import java.util.UUID
+import mail.sandbox.dashboard.server.provider.stalwart.credential.STALWART_REQUIRED_MAIL_CAPABILITIES
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartBorrowedSecret
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialProbeResult
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailCapability
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccount
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartNormalPassword
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteCreateResult
@@ -22,11 +26,53 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class GateAppPasswordClientTest {
+    @Test
+    fun enrollmentAcceptsOnlyTheInjectedEndpointProfileApiUrl() = runBlocking {
+        val ownerAccountId = "account7"
+        val ownerAddress =
+            "dashboard-routing-sender-" +
+                "0123456789abcdef0123456789abcdef@local.test"
+        val registry = RecordingAppPasswordRegistry(
+            session = GateJmapSession(
+                apiUrl = StalwartEndpointProfile.MIGRATION_BOOTSTRAP.apiUrl,
+                username = ownerAddress,
+                primaryAccountId = ownerAccountId,
+            ),
+            queryResponses = listOf(
+                registryResponse(
+                    method = "x:AppPassword/query",
+                    payload = """
+                        {
+                          "accountId":"$ownerAccountId",
+                          "queryState":"state-1",
+                          "canCalculateChanges":false,
+                          "position":0,
+                          "ids":[],
+                          "total":0
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        val inventory = GateAppPasswordEnrollmentClient(
+            registry = registry,
+            ownerAccountId = ownerAccountId,
+            ownerAddress = ownerAddress,
+            endpointProfile = StalwartEndpointProfile.MIGRATION_BOOTSTRAP,
+        ).inventory()
+
+        assertTrue(inventory.isEmpty())
+        assertEquals(1, registry.discoveryCount)
+        assertEquals(1, registry.queryCount)
+    }
+
     @Test
     fun createdSecretWrapperRejectsMalformedInputsAndUseAfterClose() {
         val description = GateAppPasswordDescription.reserved(
@@ -1657,6 +1703,11 @@ class GateAppPasswordClientTest {
                         ids = listOf(managementAccountId, ordinaryAccountId),
                         total = 2,
                     ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(managementAccountId, ordinaryAccountId),
+                        total = 2,
+                    ),
                 ),
                 getResponses = listOf(
                     accountsGetResponse(
@@ -1724,6 +1775,380 @@ class GateAppPasswordClientTest {
             ).globalInventory()
             assertIs<StalwartRemoteRead.Unavailable>(incomplete)
             assertTrue(incompleteRegistry.gets.isEmpty())
+        }
+
+    @Test
+    fun lifecycleGlobalInventoryCollectsEveryAccountQueryPage() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val firstAccountId = "account7"
+            val secondAccountId = "account8"
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(managementAccountId, firstAccountId),
+                        total = 3,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(secondAccountId),
+                        total = 3,
+                        position = 2,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(managementAccountId, firstAccountId),
+                        total = 3,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = listOf(secondAccountId),
+                        total = 3,
+                        position = 2,
+                    ),
+                ),
+                getResponses = listOf(
+                    accountsGetResponse(
+                        requestAccountId = managementAccountId,
+                        accounts = listOf(
+                            accountObject(
+                                managementAccountId,
+                                """{"0":${passwordCredential()}}""",
+                            ),
+                            accountObject(
+                                firstAccountId,
+                                """{"0":${passwordCredential()}}""",
+                            ),
+                            accountObject(
+                                secondAccountId,
+                                """{"0":${passwordCredential()}}""",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+            val available = assertIs<StalwartRemoteRead.Available<*>>(
+                GateStalwartCredentialManagementRemote(
+                    registry = registry,
+                    managementAccountId = managementAccountId,
+                    protectedAccountIds = setOf(managementAccountId),
+                ).globalInventory(),
+            )
+            val global = assertIs<
+                mail.sandbox.dashboard.server.provider.stalwart.credential.
+                    StalwartGlobalReservedInventory
+                >(available.value)
+
+            assertEquals(
+                listOf(managementAccountId, firstAccountId, secondAccountId),
+                global.accounts.map { it.accountId },
+            )
+            assertEquals(
+                listOf(
+                    QueryCall("Account", managementAccountId, 0, 100),
+                    QueryCall("Account", managementAccountId, 2, 100),
+                    QueryCall("Account", managementAccountId, 0, 100),
+                    QueryCall("Account", managementAccountId, 2, 100),
+                ),
+                registry.queries,
+            )
+        }
+
+    @Test
+    fun lifecycleGlobalInventoryFetchesAccountsInBoundedChunks() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val accountIds =
+                listOf(managementAccountId) +
+                    (0 until 100).map { index ->
+                        "account${index.toString().padStart(3, '0')}"
+                    }
+            val firstPage = accountIds.take(100)
+            val secondPage = accountIds.drop(100)
+            val accounts = accountIds.associateWith { accountId ->
+                accountObject(
+                    accountId = accountId,
+                    credentials = """{"0":${passwordCredential()}}""",
+                )
+            }
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = firstPage,
+                        total = accountIds.size,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = secondPage,
+                        total = accountIds.size,
+                        position = firstPage.size,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = firstPage,
+                        total = accountIds.size,
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = secondPage,
+                        total = accountIds.size,
+                        position = firstPage.size,
+                    ),
+                ),
+                getResponses = listOf(
+                    accountsGetResponse(
+                        requestAccountId = managementAccountId,
+                        accounts = firstPage.map(accounts::getValue),
+                    ),
+                    accountsGetResponse(
+                        requestAccountId = managementAccountId,
+                        accounts = secondPage.map(accounts::getValue),
+                    ),
+                ),
+            )
+
+            val available = assertIs<StalwartRemoteRead.Available<*>>(
+                GateStalwartCredentialManagementRemote(
+                    registry = registry,
+                    managementAccountId = managementAccountId,
+                    protectedAccountIds = setOf(managementAccountId),
+                ).globalInventory(),
+            )
+            val global = assertIs<
+                mail.sandbox.dashboard.server.provider.stalwart.credential.
+                    StalwartGlobalReservedInventory
+                >(available.value)
+
+            assertEquals(accountIds, global.accounts.map { it.accountId })
+            assertEquals(
+                listOf(firstPage, secondPage),
+                registry.gets.map { requireNotNull(it.ids) },
+            )
+            assertTrue(registry.gets.all { requireNotNull(it.ids).size <= 100 })
+            assertEquals(4, registry.queries.size)
+        }
+
+    @Test
+    fun lifecycleGlobalInventoryRejectsAChangedFinalQuerySnapshot() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val ordinaryAccountId = "account7"
+            val ids = listOf(managementAccountId, ordinaryAccountId)
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = ids,
+                        total = ids.size,
+                        queryState = "account-query-state-1",
+                    ),
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = ids,
+                        total = ids.size,
+                        queryState = "account-query-state-2",
+                    ),
+                ),
+                getResponses = listOf(
+                    accountsGetResponse(
+                        requestAccountId = managementAccountId,
+                        accounts = ids.map { accountId ->
+                            accountObject(
+                                accountId,
+                                """{"0":${passwordCredential()}}""",
+                            )
+                        },
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(managementAccountId),
+            ).globalInventory()
+
+            assertIs<StalwartRemoteRead.Unavailable>(result)
+            assertEquals(2, registry.queries.size)
+            assertEquals(1, registry.gets.size)
+        }
+
+    @Test
+    fun lifecycleGlobalInventoryRequiresEveryProtectedAccountInTheQuery() =
+        runBlocking {
+            val managementAccountId = "management7"
+            val missingProtectedAccountId = "protected8"
+            val ordinaryAccountId = "account7"
+            val visibleIds = listOf(managementAccountId, ordinaryAccountId)
+            val registry = RecordingAppPasswordRegistry(
+                session = GateJmapSession(
+                    apiUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    username = GateBootstrap.MANAGEMENT_ADDRESS,
+                    primaryAccountId = managementAccountId,
+                ),
+                queryResponses = listOf(
+                    accountQueryResponse(
+                        requestAccountId = managementAccountId,
+                        ids = visibleIds,
+                        total = visibleIds.size,
+                    ),
+                ),
+            )
+
+            val result = GateStalwartCredentialManagementRemote(
+                registry = registry,
+                managementAccountId = managementAccountId,
+                protectedAccountIds = setOf(
+                    managementAccountId,
+                    missingProtectedAccountId,
+                ),
+            ).globalInventory()
+
+            assertIs<StalwartRemoteRead.Unavailable>(result)
+            assertTrue(registry.gets.isEmpty())
+        }
+
+    @Test
+    fun lifecycleMailProbeProvesEveryCapabilityWithReadOnlyMethods() =
+        runBlocking {
+            val accountId = "account7"
+            val address = "dashboard-routing-sender@local.test"
+            val transport = RecordingGateHttpTransport(
+                responses = completeMailProbeResponses(
+                    accountId = accountId,
+                    address = address,
+                ),
+            )
+            val secret = StalwartBorrowedSecret.takeOwnership(
+                "app_test-only-probe".encodeToByteArray(),
+            )
+
+            val result = secret.use {
+                GateStalwartMailCredentialProbeRemote(
+                    endpointProfile = StalwartEndpointProfile.MIGRATION_BOOTSTRAP,
+                    transport = transport,
+                ).probe(
+                    accountId = accountId,
+                    address = address,
+                    secret = it,
+                )
+            }
+
+            val authenticated =
+                assertIs<StalwartCredentialProbeResult.Authenticated>(result)
+            assertEquals(
+                STALWART_REQUIRED_MAIL_CAPABILITIES,
+                authenticated.capabilities,
+            )
+            val calls = transport.requests.drop(1).map { request ->
+                val body = requireNotNull(request.body)
+                val call = body.getValue("methodCalls")
+                    .jsonArray
+                    .single()
+                    .jsonArray
+                val using = body.getValue("using").jsonArray.map {
+                    it.jsonPrimitive.content
+                }
+                Triple(
+                    call[0].jsonPrimitive.content,
+                    using,
+                    call[1].jsonObject,
+                )
+            }
+            assertEquals(
+                listOf(
+                    "Core/echo",
+                    "Mailbox/get",
+                    "EmailSubmission/get",
+                    "Blob/get",
+                ),
+                calls.map(Triple<String, List<String>, JsonObject>::first),
+            )
+            assertEquals(
+                listOf(
+                    listOf("urn:ietf:params:jmap:core"),
+                    listOf(
+                        "urn:ietf:params:jmap:core",
+                        "urn:ietf:params:jmap:mail",
+                    ),
+                    listOf(
+                        "urn:ietf:params:jmap:core",
+                        "urn:ietf:params:jmap:submission",
+                    ),
+                    listOf(
+                        "urn:ietf:params:jmap:core",
+                        "urn:ietf:params:jmap:blob",
+                    ),
+                ),
+                calls.map(Triple<String, List<String>, JsonObject>::second),
+            )
+            assertTrue(
+                calls.none { (methodName) ->
+                    methodName.endsWith("/set") ||
+                        methodName.endsWith("/upload") ||
+                        methodName.endsWith("/import")
+                },
+            )
+        }
+
+    @Test
+    fun lifecycleMailProbeReportsOnlyCapabilitiesWhoseMethodsSucceeded() =
+        runBlocking {
+            val accountId = "account7"
+            val address = "dashboard-routing-sender@local.test"
+            val responses = completeMailProbeResponses(
+                accountId = accountId,
+                address = address,
+            ).toMutableList()
+            responses[3] = jmapMethodErrorResponse(
+                callId = "gate-3",
+                type = "unknownMethod",
+            )
+            val transport = RecordingGateHttpTransport(responses)
+            val secret = StalwartBorrowedSecret.takeOwnership(
+                "app_test-only-partial-probe".encodeToByteArray(),
+            )
+
+            val result = secret.use {
+                GateStalwartMailCredentialProbeRemote(
+                    endpointProfile = StalwartEndpointProfile.MIGRATION_BOOTSTRAP,
+                    transport = transport,
+                ).probe(
+                    accountId = accountId,
+                    address = address,
+                    secret = it,
+                )
+            }
+
+            val authenticated =
+                assertIs<StalwartCredentialProbeResult.Authenticated>(result)
+            assertEquals(
+                setOf(
+                    StalwartMailCapability.Core,
+                    StalwartMailCapability.Mail,
+                    StalwartMailCapability.Blob,
+                ),
+                authenticated.capabilities,
+            )
+            assertEquals(5, transport.requests.size)
         }
 
     @Test
@@ -2183,15 +2608,17 @@ class GateAppPasswordClientTest {
         requestAccountId: String,
         ids: List<String>,
         total: Int,
+        position: Int = 0,
+        queryState: String = "account-query-state",
     ): JsonObject =
         registryResponse(
             method = "x:Account/query",
             payload = """
                 {
                   "accountId":"$requestAccountId",
-                  "queryState":"account-query-state",
+                  "queryState":"$queryState",
                   "canCalculateChanges":false,
-                  "position":0,
+                  "position":$position,
                   "ids":${Json.encodeToString(ids)},
                   "total":$total
                 }
@@ -2228,6 +2655,94 @@ class GateAppPasswordClientTest {
                 }
             """.trimIndent(),
         ).jsonObject
+
+    private fun completeMailProbeResponses(
+        accountId: String,
+        address: String,
+    ): List<GateHttpResponse> =
+        listOf(
+            GateHttpResponse(
+                status = 200,
+                effectiveUrl = URI(
+                    "http://127.0.0.1:18080/.well-known/jmap",
+                ),
+                body = """
+                    {
+                      "apiUrl":"/jmap/",
+                      "username":"$address",
+                      "primaryAccounts":{"urn:stalwart:jmap":"$accountId"}
+                    }
+                """.trimIndent(),
+            ),
+            jmapMethodResponse(
+                method = "Core/echo",
+                callId = "gate-1",
+                payload = """{"probe":"mail-sandbox-debug-dashboard"}""",
+            ),
+            jmapMethodResponse(
+                method = "Mailbox/get",
+                callId = "gate-2",
+                payload = """
+                    {
+                      "accountId":"$accountId",
+                      "state":"mailbox-state",
+                      "list":[{"id":"mailbox7","name":"Inbox","role":"inbox"}],
+                      "notFound":[]
+                    }
+                """.trimIndent(),
+            ),
+            jmapMethodResponse(
+                method = "EmailSubmission/get",
+                callId = "gate-3",
+                payload = """
+                    {
+                      "accountId":"$accountId",
+                      "state":"submission-state",
+                      "list":[],
+                      "notFound":["mailSandboxProbeAbsent"]
+                    }
+                """.trimIndent(),
+            ),
+            jmapMethodResponse(
+                method = "Blob/get",
+                callId = "gate-4",
+                payload = """
+                    {
+                      "accountId":"$accountId",
+                      "state":"blob-state",
+                      "list":[],
+                      "notFound":["mailSandboxProbeAbsent"]
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+    private fun jmapMethodResponse(
+        method: String,
+        callId: String,
+        payload: String,
+    ): GateHttpResponse =
+        GateHttpResponse(
+            status = 200,
+            effectiveUrl = URI("http://127.0.0.1:18080/jmap/"),
+            body = """
+                {
+                  "methodResponses":[
+                    ["$method",$payload,"$callId"]
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+    private fun jmapMethodErrorResponse(
+        callId: String,
+        type: String,
+    ): GateHttpResponse =
+        jmapMethodResponse(
+            method = "error",
+            callId = callId,
+            payload = """{"type":"$type"}""",
+        )
 
     private fun passwordCredential(): String =
         """
@@ -2319,6 +2834,7 @@ class GateAppPasswordClientTest {
         private val destroyResponses = ArrayDeque(destroyResponses)
         val creates = mutableListOf<CreateCall>()
         val gets = mutableListOf<GetCall>()
+        val queries = mutableListOf<QueryCall>()
         val updates = mutableListOf<UpdateCall>()
         val destroys = mutableListOf<DestroyCall>()
         var discoveryCount = 0
@@ -2346,8 +2862,11 @@ class GateAppPasswordClientTest {
             objectType: String,
             filter: JsonObject,
             accountId: String?,
+            position: Int,
+            limit: Int,
         ): JsonObject {
             queryCount += 1
+            queries += QueryCall(objectType, accountId, position, limit)
             return queryResponses.removeFirst()
         }
 
@@ -2411,6 +2930,13 @@ class GateAppPasswordClientTest {
         val objectType: String,
         val ids: List<String>?,
         val accountId: String?,
+    )
+
+    private data class QueryCall(
+        val objectType: String,
+        val accountId: String?,
+        val position: Int,
+        val limit: Int,
     )
 
     private data class UpdateCall(

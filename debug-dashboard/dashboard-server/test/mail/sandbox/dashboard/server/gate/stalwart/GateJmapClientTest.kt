@@ -8,13 +8,187 @@ import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class GateJmapClientTest {
+    @Test
+    fun endpointProfilesPinTheOnlyAllowedOriginsAndApiUrls() {
+        assertEquals(
+            listOf(
+                StalwartEndpointProfile.GATE_FIXTURE,
+                StalwartEndpointProfile.MIGRATION_BOOTSTRAP,
+                StalwartEndpointProfile.NORMAL_RUNTIME,
+            ),
+            StalwartEndpointProfile.entries,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:18443"),
+            StalwartEndpointProfile.GATE_FIXTURE.baseUrl,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:18443/jmap/"),
+            StalwartEndpointProfile.GATE_FIXTURE.apiUrl,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:18080"),
+            StalwartEndpointProfile.MIGRATION_BOOTSTRAP.baseUrl,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:18080/jmap/"),
+            StalwartEndpointProfile.MIGRATION_BOOTSTRAP.apiUrl,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:8443"),
+            StalwartEndpointProfile.NORMAL_RUNTIME.baseUrl,
+        )
+        assertEquals(
+            URI("http://127.0.0.1:8443/jmap/"),
+            StalwartEndpointProfile.NORMAL_RUNTIME.apiUrl,
+        )
+    }
+
+    @Test
+    fun normalRuntimeProfileAcceptsOnlyItsCanonicalBaseUrlShapes() {
+        val profile = StalwartEndpointProfile.NORMAL_RUNTIME
+
+        assertSame(
+            profile,
+            StalwartEndpointProfile.fromBaseUrl(
+                URI("http://127.0.0.1:8443"),
+            ),
+        )
+        assertSame(
+            profile,
+            StalwartEndpointProfile.fromBaseUrl(
+                URI("http://127.0.0.1:8443/"),
+            ),
+        )
+        listOf(
+            "http://localhost:8443",
+            "https://127.0.0.1:8443",
+            "http://127.0.0.1:8443/jmap/",
+            "http://127.0.0.1:8443/?query",
+            "http://127.0.0.1:8443/#fragment",
+            "http://gate-user@127.0.0.1:8443",
+        ).forEach { value ->
+            assertFailsWith<IllegalArgumentException>(value) {
+                StalwartEndpointProfile.fromBaseUrl(URI(value))
+            }
+        }
+    }
+
+    @Test
+    fun migrationProfileUsesOnlyItsPinnedDiscoveryAndApiUrls() = runBlocking {
+        val profile = StalwartEndpointProfile.MIGRATION_BOOTSTRAP
+        val transport = QueueTransport(
+            listOf(
+                GateHttpResponse(
+                    status = 200,
+                    effectiveUrl = URI(
+                        "http://127.0.0.1:18080/.well-known/jmap",
+                    ),
+                    body = """{"apiUrl":"/jmap/","primaryAccounts":{}}""",
+                ),
+            ),
+        )
+
+        val session = GateJmapClient(
+            profile = profile,
+            credential = GateCredential.bearer(
+                "API_test-only-migration".toCharArray(),
+            ),
+            transport = transport,
+        ).use { client ->
+            client.discoverSession()
+        }
+
+        assertEquals(profile.apiUrl, session.apiUrl)
+        assertEquals(
+            listOf(URI("http://127.0.0.1:18080/.well-known/jmap")),
+            transport.requests.map(GateHttpRequest::url),
+        )
+
+        val failure = assertFailsWith<GateJmapException> {
+            GateJmapClient(
+                profile = profile,
+                credential = GateCredential.bearer(
+                    "API_test-only-migration".toCharArray(),
+                ),
+                transport = QueueTransport(
+                    listOf(
+                        GateHttpResponse(
+                            status = 200,
+                            effectiveUrl = URI(
+                                "http://127.0.0.1:18080/.well-known/jmap",
+                            ),
+                            body = """
+                                {
+                                  "apiUrl":"http://127.0.0.1:18443/jmap/",
+                                  "primaryAccounts":{}
+                                }
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            ).use { client ->
+                client.discoverSession()
+            }
+        }
+
+        assertEquals(GateJmapFailure.InvalidResponse, failure.kind)
+    }
+
+    @Test
+    fun jmapTransportRejectsRedirectFollowing() {
+        assertFailsWith<IllegalArgumentException> {
+            KtorGateHttpTransport(followRedirects = true).close()
+        }
+        KtorGateHttpTransport().close()
+    }
+
+    @Test
+    fun discoveryResponseMustRemainOnTheExactPinnedWellKnownUrl() = runBlocking {
+        val profile = StalwartEndpointProfile.GATE_FIXTURE
+        listOf(
+            URI("http://127.0.0.1:18443/redirected"),
+            URI("http://127.0.0.1:18443/.well-known/jmap/"),
+        ).forEach { effectiveUrl ->
+            val transport = QueueTransport(
+                listOf(
+                    GateHttpResponse(
+                        status = 200,
+                        effectiveUrl = effectiveUrl,
+                        body = validSessionBody,
+                    ),
+                ),
+            )
+
+            val failure = assertFailsWith<GateJmapException> {
+                GateJmapClient(
+                    profile = profile,
+                    credential = GateCredential.bearer(
+                        "API_test-only-discovery".toCharArray(),
+                    ),
+                    transport = transport,
+                ).use { client ->
+                    client.discoverSession()
+                }
+            }
+
+            assertEquals(GateJmapFailure.InvalidResponse, failure.kind)
+            assertEquals(
+                listOf(URI("http://127.0.0.1:18443/.well-known/jmap")),
+                transport.requests.map(GateHttpRequest::url),
+            )
+        }
+    }
+
     @Test
     fun credentialsCopyInputsAndBasicKeepsUtf8Encoding() {
         val username = GateBootstrap.FIRST_USER_ADDRESS
@@ -364,6 +538,111 @@ class GateJmapClientTest {
         assertEquals("true", arguments.getValue("calculateTotal").jsonPrimitive.content)
         assertEquals("0", arguments.getValue("position").jsonPrimitive.content)
         assertEquals("100", arguments.getValue("limit").jsonPrimitive.content)
+    }
+
+    @Test
+    fun registryQueryRequestsTheExactNonzeroPage() = runBlocking {
+        val transport = QueueTransport(
+            responses = listOf(
+                GateHttpResponse(
+                    status = 200,
+                    effectiveUrl = URI(
+                        "http://127.0.0.1:18443/.well-known/jmap",
+                    ),
+                    body = validSessionBody,
+                ),
+                GateHttpResponse(
+                    status = 200,
+                    effectiveUrl = URI("http://127.0.0.1:18443/jmap/"),
+                    body = """
+                        {
+                          "methodResponses":[
+                            [
+                              "x:Account/query",
+                              {
+                                "accountId":"account7",
+                                "position":37,
+                                "ids":[],
+                                "total":60
+                              },
+                              "gate-1"
+                            ]
+                          ]
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        GateJmapClient(
+            baseUrl = URI("http://127.0.0.1:18443"),
+            credential = GateCredential.bearer("API_test-only".toCharArray()),
+            transport = transport,
+        ).use { client ->
+            client.registryQuery(
+                objectType = "Account",
+                accountId = "account7",
+                position = 37,
+                limit = 23,
+            )
+        }
+
+        assertEquals(
+            Json.parseToJsonElement(
+                """
+                    {
+                      "using":[
+                        "urn:ietf:params:jmap:core",
+                        "urn:stalwart:jmap"
+                      ],
+                      "methodCalls":[
+                        [
+                          "x:Account/query",
+                          {
+                            "accountId":"account7",
+                            "filter":{},
+                            "sort":[],
+                            "position":37,
+                            "limit":23,
+                            "calculateTotal":true
+                          },
+                          "gate-1"
+                        ]
+                      ]
+                    }
+                """.trimIndent(),
+            ).jsonObject,
+            transport.requests.last().body,
+        )
+    }
+
+    @Test
+    fun registryQueryRejectsInvalidPageBoundsBeforeTransport() = runBlocking {
+        listOf(
+            -1 to 1,
+            0 to 0,
+            0 to 101,
+        ).forEach { (position, limit) ->
+            val transport = QueueTransport(emptyList())
+            val client = GateJmapClient(
+                baseUrl = URI("http://127.0.0.1:18443"),
+                credential = GateCredential.bearer(
+                    "API_test-only".toCharArray(),
+                ),
+                transport = transport,
+            )
+
+            client.use {
+                assertFailsWith<IllegalArgumentException> {
+                    it.registryQuery(
+                        objectType = "Account",
+                        position = position,
+                        limit = limit,
+                    )
+                }
+            }
+            assertEquals(emptyList(), transport.requests)
+        }
     }
 
     @Test

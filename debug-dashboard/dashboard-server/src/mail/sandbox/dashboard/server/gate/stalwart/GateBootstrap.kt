@@ -119,6 +119,8 @@ internal interface GateRegistryApi : AutoCloseable {
         objectType: String,
         filter: JsonObject = buildJsonObject {},
         accountId: String? = null,
+        position: Int = 0,
+        limit: Int = 100,
     ): JsonObject
 
     suspend fun registryCreate(

@@ -256,7 +256,9 @@ class StalwartBootstrapTest {
         val transport = RecordingTransport(
             GateHttpResponse(
                 status = 200,
-                effectiveUrl = URI("http://127.0.0.1:18443/jmap/session"),
+                effectiveUrl = URI(
+                    "http://127.0.0.1:18443/.well-known/jmap",
+                ),
                 body = """
                     {
                       "apiUrl": "/jmap/",
@@ -321,7 +323,9 @@ class StalwartBootstrapTest {
         val legacy = RecordingTransport(
             GateHttpResponse(
                 status = 200,
-                effectiveUrl = URI("http://127.0.0.1:18443/jmap/session"),
+                effectiveUrl = URI(
+                    "http://127.0.0.1:18443/.well-known/jmap",
+                ),
                 body = """{"apiUrl":"/api/principal","primaryAccounts":{}}""",
             ),
         )
@@ -341,7 +345,9 @@ class StalwartBootstrapTest {
         val failed = RecordingTransport(
             GateHttpResponse(
                 status = 401,
-                effectiveUrl = URI("http://127.0.0.1:18443/jmap/session"),
+                effectiveUrl = URI(
+                    "http://127.0.0.1:18443/.well-known/jmap",
+                ),
                 body = secretBody,
             ),
         )
@@ -363,7 +369,9 @@ class StalwartBootstrapTest {
         val transport = RecordingTransport(
             GateHttpResponse(
                 status = 200,
-                effectiveUrl = URI("http://127.0.0.1:18443/jmap/session"),
+                effectiveUrl = URI(
+                    "http://127.0.0.1:18443/.well-known/jmap",
+                ),
                 body = """
                     {
                       "apiUrl":"http://127.0.0.1:18443/jmap/",
@@ -881,6 +889,8 @@ class StalwartBootstrapTest {
             objectType: String,
             filter: JsonObject,
             accountId: String?,
+            position: Int,
+            limit: Int,
         ): JsonObject = error("Unexpected scripted query $objectType")
 
         override fun close() {

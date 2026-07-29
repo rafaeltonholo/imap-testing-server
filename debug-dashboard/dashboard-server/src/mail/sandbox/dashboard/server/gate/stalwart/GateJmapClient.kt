@@ -197,7 +197,7 @@ internal enum class GateJmapCapability(
 }
 
 internal class GateJmapClient(
-    private val baseUrl: URI,
+    private val profile: StalwartEndpointProfile,
     private val credential: GateCredential,
     private val transport: GateHttpTransport,
 ) : GateRegistryApi, AutoCloseable {
@@ -205,27 +205,25 @@ internal class GateJmapClient(
     private var callSequence = 0L
     private var closed = false
 
-    init {
-        if (
-            baseUrl.scheme != "http" ||
-            baseUrl.host != "127.0.0.1" ||
-            baseUrl.port != 18443 ||
-            baseUrl.rawUserInfo != null ||
-            baseUrl.rawQuery != null ||
-            baseUrl.rawFragment != null ||
-            !(baseUrl.path.isNullOrEmpty() || baseUrl.path == "/")
-        ) {
+    internal constructor(
+        baseUrl: URI,
+        credential: GateCredential,
+        transport: GateHttpTransport,
+    ) : this(
+        profile = try {
+            StalwartEndpointProfile.fromBaseUrl(baseUrl)
+        } catch (exception: IllegalArgumentException) {
             credential.close()
-            throw IllegalArgumentException(
-                "Stalwart gate base URL must be the dedicated loopback endpoint",
-            )
-        }
-    }
+            throw exception
+        },
+        credential = credential,
+        transport = transport,
+    )
 
     override suspend fun discoverSession(): GateJmapSession {
         requireOpen()
         cachedSession?.let { return it }
-        val discoveryUrl = baseUrl.resolve("/.well-known/jmap")
+        val discoveryUrl = profile.baseUrl.resolve("/.well-known/jmap")
         val response = transport.execute(
             GateHttpRequest(
                 method = "GET",
@@ -233,6 +231,11 @@ internal class GateJmapClient(
                 credential = credential,
             ),
         )
+        if (response.effectiveUrl != discoveryUrl) {
+            invalidResponse(
+                "JMAP Session discovery did not remain on its pinned URL",
+            )
+        }
         requireSuccess(response, "JMAP Session discovery")
         val json = parseObject(response.body, "JMAP Session")
         val apiText = requiredString(
@@ -282,14 +285,22 @@ internal class GateJmapClient(
         objectType: String,
         filter: JsonObject,
         accountId: String?,
+        position: Int,
+        limit: Int,
     ): JsonObject = call(
         methodName = "x:${validateObjectType(objectType)}/query",
         arguments = buildJsonObject {
+            require(position >= 0) {
+                "Registry query position is invalid"
+            }
+            require(limit in 1..MAX_REGISTRY_QUERY_PAGE) {
+                "Registry query limit is invalid"
+            }
             accountId?.let { put("accountId", it) }
             put("filter", filter)
             put("sort", JsonArray(emptyList()))
-            put("position", 0)
-            put("limit", MAX_REGISTRY_QUERY_PAGE)
+            put("position", position)
+            put("limit", limit)
             put("calculateTotal", true)
         },
     )
@@ -452,15 +463,7 @@ internal class GateJmapClient(
     }
 
     private fun requireSafeApiUrl(url: URI) {
-        if (
-            url.scheme == baseUrl.scheme &&
-                url.host == baseUrl.host &&
-                url.port == baseUrl.port &&
-                url.rawPath == "/jmap/" &&
-                url.rawUserInfo == null &&
-                url.rawQuery == null &&
-                url.rawFragment == null
-        ) {
+        if (url == profile.apiUrl) {
             return
         }
         invalidResponse("JMAP Session advertised an unsafe API URL")
@@ -538,16 +541,15 @@ internal class GateJmapClient(
 }
 
 internal class KtorGateHttpTransport(
-    followRedirects: Boolean = true,
-    private val client: HttpClient = HttpClient(CIO) {
-        this.followRedirects = followRedirects
-        install(HttpTimeout) {
-            requestTimeoutMillis = 5_000
-            connectTimeoutMillis = 3_000
-            socketTimeoutMillis = 5_000
-        }
-    },
+    followRedirects: Boolean = false,
+    private val client: HttpClient = createGateHttpClient(followRedirects),
 ) : GateHttpTransport, AutoCloseable {
+    init {
+        require(!followRedirects) {
+            "Gate JMAP transport must not follow redirects"
+        }
+    }
+
     override suspend fun execute(request: GateHttpRequest): GateHttpResponse {
         val response = executeGateTransportRequest {
             when (request.method) {
@@ -574,6 +576,20 @@ internal class KtorGateHttpTransport(
 
     override fun close() {
         client.close()
+    }
+}
+
+private fun createGateHttpClient(followRedirects: Boolean): HttpClient {
+    require(!followRedirects) {
+        "Gate JMAP transport must not follow redirects"
+    }
+    return HttpClient(CIO) {
+        this.followRedirects = false
+        install(HttpTimeout) {
+            requestTimeoutMillis = 5_000
+            connectTimeoutMillis = 3_000
+            socketTimeoutMillis = 5_000
+        }
     }
 }
 

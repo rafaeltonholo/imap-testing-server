@@ -10,6 +10,14 @@
 
 ---
 
+> **Current live checkpoint (2026-07-29):** the authorized live capture has
+> **not** run. The primary checkout's `docker-compose.yml` and
+> `stalwart/config.toml` remain the v0.15 runtime inputs, and
+> `stalwart/config.json` is not yet the live configuration. The implementation
+> and offline tests do not constitute a live migration pass. Do not run
+> dry-run, apply, bootstrap, or recovery retirement until Task 5 produces and
+> verifies the source receipt.
+
 ## Approved credential contract
 
 **Prerequisite:** Gate 0A reports `PASS`; the checked-in `debug-dashboard/kotlin` wrapper and three Toolchain modules exist. Do not substitute Gradle or an ad-hoc Kotlin build for this plan.
@@ -471,35 +479,89 @@ Expected: the resolved target is exactly the gate-owned runtime directory, all f
 
   The command refuses symlinks, broad paths, a running copy operation, an unpinned rollback image, or a partial backup. The v0.16 edits below cannot begin until `debug-dashboard/.runtime/stalwart-migration/latest-source.json` points to a verified capture. This ordering is mandatory even when implementation resumes from a later commit; if an existing store has no valid source receipt, stop rather than booting it with v0.16.
 
-  Run this capture checkpoint while the main Compose file and TOML are still v0.15:
+  Run the offline capture tests before requesting live authorization:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_capture_stalwart_v015.py' -v
+```
+
+  Live capture requires a separate, immediate authorization containing this
+  exact sentence:
+
+```text
+I explicitly authorize the Stalwart capture command and leaving the service stopped.
+```
+
+  That sentence authorizes only the following capture command and the
+  documented consequence that the real v0.15 service remains stopped. It does
+  not authorize migration, deletion, replacement of `stalwart-data/`, or
+  starting another production runtime:
+
+```bash
 python3 scripts/capture_stalwart_v015.py capture --source-service stalwart
+```
+
+  The authorization phrase is an operator/agent approval boundary; it is not a
+  prompt emitted by the script. Run the capture while the live Compose file and
+  TOML are still v0.15, then run the read-only/isolated proofs:
+
+```bash
 python3 scripts/capture_stalwart_v015.py prove-rollback \
   --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 python3 scripts/capture_stalwart_v015.py verify \
   --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 ```
 
-Expected checkpoint: the stopped source, full backup, receipt, and independently runnable rollback copy all verify. Only now modify the main runtime.
+Expected checkpoint: the live Compose labels bind the source to the
+repository's primary checkout, the stopped source and full timestamped backup
+verify, the primary checkout's fixed and canonical receipts are digest-bound,
+and the independently runnable rollback copy proves v0.15 plus management read.
+Offline development may happen in a worktree, but the authorized capture
+intended for migration and every later live-chain command must run from the
+captured primary checkout with the reviewed scripts/assets installed there.
+Durable backup/rollback material lives beneath the ignored
+`captures/debug-dashboard/stalwart-v015/` root in that primary checkout. The
+real v0.15 source remains stopped. Only now modify the primary runtime.
 
 - [ ] Replace `latest`, `/opt/stalwart`, TOML, and `ADMIN_SECRET` with the tested image/runtime:
 
 ```yaml
 image: stalwartlabs/stalwart:v0.16.14
+container_name: stalwart-dev
+user: "2000:2000"
+restart: unless-stopped
 ports:
-  - "127.0.0.1:8443:8080"
+  - target: 8080
+    published: "8443"
+    host_ip: 127.0.0.1
+    protocol: tcp
 volumes:
-  - ./stalwart/config.json:/etc/stalwart/config.json:ro
-  - ./stalwart-data:/var/lib/stalwart
+  - type: bind
+    source: ./stalwart
+    target: /etc/stalwart
+    read_only: true
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ./stalwart-data
+    target: /var/lib/stalwart
+    read_only: false
+    bind:
+      create_host_path: false
 environment:
   STALWART_PUBLIC_URL: http://127.0.0.1:8443
 healthcheck:
   test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz/ready"]
+  interval: 2s
+  timeout: 2s
+  retries: 30
+  start_period: 2s
 ```
 
-Use the tagged image's UID/GID 2000 ownership requirement. The initial `stalwart/config.json` contains only:
+Use the tagged image's UID/GID 2000 ownership requirement. Mount the whole
+tracked `./stalwart` directory read-only at `/etc/stalwart`; do not replace it
+with a child-file bind. The initial `stalwart/config.json` is exactly these
+pretty-printed bytes:
 
 ```json
 {
@@ -508,7 +570,25 @@ Use the tagged image's UID/GID 2000 ownership requirement. The initial `stalwart
 }
 ```
 
-- [ ] Ignore `debug-dashboard/.runtime/stalwart/`, `debug-dashboard/.runtime/keys/`, `debug-dashboard/.runtime/stalwart-migration/`, and `debug-dashboard/.runtime/stalwart-backups/`. Keep migration exports and secrets mode `0600`.
+The file is exactly 56 bytes, has no final LF, and has SHA-256
+`8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963`.
+Verify both before starting v0.16:
+
+```bash
+test "$(wc -c < stalwart/config.json | tr -d ' ')" = 56
+test "$(shasum -a 256 stalwart/config.json | awk '{print $1}')" = \
+  8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963
+test "$(tail -c 1 stalwart/config.json | od -An -tuC | tr -d ' ')" = 125
+```
+
+Compact one-line JSON, a trailing LF, or any other reserialization is rejected
+even if it is semantically equivalent.
+
+- [ ] Ignore `debug-dashboard/.runtime/stalwart/`,
+  `debug-dashboard/.runtime/keys/`,
+  `debug-dashboard/.runtime/stalwart-migration/`, and the durable primary
+  capture root `captures/debug-dashboard/stalwart-v015/`. Keep migration
+  exports and secrets mode `0600`.
 
 - [ ] Run:
 
@@ -552,13 +632,42 @@ SHA-256 008a490b4c3c60572806958e1960749ecdddf263316683017003797b9c34ca1c
 
 Use it to dump v0.15 settings/principals and convert `/opt/stalwart` paths to `/var/lib/stalwart`. The wrapper writes `unmigrated.txt`; an implementer must inspect every entry before `mark-reviewed` creates a digest-bound review receipt.
 
-- [ ] Restore the backup into a separate scratch directory and boot it with the captured v0.15 image on another loopback port. Require version plus management-read success as rollback proof.
+Provision the upstream script's `requests` and `urllib3` dependencies in a
+dedicated owner-only virtual environment, then expose that environment's
+absolute Python path as `MIGRATION_PYTHON`. Do not install those dependencies
+into the repository's host interpreter or silently fall back to it.
 
-- [ ] Run v0.16.14 against the real store only through the migration override: loopback `18080`, temporary mode-`0600` recovery admin environment file, recovery mode enabled, no mail listeners, pinned image, and migrated data mount. Apply converted objects plus the reviewed bootstrap with zero failed operations.
+- [ ] Prove the captured backup through its separate rollback working copy and pinned v0.15 definition on another loopback port. Require version plus management-read success. Never boot the immutable archival `source-data` copy directly.
 
-- [ ] Remove all recovery variables, restart the normal pinned service, inspect its environment, and prove the retired recovery credential fails. Any partial failure stops v0.16, preserves the failed state for diagnosis, and restores the full v0.15 backup/config/image—never a selective RocksDB edit or implied fresh reset.
+- [ ] Run v0.16.14 against the real store only through the migration override:
+  loopback `18080`, temporary mode-`0600` recovery admin environment file,
+  recovery mode enabled, no mail listeners, pinned image, and migrated data
+  mount. Apply only the reviewed converted migration operations with zero
+  failed operations; Task 7 alone owns bootstrap and the routing proof.
 
-- [ ] Run the complete migration sequence from the worktree root:
+- [ ] Keep recovery retirement out of Task 6. `apply` must leave the
+  digest-bound recovery artifacts available for Task 7 bootstrap. Only after
+  the final Task 7 bootstrap receipt exists may retirement start the normal
+  pinned service, inspect its environment, and prove the recovery credential
+  fails.
+
+- [ ] On an apply, bootstrap, or retirement failure, stop only an exact
+  receipt-bound running container by its full container ID. Never stop an
+  unvalidated or foreign candidate. Activate the isolated v0.15 rollback from
+  the immutable backup and its scratch working copy. Activation does not copy
+  over or restore into the real `stalwart-data/`: the failed real v0.16 store
+  remains stopped and preserved for diagnosis. Bind restart state as part of
+  identity: migration main/owner require `no`, normal runtime requires
+  `unless-stopped`, and `Restarting=true`, `always`, `on-failure`, or a
+  malformed policy blocks both stopping and activation. A stopped non-exact
+  stale candidate is tolerable only with `Restarting=false` and persistent-stop
+  policy `no` or `unless-stopped`.
+
+- [ ] Run the Task 6 live sequence from the captured primary checkout root.
+  The fixed scripts, overlay, and assets must be installed in that checkout;
+  its receipt must identify the same checkout and real `stalwart-data/`.
+  Worktrees remain valid only for offline development/tests and are not a live
+  invocation root:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_stalwart_v016.py' -v
@@ -566,40 +675,35 @@ python3 scripts/capture_stalwart_v015.py verify \
   --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
 python3 scripts/capture_stalwart_v015.py prove-rollback \
   --receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
+: "${MIGRATION_PYTHON:?set MIGRATION_PYTHON to the absolute migration-venv Python path}"
 mkdir -p debug-dashboard/.runtime/stalwart-migration
 chmod 0700 debug-dashboard/.runtime/stalwart-migration
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/stalwartlabs/stalwart/v0.16.14/resources/scripts/migrate_v016.py \
   -o debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
+chmod 0600 debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
 echo "008a490b4c3c60572806958e1960749ecdddf263316683017003797b9c34ca1c  debug-dashboard/.runtime/stalwart-migration/migrate_v016.py" \
   | shasum -a 256 --check
 python3 scripts/stalwart_v016.py dry-run \
   --script debug-dashboard/.runtime/stalwart-migration/migrate_v016.py \
-  --source-receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json
-sed -n '1,240p' debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
+  --source-receipt debug-dashboard/.runtime/stalwart-migration/latest-source.json \
+  --migration-python "$MIGRATION_PYTHON"
+wc -l debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
+sed -n '1,$p' debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
 python3 scripts/stalwart_v016.py mark-reviewed \
   --report debug-dashboard/.runtime/stalwart-migration/unmigrated.txt
-docker compose -f docker-compose.yml -f docker-compose.stalwart-migration.yml config --quiet
 python3 scripts/stalwart_v016.py apply \
   --script debug-dashboard/.runtime/stalwart-migration/migrate_v016.py \
   --review-receipt debug-dashboard/.runtime/stalwart-migration/reviewed.json
-python3 scripts/stalwart_v016.py retire-recovery
 ```
 
-Expected: unit tests pass; the Task 5 source capture re-verifies as v0.15 and rollback-capable; dry-run, review, and apply each emit a safe receipt path; checksum says `OK`; migration override validates; normal v0.16.14 restart succeeds; retired recovery authentication fails. No command prints a credential.
-
-- [ ] Run `StalwartMigrationLiveTest` after normal restart:
-
-```bash
-cd debug-dashboard
-STALWART_LIVE_TESTS=1 \
-STALWART_BASE_URL=http://127.0.0.1:8443 \
-./kotlin test \
-  --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMigrationLiveTest'
-```
-
-Expected: the pre-migration manifest matches live v0.16 Accounts; internal Password and every unrelated secondary credential survive; no reserved dashboard AppPassword was created; the newly initialized encrypted snapshot is empty; every migrated ordinary Account projects as `enrollmentRequired`.
+Expected: unit tests pass; the Task 5 source capture re-verifies as v0.15 and
+rollback-capable; dry-run, review, and apply each emit a safe receipt path;
+checksum says `OK`; `apply` materializes the recovery artifacts, supplies the
+fixed migration path variables, and performs the exact primary-root/project
+two-file Compose validation before `up`; `apply.json` plus recovery artifacts
+are then ready for Task 7. Normal v0.16.14 restart and recovery retirement have
+not happened yet. No command prints a credential.
 
 - [ ] Commit:
 
@@ -612,17 +716,59 @@ git commit -m "feat: migrate Stalwart state to v0.16.14"
 
 **Files:**
 
+- Create: `scripts/bootstrap_stalwart_v016.py`
+- Create: `tests/test_bootstrap_stalwart_v016.py`
 - Create: `stalwart/bootstrap-v016.ndjson`
 - Create: `stalwart/protected-recipients.sieve`
+- Modify: `scripts/stalwart_v016.py`
+- Modify: `tests/test_stalwart_v016.py`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRoutingLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRuntimeCredentialLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/provider/stalwart/StalwartRuntimeSecretLoader.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/provider/stalwart/StalwartRuntimeSecretLoaderTest.kt`
 - Modify: `docs/stalwart-v016-migration.md`
 
-- [ ] Idempotently create the normal HTTP listener, SystemSettings, enabled `local.test` Domain without relay/catch-all, internal directory, local delivery route, protected-recipient RCPT policy, and file Tracer used by optional `x:Log`.
+- [ ] Before any live bootstrap, strictly parse and digest-bind the mode-`0644`,
+  symlink-free tracked manifest and Sieve policy. Accept the Task 6 apply
+  receipt only through its authoritative full-chain validator and bind a stable
+  before/after snapshot; parsing or hashing arbitrary `apply.json` bytes does
+  not establish trust. Plan every change from a fresh query: no-op when the
+  owned projection already matches, patch only the owned fields while
+  preserving unknown fields, create only when absent, and fail on duplicate or
+  ambiguous state. When the Domain is absent, create only independent objects,
+  then requery and resolve the real Domain ID before planning SystemSettings or
+  Account changes; no planner-only reference token may reach Stalwart. A pre-existing
+  `dashboard-management@local.test` Account without an owned durable checkpoint
+  is ambiguous and must never be adopted or overwritten.
 
-- [ ] Create exactly one immutable protected management Account/API key with the Task 1 permission set. Generate:
+- [ ] Idempotently create the normal HTTP `NetworkListener`, update
+  `SystemSettings`, reconcile the enabled non-relaying `local.test` Domain,
+  create the named `Local` `MtaRoute`, create the active protected-recipient
+  `SieveSystemScript`, and point the `MtaStageRcpt` singleton at that script.
+  The owned Domain projection explicitly clears `directoryId` and
+  `catchAllAddress`; the RCPT stage also sets `allowRelaying` to constant
+  `false`. The Sieve policy rejects both the exact protected address and its
+  `dashboard-management+*@local.test` subaddresses before enabled
+  sub-addressing can canonicalize them.
+  Pinned v0.16.14 exposes `Internal` only as a first-start bootstrap directory,
+  not as a registry `Directory` object; do not invent one. Defer a file
+  `Tracer` until its writable directory and exact `x:Log` permissions are
+  separately proven. Preserve the v0.16.14 default `MtaOutboundStrategy`
+  singleton instead of broadening the owned projection. Record its exact four
+  default expressions as a separate read-only `preserved_objects` projection;
+  it is not a ninth bootstrap-owned object. The live local-delivery proof must
+  stop if that default is missing or incompatible.
+
+- [ ] Create exactly one immutable protected management Account/API key with the
+  Task 1 permission set. The owned Account projection includes `aliases: {}` so
+  no alternate recipient address can bypass the exact and subaddress Sieve
+  checks. A fresh authoritative projection must prove it has exactly the one
+  intended API key and no Password or AppPassword, and must prove the fetched
+  key's exact Account ID, permissions, allowed-IP value, and description. Direct
+  authentication must prove the exact management Account. Stalwart's JMAP
+  Session does not expose the authenticated credential ID, so the receipt must
+  not claim that direct proof; the key ID is instead bound by the exact
+  one-credential inventory. Generate:
 
 ```text
 debug-dashboard/.runtime/secrets/stalwart-management-api-key
@@ -631,29 +777,117 @@ debug-dashboard/.runtime/stalwart/protected-accounts.json
 
 The first is a mode-`0600` secret value; the second contains only immutable protected Account IDs and is also owner-readable. `StalwartRuntimeSecretLoader` accepts only those fixed, symlink-free regular paths from validated repository configuration, returns a mutable clearable value, and never logs/serializes it. Never add a Stalwart mail operator or any `impersonate` permission.
 
+- [ ] Make bootstrap crash-recoverable with new-only mode-`0600`
+  `bootstrap-attempt.json`, `bootstrap-account.json`, `bootstrap-key.json`, and
+  `bootstrap-proof.json` checkpoints under the fixed migration root. Publish a
+  durable ownership intent before the Account create dispatch so a
+  crash-after-create can be distinguished from an unowned pre-existing
+  Account. Record the one permitted key replacement in a separate new-only
+  transition checkpoint before revocation or replacement; never rewrite the
+  original attempt marker to advance a counter. A remote key without a durably
+  captured secret is revoked by its exact owned ID before at most one
+  replacement attempt. A local secret without its matching checkpoint is
+  adopted only after exact Account, key, permission, inventory, and
+  authentication proof; it is never silently overwritten. Once
+  `bootstrap-key.json` exists, a missing or different raw key is manual
+  reconciliation—not replacement—because a new-only key checkpoint cannot be
+  rebound to a different credential.
+
+- [ ] Publish a final new-only `bootstrap.json` receipt that binds the validated
+  Task 6 apply receipt, tracked manifest and Sieve digests/identities, checkpoint
+  chain, safe object projections and immutable IDs, exact permission digest,
+  protected-ID digest, explicit management-key IP-restriction decision,
+  Stalwart `0.16.14`, and direct authentication as the exact management Account.
+  Before publishing it, require a fixed owner-only new-only
+  `bootstrap-routing-proof.json` produced by the live verifier. Bind both the
+  exact preserved `MtaOutboundStrategy` projection digest and the routing-proof
+  file identity/digest. The routing proof records only safe Account, credential,
+  submission, and message IDs plus normalized protocol outcomes; it contains no
+  password, API-key value, or digest of either.
+  Record only the management-key filename, size, and file identity—never its
+  bytes or a digest of those bytes. Recovery retirement must validate and bind
+  this receipt, its preserved-object projection, and the routing proof before
+  deleting the recovery credential; generic HTTP success is insufficient.
+
 - [ ] If the host-through-Docker source address is stable, probe with a temporary unrestricted management credential, issue the `/32`-restricted replacement, prove host success and disposable-container failure, revoke the probe, recreate the Compose network, and re-prove stability. If the address is unstable, retain loopback/network isolation and record why credential IP restriction is disabled.
+  The final local fixture decision is
+  `disabled-local-only-loopback-network-isolation`: the bootstrap Registry is
+  published only on fixed loopback `127.0.0.1:18080`, so the management key
+  deliberately uses exact empty `allowedIps` rather than binding a `/32` to an
+  unstable host-through-Docker source address. This is a final decision, not a
+  pending live-network proof.
 
 - [ ] Do not bootstrap dashboard AppPasswords for migrated ordinary Accounts. Assert they project as `enrollmentRequired`; only a later explicit request carrying that Account's normal password may enroll them.
 
 - [ ] Create disposable sender/recipient Accounts and explicitly enroll both through the request-scoped lifecycle. Live-test external/protected/unregistered recipient rejection and a normal registered `local.test` delivery/arrival with their own AppPasswords. Remove recipient access and prove readiness preflight makes zero upload/submission calls. If the JMAP submission path bypasses the proved local-recipient policy, record `STOP`.
 
+- [ ] Run bootstrap only through `bootstrap_stalwart_v016.py`. It starts the
+  receipt-bound migration recovery runtime at
+  `http://127.0.0.1:18080`, invokes `StalwartRoutingProofCliKt` itself, and binds
+  the resulting owner-only `bootstrap-routing-proof.json` into
+  `bootstrap.json`. `StalwartRoutingLiveTest` is a migration-endpoint verifier,
+  not a normal-runtime `:8443` check; do not invoke it manually against
+  `:8443`.
+
+- [ ] Run `retire-recovery` only after bootstrap has returned the validated
+  final `bootstrap.json`. Retirement must bind the final bootstrap/routing
+  proof and immutable management Account/API-key IDs, start only the base
+  Compose service on loopback `8443`, prove the old recovery credential fails,
+  and checkpoint `retire-recovery-proof.json` before deleting recovery
+  artifacts. A restart with an attempt but no proof requires reconciliation and
+  never replays the credential mutation. A restart with a valid proof resumes
+  finalize-only deletion/postflight across all partial-deletion states. A
+  substituted partial artifact fails closed, stops only the exact validated
+  normal container by full ID, and activates isolated rollback without
+  overwriting the failed real v0.16 store.
+
 - [ ] Run and commit:
 
 ```bash
+python3 -W error -m unittest \
+  tests.test_bootstrap_stalwart_v016 \
+  tests.test_stalwart_v016
+python3 -m py_compile \
+  scripts/bootstrap_stalwart_v016.py \
+  scripts/stalwart_v016.py \
+  tests/test_bootstrap_stalwart_v016.py \
+  tests/test_stalwart_v016.py
+REPOSITORY_ROOT="$(pwd -P)"
+: "${MIGRATION_PYTHON:?set MIGRATION_PYTHON to the absolute migration-venv Python path}"
+python3 scripts/bootstrap_stalwart_v016.py validate-assets \
+  --repository "$REPOSITORY_ROOT"
+python3 scripts/bootstrap_stalwart_v016.py bootstrap \
+  --repository "$REPOSITORY_ROOT" \
+  --migration-python "$MIGRATION_PYTHON"
+python3 scripts/stalwart_v016.py retire-recovery
+python3 scripts/stalwart_v016.py normal-runtime-evidence
 cd debug-dashboard
 ./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.provider.stalwart.StalwartRuntimeSecretLoaderTest'
 STALWART_LIVE_TESTS=1 \
 STALWART_BASE_URL=http://127.0.0.1:8443 \
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRuntimeCredentialLiveTest'
+./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartMigrationLiveTest'
 STALWART_LIVE_TESTS=1 \
 STALWART_BASE_URL=http://127.0.0.1:8443 \
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRoutingLiveTest'
+./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.stalwart.StalwartRuntimeCredentialLiveTest'
 cd ..
-git add stalwart debug-dashboard/dashboard-server docs/stalwart-v016-migration.md
+git add \
+  scripts/bootstrap_stalwart_v016.py \
+  scripts/stalwart_v016.py \
+  tests/test_bootstrap_stalwart_v016.py \
+  tests/test_stalwart_v016.py \
+  stalwart \
+  debug-dashboard/dashboard-server \
+  docs/stalwart-v016-migration.md
 git commit -m "feat: bootstrap scoped Stalwart runtime"
 ```
 
-Expected: loader, credential, and routing tests pass; the unenrolled recipient case records zero submission calls.
+Expected: Python planners and offline tests pass; bootstrap returns the fixed
+final receipt only after the routing proof succeeds at `:18080`; retirement
+then returns `recovery-retired.json`; the normal-runtime migration proof matches
+the pre-migration manifest, preserved credentials, empty encrypted snapshot,
+and `enrollmentRequired` projections; the loader and management credential
+proof pass at `:8443`; and the unenrolled recipient case records zero
+submission calls. Do not record a live pass until these commands actually run.
 
 ## Task 8: Prove management, mail, log, password, and deletion contracts
 
@@ -770,7 +1004,6 @@ unset STALWART_GATE_CREDENTIAL_ROOT
 for runtime_class in \
   StalwartMigrationLiveTest \
   StalwartRuntimeCredentialLiveTest \
-  StalwartRoutingLiveTest \
   StalwartManagementLiveTest \
   StalwartMailLiveTest \
   StalwartDeletionLiveTest; do

@@ -14,25 +14,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import mail.sandbox.dashboard.server.provider.stalwart.credential.CredentialPhase
 import mail.sandbox.dashboard.server.provider.stalwart.credential.CredentialStoreLoadResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.CredentialStorePaths
 import mail.sandbox.dashboard.server.provider.stalwart.credential.FileStalwartCredentialStore
 import mail.sandbox.dashboard.server.provider.stalwart.credential.STALWART_REQUIRED_MAIL_CAPABILITIES
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartBorrowedSecret
-import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCreatedCredential
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialLeaseRegistry
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialManagementRemote
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialOwnerRemote
@@ -46,7 +36,6 @@ import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAc
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccessState
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccount
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailCapability
-import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailCredentialProbeRemote
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailLeaseAcquireResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartNormalPassword
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteCreateResult
@@ -673,209 +662,6 @@ internal class StalwartMailAccessLiveHarness private constructor(
     }
 }
 
-internal class GateStalwartCredentialOwnerRemote(
-    private val baseUrl: URI,
-    private val transport: GateHttpTransport,
-) : StalwartCredentialOwnerRemote {
-    private val creates = AtomicInteger()
-
-    val createCount: Int
-        get() = creates.get()
-
-    override suspend fun createOwned(
-        account: StalwartMailAccount,
-        description: String,
-        normalPassword: StalwartNormalPassword,
-    ): StalwartRemoteCreateResult {
-        var dispatched = false
-        var client: GateJmapClient? = null
-        return try {
-            client = normalPassword.withChars { password ->
-                GateJmapClient(
-                    baseUrl = baseUrl,
-                    credential = GateCredential.basic(
-                        username = account.address,
-                        secret = password,
-                    ),
-                    transport = transport,
-                )
-            }
-            client.use { ownerClient ->
-                val session = ownerClient.discoverSession()
-                require(
-                    session.primaryAccountId == account.accountId &&
-                        session.username == account.address &&
-                        session.apiUrl == PINNED_JMAP_API_URL,
-                ) {
-                    "Lifecycle enrollment authenticated the wrong Account"
-                }
-                val enrollment = GateAppPasswordEnrollmentClient(
-                    registry = ownerClient,
-                    ownerAccountId = account.accountId,
-                    ownerAddress = account.address,
-                )
-                dispatched = true
-                creates.incrementAndGet()
-                when (
-                    val created = enrollment.tryCreate(
-                        GateAppPasswordDescription.fromServer(description),
-                    )
-                ) {
-                    is GateAppPasswordCreateResult.Created ->
-                        created.credential.use(::transferCreatedCredential)
-                    is GateAppPasswordCreateResult.Rejected ->
-                        StalwartRemoteCreateResult.Rejected
-                }
-            }
-        } catch (failure: CancellationException) {
-            if (dispatched) {
-                StalwartRemoteCreateResult.ResponseLost
-            } else {
-                throw failure
-            }
-        } catch (failure: GateJmapException) {
-            if (dispatched) {
-                StalwartRemoteCreateResult.ResponseLost
-            } else if (failure.isAuthenticationRejection()) {
-                StalwartRemoteCreateResult.Rejected
-            } else {
-                StalwartRemoteCreateResult.Unavailable
-            }
-        } catch (_: Exception) {
-            if (dispatched) {
-                StalwartRemoteCreateResult.ResponseLost
-            } else {
-                StalwartRemoteCreateResult.Unavailable
-            }
-        } finally {
-            client?.close()
-        }
-    }
-
-    private fun transferCreatedCredential(
-        created: GateCreatedAppPassword,
-    ): StalwartRemoteCreateResult {
-        val chars = created.copySecret()
-        var bytes = ByteArray(0)
-        return try {
-            bytes = chars.toAsciiBytes()
-            val owned = StalwartCreatedCredential(
-                credentialId = created.id,
-                description = created.description.value,
-                secret = bytes,
-            )
-            bytes = ByteArray(0)
-            StalwartRemoteCreateResult.Created(owned)
-        } finally {
-            chars.fill('\u0000')
-            bytes.fill(0)
-        }
-    }
-
-    private companion object {
-        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
-    }
-}
-
-internal class GateStalwartMailCredentialProbeRemote(
-    private val baseUrl: URI,
-    private val transport: GateHttpTransport,
-) : StalwartMailCredentialProbeRemote {
-    override suspend fun probe(
-        accountId: String,
-        address: String,
-        secret: StalwartBorrowedSecret,
-    ): StalwartCredentialProbeResult {
-        var client: GateJmapClient? = null
-        return try {
-            client = secret.withBytes { bytes ->
-                val chars = bytes.toAsciiChars()
-                try {
-                    GateJmapClient(
-                        baseUrl = baseUrl,
-                        credential = GateCredential.basic(
-                            username = address,
-                            secret = chars,
-                        ),
-                        transport = transport,
-                    )
-                } finally {
-                    chars.fill('\u0000')
-                }
-            }
-            client.use { mailClient ->
-                val session = mailClient.discoverSession()
-                require(
-                    session.primaryAccountId == accountId &&
-                        session.username == address &&
-                        session.apiUrl == PINNED_JMAP_API_URL,
-                ) {
-                    "Mail credential authenticated the wrong Account"
-                }
-                val payload = lifecycleMailPayload(
-                    response = mailClient.call(
-                        methodName = "Mailbox/get",
-                        arguments = buildJsonObject {
-                            put("accountId", accountId)
-                            put("ids", JsonNull)
-                            put(
-                                "properties",
-                                buildJsonArray {
-                                    add(JsonPrimitive("id"))
-                                    add(JsonPrimitive("name"))
-                                    add(JsonPrimitive("role"))
-                                },
-                            )
-                        },
-                        capabilities = MAIL_CAPABILITIES,
-                    ),
-                    expectedMethod = "Mailbox/get",
-                )
-                require(
-                    payload["accountId"]?.jsonPrimitive?.content == accountId,
-                ) {
-                    "Mailbox probe returned the wrong Account"
-                }
-                val list = payload["list"] as? JsonArray
-                    ?: throw IllegalStateException(
-                        "Mailbox probe omitted its exact result list",
-                    )
-                require(list.isNotEmpty() && list.all { it is JsonObject }) {
-                    "Mailbox probe did not return an Account mailbox"
-                }
-                require((payload["notFound"] as? JsonArray).orEmpty().isEmpty()) {
-                    "Mailbox probe reported an unexpected missing ID"
-                }
-                StalwartCredentialProbeResult.Authenticated(
-                    STALWART_REQUIRED_MAIL_CAPABILITIES,
-                )
-            }
-        } catch (failure: CancellationException) {
-            throw failure
-        } catch (failure: GateJmapException) {
-            if (failure.isAuthenticationRejection()) {
-                StalwartCredentialProbeResult.Rejected
-            } else {
-                StalwartCredentialProbeResult.Unavailable
-            }
-        } catch (_: Exception) {
-            StalwartCredentialProbeResult.Unavailable
-        } finally {
-            client?.close()
-        }
-    }
-
-    private companion object {
-        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
-        val MAIL_CAPABILITIES = listOf(
-            GateJmapCapability.CORE,
-            GateJmapCapability.MAIL,
-            GateJmapCapability.SUBMISSION,
-            GateJmapCapability.BLOB,
-        )
-    }
-}
-
 private class CreateForbiddenOwnerRemote : StalwartCredentialOwnerRemote {
     private val creates = AtomicInteger()
 
@@ -1053,64 +839,6 @@ private suspend fun resolveOrdinaryAccount(
             accountId = requireNotNull(session.primaryAccountId),
             address = address,
         )
-    }
-
-private fun lifecycleMailPayload(
-    response: JsonObject,
-    expectedMethod: String,
-): JsonObject {
-    val responses = response["methodResponses"] as? JsonArray
-        ?: throw IllegalStateException("Mail probe omitted methodResponses")
-    require(responses.size == 1) {
-        "Mail probe returned an unexpected implicit method"
-    }
-    val method = responses.single() as? JsonArray
-        ?: throw IllegalStateException("Mail probe returned a malformed tuple")
-    require(
-        method.size == 3 &&
-            method[0].jsonPrimitive.content == expectedMethod &&
-            method[2].jsonPrimitive.content.isNotBlank(),
-    ) {
-        "Mail probe returned an invalid response tuple"
-    }
-    return method[1] as? JsonObject
-        ?: throw IllegalStateException("Mail probe returned a malformed payload")
-}
-
-private fun GateJmapException.isAuthenticationRejection(): Boolean {
-    val status = (kind as? GateJmapFailure.HttpStatus)?.status
-    return status == 401 || status == 403
-}
-
-private fun CharArray.toAsciiBytes(): ByteArray =
-    ByteArray(size).also { output ->
-        try {
-            forEachIndexed { index, value ->
-                require(value.code in 1..0x7f) {
-                    "Created AppPassword was not ASCII"
-                }
-                output[index] = value.code.toByte()
-            }
-        } catch (failure: Throwable) {
-            output.fill(0)
-            throw failure
-        }
-    }
-
-private fun ByteArray.toAsciiChars(): CharArray =
-    CharArray(size).also { output ->
-        try {
-            forEachIndexed { index, value ->
-                val unsigned = value.toInt() and 0xff
-                require(unsigned in 1..0x7f) {
-                    "Stored AppPassword was not ASCII"
-                }
-                output[index] = unsigned.toChar()
-            }
-        } catch (failure: Throwable) {
-            output.fill('\u0000')
-            throw failure
-        }
     }
 
 private fun mailAccessDashboardProjectRoot(): Path {

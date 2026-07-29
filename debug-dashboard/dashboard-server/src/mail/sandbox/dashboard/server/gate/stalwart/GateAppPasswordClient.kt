@@ -13,6 +13,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import java.net.URI
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -25,6 +26,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -32,9 +34,18 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import mail.sandbox.dashboard.server.provider.stalwart.credential.STALWART_RESERVED_DESCRIPTION_PREFIX
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartBorrowedSecret
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCreatedCredential
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialManagementRemote
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialOwnerRemote
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartCredentialProbeResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartGlobalReservedAccount
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartGlobalReservedInventory
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailAccount
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailCapability
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartMailCredentialProbeRemote
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartNormalPassword
+import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteCreateResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteMutationResult
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartRemoteRead
 import mail.sandbox.dashboard.server.provider.stalwart.credential.StalwartReservedCredential
@@ -533,6 +544,8 @@ internal class GateAppPasswordEnrollmentClient(
     private val registry: GateRegistryApi,
     private val ownerAccountId: String,
     private val ownerAddress: String,
+    private val endpointProfile: StalwartEndpointProfile =
+        StalwartEndpointProfile.GATE_FIXTURE,
 ) {
     init {
         require(ownerAccountId.isSafeGateId()) {
@@ -816,7 +829,7 @@ internal class GateAppPasswordEnrollmentClient(
         require(
             session.primaryAccountId == ownerAccountId &&
                 session.username == ownerAddress &&
-                session.apiUrl == PINNED_JMAP_API_URL,
+                session.apiUrl == endpointProfile.apiUrl,
         ) {
             "Normal-password enrollment authenticated the wrong Account"
         }
@@ -914,7 +927,6 @@ internal class GateAppPasswordEnrollmentClient(
     private companion object {
         val OWNER_ADDRESS =
             Regex("[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9.-]{1,190}")
-        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
         const val APP_PASSWORD_OBJECT = "AppPassword"
         const val CREATION_ID = "dashboard-app-password"
         const val MASKED_SECRET = "****"
@@ -1138,6 +1150,8 @@ internal class GateStalwartCredentialManagementRemote(
     private val registry: GateRegistryApi,
     private val managementAccountId: String,
     protectedAccountIds: Set<String>,
+    private val endpointProfile: StalwartEndpointProfile =
+        StalwartEndpointProfile.GATE_FIXTURE,
 ) : StalwartCredentialManagementRemote {
     private val protectedAccountIds = protectedAccountIds.toSet()
     private val mutex = Mutex()
@@ -1174,11 +1188,22 @@ internal class GateStalwartCredentialManagementRemote(
         StalwartRemoteRead<StalwartGlobalReservedInventory> = mutex.withLock {
         try {
             requireManagementSession()
-            val ids = queryEveryAccountId()
-            val accounts = fetchExactAccounts(ids)
+            val initialQuery = queryEveryAccountId()
+            if (!initialQuery.ids.containsAll(protectedAccountIds)) {
+                invalidRegistryResponse(
+                    "Lifecycle Account query omitted a protected Account",
+                )
+            }
+            val accounts = fetchExactAccountsInChunks(initialQuery.ids)
+            val verifiedQuery = queryEveryAccountId()
+            if (verifiedQuery != initialQuery) {
+                invalidRegistryResponse(
+                    "Lifecycle Account query changed during inventory",
+                )
+            }
             StalwartRemoteRead.Available(
                 StalwartGlobalReservedInventory(
-                    ids.map { accountId ->
+                    initialQuery.ids.map { accountId ->
                         val account = requireNotNull(accounts[accountId])
                         StalwartGlobalReservedAccount(
                             accountId = accountId,
@@ -1309,64 +1334,144 @@ internal class GateStalwartCredentialManagementRemote(
         require(
             session.primaryAccountId == managementAccountId &&
                 session.username == GateBootstrap.MANAGEMENT_ADDRESS &&
-                session.apiUrl == PINNED_JMAP_API_URL,
+                session.apiUrl == endpointProfile.apiUrl,
         ) {
             "Lifecycle management authenticated the wrong Account"
         }
     }
 
-    private suspend fun queryEveryAccountId(): List<String> {
-        val payload = methodPayload(
-            response = registry.registryQuery(
-                objectType = "Account",
-                accountId = managementAccountId,
-            ),
-            expectedMethod = "x:Account/query",
-        )
-        requireManagementResponseAccount(payload)
-        val position = requiredNativeLong(
-            payload["position"],
-            "Lifecycle Account query position was malformed",
-        )
-        val total = requiredNativeLong(
-            payload["total"],
-            "Lifecycle Account query total was malformed",
-        )
-        val ids = payload["ids"] as? JsonArray
-            ?: invalidRegistryResponse(
-                "Lifecycle Account query omitted IDs",
+    private suspend fun queryEveryAccountId(): AccountQuerySnapshot {
+        val collected = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        var expectedTotal: Int? = null
+        var expectedQueryState: String? = null
+        repeat(MAXIMUM_ACCOUNT_QUERY_PAGES) {
+            val requestedPosition = collected.size
+            val payload = methodPayload(
+                response = registry.registryQuery(
+                    objectType = "Account",
+                    accountId = managementAccountId,
+                    position = requestedPosition,
+                    limit = ACCOUNT_QUERY_PAGE_SIZE,
+                ),
+                expectedMethod = "x:Account/query",
             )
-        val parsed = ids.map { value ->
-            requiredString(
-                value,
-                "Lifecycle Account query ID was malformed",
-            ).also {
-                if (!it.isSafeGateId()) {
+            requireManagementResponseAccount(payload)
+            val position = requiredNativeLong(
+                payload["position"],
+                "Lifecycle Account query position was malformed",
+            )
+            val total = requiredNativeLong(
+                payload["total"],
+                "Lifecycle Account query total was malformed",
+            )
+            val queryState = requiredString(
+                payload["queryState"],
+                "Lifecycle Account query state was malformed",
+            )
+            if (
+                position != requestedPosition.toLong() ||
+                total !in 0L..MAXIMUM_ACCOUNT_QUERY_RECORDS.toLong() ||
+                queryState.length !in 1..MAXIMUM_QUERY_STATE_LENGTH
+            ) {
+                invalidRegistryResponse(
+                    "Lifecycle Account query pagination was inconsistent",
+                )
+            }
+            expectedTotal?.let { expected ->
+                if (total != expected.toLong()) {
                     invalidRegistryResponse(
-                        "Lifecycle Account query ID was invalid",
+                        "Lifecycle Account query total changed",
                     )
                 }
+            } ?: run {
+                expectedTotal = total.toInt()
+            }
+            expectedQueryState?.let { expected ->
+                if (queryState != expected) {
+                    invalidRegistryResponse(
+                        "Lifecycle Account query state changed",
+                    )
+                }
+            } ?: run {
+                expectedQueryState = queryState
+            }
+            val ids = payload["ids"] as? JsonArray
+                ?: invalidRegistryResponse(
+                    "Lifecycle Account query omitted IDs",
+                )
+            if (
+                ids.size > ACCOUNT_QUERY_PAGE_SIZE ||
+                collected.size + ids.size > total
+            ) {
+                invalidRegistryResponse(
+                    "Lifecycle Account query exceeded its bounds",
+                )
+            }
+            ids.forEach { value ->
+                val id = requiredString(
+                    value,
+                    "Lifecycle Account query ID was malformed",
+                )
+                if (!id.isSafeGateId() || !seen.add(id)) {
+                    invalidRegistryResponse(
+                        "Lifecycle Account query ID was invalid or duplicated",
+                    )
+                }
+                collected += id
+            }
+            if (collected.size == total.toInt()) {
+                return AccountQuerySnapshot(
+                    ids = collected.toList(),
+                    total = requireNotNull(expectedTotal),
+                    queryState = requireNotNull(expectedQueryState),
+                )
+            }
+            if (ids.isEmpty()) {
+                invalidRegistryResponse(
+                    "Lifecycle Account query made no progress",
+                )
             }
         }
-        if (
-            position != 0L ||
-            total != parsed.size.toLong() ||
-            parsed.size != parsed.toSet().size
-        ) {
-            invalidRegistryResponse(
-                "Lifecycle Account query was incomplete",
-            )
-        }
-        return parsed
+        invalidRegistryResponse(
+            "Lifecycle Account query exceeded its page bound",
+        )
     }
 
     private suspend fun fetchExactAccount(accountId: String): JsonObject =
         fetchExactAccounts(listOf(accountId)).getValue(accountId)
 
+    private suspend fun fetchExactAccountsInChunks(
+        accountIds: List<String>,
+    ): Map<String, JsonObject> {
+        if (accountIds.isEmpty()) return emptyMap()
+        val accounts = linkedMapOf<String, JsonObject>()
+        accountIds.chunked(ACCOUNT_GET_CHUNK_SIZE).forEach { chunk ->
+            fetchExactAccounts(chunk).forEach { (accountId, account) ->
+                if (accounts.put(accountId, account) != null) {
+                    invalidRegistryResponse(
+                        "Lifecycle Account inventory duplicated an Account",
+                    )
+                }
+            }
+        }
+        if (accounts.keys != accountIds.toSet()) {
+            invalidRegistryResponse(
+                "Lifecycle Account inventory chunks were not exact",
+            )
+        }
+        return accounts
+    }
+
     private suspend fun fetchExactAccounts(
         accountIds: List<String>,
     ): Map<String, JsonObject> {
         if (accountIds.isEmpty()) return emptyMap()
+        if (accountIds.size > ACCOUNT_GET_CHUNK_SIZE) {
+            invalidRegistryResponse(
+                "Lifecycle Account get exceeded its chunk bound",
+            )
+        }
         val payload = methodPayload(
             response = registry.registryGet(
                 objectType = "Account",
@@ -1553,11 +1658,435 @@ internal class GateStalwartCredentialManagementRemote(
         val appPasswordCount: Int,
     )
 
+    private data class AccountQuerySnapshot(
+        val ids: List<String>,
+        val total: Int,
+        val queryState: String,
+    )
+
     private companion object {
-        val PINNED_JMAP_API_URL = URI("http://127.0.0.1:18443/jmap/")
         const val APP_PASSWORD_TYPE = "AppPassword"
+        const val ACCOUNT_QUERY_PAGE_SIZE = 100
+        const val ACCOUNT_GET_CHUNK_SIZE = 100
+        const val MAXIMUM_ACCOUNT_QUERY_RECORDS = 10_000
+        const val MAXIMUM_ACCOUNT_QUERY_PAGES = 100
+        const val MAXIMUM_QUERY_STATE_LENGTH = 1_024
     }
 }
+
+/**
+ * Request-scoped normal-password adapter for lifecycle enrollment. The client
+ * and its private credential copy are always closed before this call returns.
+ */
+internal class GateStalwartCredentialOwnerRemote(
+    private val endpointProfile: StalwartEndpointProfile,
+    private val transport: GateHttpTransport,
+) : StalwartCredentialOwnerRemote {
+    private val creates = AtomicInteger()
+
+    internal constructor(
+        baseUrl: URI,
+        transport: GateHttpTransport,
+    ) : this(
+        endpointProfile = StalwartEndpointProfile.fromBaseUrl(baseUrl),
+        transport = transport,
+    )
+
+    val createCount: Int
+        get() = creates.get()
+
+    override suspend fun createOwned(
+        account: StalwartMailAccount,
+        description: String,
+        normalPassword: StalwartNormalPassword,
+    ): StalwartRemoteCreateResult {
+        var dispatched = false
+        var client: GateJmapClient? = null
+        return try {
+            client = normalPassword.withChars { password ->
+                GateJmapClient(
+                    profile = endpointProfile,
+                    credential = GateCredential.basic(
+                        username = account.address,
+                        secret = password,
+                    ),
+                    transport = transport,
+                )
+            }
+            client.use { ownerClient ->
+                val session = ownerClient.discoverSession()
+                require(
+                    session.primaryAccountId == account.accountId &&
+                        session.username == account.address &&
+                        session.apiUrl == endpointProfile.apiUrl,
+                ) {
+                    "Lifecycle enrollment authenticated the wrong Account"
+                }
+                val enrollment = GateAppPasswordEnrollmentClient(
+                    registry = ownerClient,
+                    ownerAccountId = account.accountId,
+                    ownerAddress = account.address,
+                    endpointProfile = endpointProfile,
+                )
+                dispatched = true
+                creates.incrementAndGet()
+                when (
+                    val created = enrollment.tryCreate(
+                        GateAppPasswordDescription.fromServer(description),
+                    )
+                ) {
+                    is GateAppPasswordCreateResult.Created ->
+                        created.credential.use(::transferCreatedCredential)
+                    is GateAppPasswordCreateResult.Rejected ->
+                        StalwartRemoteCreateResult.Rejected
+                }
+            }
+        } catch (failure: CancellationException) {
+            if (dispatched) {
+                StalwartRemoteCreateResult.ResponseLost
+            } else {
+                throw failure
+            }
+        } catch (failure: GateJmapException) {
+            if (dispatched) {
+                StalwartRemoteCreateResult.ResponseLost
+            } else if (failure.isAuthenticationRejection()) {
+                StalwartRemoteCreateResult.Rejected
+            } else {
+                StalwartRemoteCreateResult.Unavailable
+            }
+        } catch (_: Exception) {
+            if (dispatched) {
+                StalwartRemoteCreateResult.ResponseLost
+            } else {
+                StalwartRemoteCreateResult.Unavailable
+            }
+        } finally {
+            client?.close()
+        }
+    }
+
+    private fun transferCreatedCredential(
+        created: GateCreatedAppPassword,
+    ): StalwartRemoteCreateResult {
+        val chars = created.copySecret()
+        var bytes = ByteArray(0)
+        return try {
+            bytes = chars.toAsciiBytes()
+            val owned = StalwartCreatedCredential(
+                credentialId = created.id,
+                description = created.description.value,
+                secret = bytes,
+            )
+            bytes = ByteArray(0)
+            StalwartRemoteCreateResult.Created(owned)
+        } finally {
+            chars.fill('\u0000')
+            bytes.fill(0)
+        }
+    }
+}
+
+/**
+ * Request-scoped AppPassword authentication/capability probe used by the
+ * lifecycle service before it publishes Ready.
+ */
+internal class GateStalwartMailCredentialProbeRemote(
+    private val endpointProfile: StalwartEndpointProfile,
+    private val transport: GateHttpTransport,
+) : StalwartMailCredentialProbeRemote {
+    internal constructor(
+        baseUrl: URI,
+        transport: GateHttpTransport,
+    ) : this(
+        endpointProfile = StalwartEndpointProfile.fromBaseUrl(baseUrl),
+        transport = transport,
+    )
+
+    override suspend fun probe(
+        accountId: String,
+        address: String,
+        secret: StalwartBorrowedSecret,
+    ): StalwartCredentialProbeResult {
+        var client: GateJmapClient? = null
+        return try {
+            client = secret.withBytes { bytes ->
+                val chars = bytes.toAsciiChars()
+                try {
+                    GateJmapClient(
+                        profile = endpointProfile,
+                        credential = GateCredential.basic(
+                            username = address,
+                            secret = chars,
+                        ),
+                        transport = transport,
+                    )
+                } finally {
+                    chars.fill('\u0000')
+                }
+            }
+            client.use { mailClient ->
+                val session = mailClient.discoverSession()
+                require(
+                    session.primaryAccountId == accountId &&
+                        session.username == address &&
+                        session.apiUrl == endpointProfile.apiUrl,
+                ) {
+                    "Mail credential authenticated the wrong Account"
+                }
+                val proven = linkedSetOf<StalwartMailCapability>()
+                if (proveCapability { proveCore(mailClient) }) {
+                    proven += StalwartMailCapability.Core
+                }
+                if (proveCapability { proveMail(mailClient, accountId) }) {
+                    proven += StalwartMailCapability.Mail
+                }
+                if (
+                    proveCapability {
+                        proveAbsentGet(
+                            client = mailClient,
+                            accountId = accountId,
+                            methodName = "EmailSubmission/get",
+                            capability = GateJmapCapability.SUBMISSION,
+                        )
+                    }
+                ) {
+                    proven += StalwartMailCapability.Submission
+                }
+                if (
+                    proveCapability {
+                        proveAbsentGet(
+                            client = mailClient,
+                            accountId = accountId,
+                            methodName = "Blob/get",
+                            capability = GateJmapCapability.BLOB,
+                        )
+                    }
+                ) {
+                    proven += StalwartMailCapability.Blob
+                }
+                StalwartCredentialProbeResult.Authenticated(
+                    proven.toSet(),
+                )
+            }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: GateJmapException) {
+            if (failure.isAuthenticationRejection()) {
+                StalwartCredentialProbeResult.Rejected
+            } else {
+                StalwartCredentialProbeResult.Unavailable
+            }
+        } catch (_: Exception) {
+            StalwartCredentialProbeResult.Unavailable
+        } finally {
+            client?.close()
+        }
+    }
+
+    private suspend fun proveCapability(
+        operation: suspend () -> Unit,
+    ): Boolean =
+        try {
+            operation()
+            true
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: GateJmapException) {
+            when (val kind = failure.kind) {
+                is GateJmapFailure.MethodError -> false
+                is GateJmapFailure.HttpStatus ->
+                    if (kind.status == 401 || kind.status == 403) {
+                        false
+                    } else {
+                        throw failure
+                    }
+                GateJmapFailure.InvalidResponse,
+                GateJmapFailure.Transport,
+                -> throw failure
+            }
+        }
+
+    private suspend fun proveCore(client: GateJmapClient) {
+        val payload = methodPayload(
+            response = client.call(
+                methodName = "Core/echo",
+                arguments = buildJsonObject {
+                    put("probe", CORE_PROBE_MARKER)
+                },
+                capabilities = CORE_CAPABILITIES,
+            ),
+            expectedMethod = "Core/echo",
+        )
+        if (
+            payload.keys != setOf("probe") ||
+            requiredString(
+                payload["probe"],
+                "Core probe marker was malformed",
+            ) != CORE_PROBE_MARKER
+        ) {
+            invalidRegistryResponse("Core probe did not echo its exact marker")
+        }
+    }
+
+    private suspend fun proveMail(
+        client: GateJmapClient,
+        accountId: String,
+    ) {
+        val payload = methodPayload(
+            response = client.call(
+                methodName = "Mailbox/get",
+                arguments = buildJsonObject {
+                    put("accountId", accountId)
+                    put("ids", JsonNull)
+                    put(
+                        "properties",
+                        buildJsonArray {
+                            add(JsonPrimitive("id"))
+                            add(JsonPrimitive("name"))
+                            add(JsonPrimitive("role"))
+                        },
+                    )
+                },
+                capabilities = MAIL_CAPABILITIES,
+            ),
+            expectedMethod = "Mailbox/get",
+        )
+        requireProbeAccount(payload, accountId, "Mailbox")
+        val list = payload["list"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Mailbox probe omitted its exact result list",
+            )
+        if (list.isEmpty() || list.any { it !is JsonObject }) {
+            invalidRegistryResponse(
+                "Mailbox probe did not return an Account mailbox",
+            )
+        }
+        if (!(payload["notFound"] as? JsonArray).orEmpty().isEmpty()) {
+            invalidRegistryResponse(
+                "Mailbox probe reported an unexpected missing ID",
+            )
+        }
+    }
+
+    private suspend fun proveAbsentGet(
+        client: GateJmapClient,
+        accountId: String,
+        methodName: String,
+        capability: GateJmapCapability,
+    ) {
+        val payload = methodPayload(
+            response = client.call(
+                methodName = methodName,
+                arguments = buildJsonObject {
+                    put("accountId", accountId)
+                    put(
+                        "ids",
+                        buildJsonArray {
+                            add(JsonPrimitive(ABSENT_PROBE_ID))
+                        },
+                    )
+                    put(
+                        "properties",
+                        buildJsonArray {
+                            add(JsonPrimitive("id"))
+                        },
+                    )
+                },
+                capabilities = listOf(
+                    GateJmapCapability.CORE,
+                    capability,
+                ),
+            ),
+            expectedMethod = methodName,
+        )
+        requireProbeAccount(payload, accountId, methodName)
+        val list = payload["list"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Read-only capability probe omitted its result list",
+            )
+        val notFound = payload["notFound"] as? JsonArray
+            ?: invalidRegistryResponse(
+                "Read-only capability probe omitted notFound",
+            )
+        if (
+            list.isNotEmpty() ||
+            notFound.map { value ->
+                requiredString(
+                    value,
+                    "Read-only capability probe notFound ID was malformed",
+                )
+            } != listOf(ABSENT_PROBE_ID)
+        ) {
+            invalidRegistryResponse(
+                "Read-only capability probe result was not exact",
+            )
+        }
+    }
+
+    private fun requireProbeAccount(
+        payload: JsonObject,
+        accountId: String,
+        label: String,
+    ) {
+        if (
+            requiredString(
+                payload["accountId"],
+                "$label probe Account ID was malformed",
+            ) != accountId
+        ) {
+            invalidRegistryResponse("$label probe returned the wrong Account")
+        }
+    }
+
+    private companion object {
+        const val CORE_PROBE_MARKER = "mail-sandbox-debug-dashboard"
+        const val ABSENT_PROBE_ID = "mailSandboxProbeAbsent"
+        val CORE_CAPABILITIES = listOf(
+            GateJmapCapability.CORE,
+        )
+        val MAIL_CAPABILITIES = listOf(
+            GateJmapCapability.CORE,
+            GateJmapCapability.MAIL,
+        )
+    }
+}
+
+private fun GateJmapException.isAuthenticationRejection(): Boolean {
+    val status = (kind as? GateJmapFailure.HttpStatus)?.status
+    return status == 401 || status == 403
+}
+
+private fun CharArray.toAsciiBytes(): ByteArray =
+    ByteArray(size).also { output ->
+        try {
+            forEachIndexed { index, value ->
+                require(value.code in 1..0x7f) {
+                    "Created AppPassword was not ASCII"
+                }
+                output[index] = value.code.toByte()
+            }
+        } catch (failure: Throwable) {
+            output.fill(0)
+            throw failure
+        }
+    }
+
+private fun ByteArray.toAsciiChars(): CharArray =
+    CharArray(size).also { output ->
+        try {
+            forEachIndexed { index, value ->
+                val unsigned = value.toInt() and 0xff
+                require(unsigned in 1..0x7f) {
+                    "Stored AppPassword was not ASCII"
+                }
+                output[index] = unsigned.toChar()
+            }
+        } catch (failure: Throwable) {
+            output.fill('\u0000')
+            throw failure
+        }
+    }
 
 private fun requiredNativeLong(
     value: JsonElement?,
