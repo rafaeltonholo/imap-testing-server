@@ -41,6 +41,8 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"   # OAuth2 introspection endpoint
+    volumes:
+      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 5s

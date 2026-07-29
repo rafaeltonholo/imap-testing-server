@@ -65,37 +65,13 @@ class DovecotBaselineConfigAuditTest {
     }
 
     @Test
-    fun remainingDeferredEligibilityHazardsAreCharacterizedUntilOwningTasksRemoveThem() {
+    fun remainingDeferredEligibilityHazardIsCharacterizedUntilItsOwningTaskRemovesIt() {
         val authConfig = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
-        val oauthServer = Files.readString(repositoryRoot.resolve("oauth2-mock/server.py"))
         val postfixConfig = Files.readString(repositoryRoot.resolve("postfix/main.cf"))
 
         val observedHazards = buildMap {
             if (Regex("""(?m)^\s*userdb\s+static\s*\{""").containsMatchIn(authConfig)) {
                 put("userdb static accepts non-existent targets", "Gate 0C Task 2")
-            }
-            val validPrefixStart = oauthServer.indexOf(
-                """if token.startswith("valid-"):""",
-            )
-            val nextPrefixStart = oauthServer.indexOf(
-                """if token.startswith("expired-"):""",
-                startIndex = validPrefixStart.coerceAtLeast(0),
-            )
-            val validPrefixBranch = if (
-                validPrefixStart >= 0 && nextPrefixStart > validPrefixStart
-            ) {
-                oauthServer.substring(validPrefixStart, nextPrefixStart)
-            } else {
-                ""
-            }
-            if (
-                validPrefixBranch.contains(
-                    """username = token[len("valid-"):]""",
-                ) &&
-                Regex(""""active"\s*:\s*True""")
-                    .containsMatchIn(validPrefixBranch)
-            ) {
-                put("valid-<anything> OAuth introspection can be active", "Gate 0C Task 3")
             }
             if (
                 Regex("""(?m)^local_recipient_maps\s*=\s*$""")
@@ -111,10 +87,9 @@ class DovecotBaselineConfigAuditTest {
         }
 
         // These are temporary characterization expectations, not desired
-        // invariants. Tasks 3–4 must remove their entry as they remediate it.
+        // invariants. Task 4 must remove its entry as it remediates it.
         assertEquals(
             mapOf(
-                "valid-<anything> OAuth introspection can be active" to "Gate 0C Task 3",
                 "Postfix accepts arbitrary local recipients" to "Gate 0C Task 4",
             ),
             observedHazards,

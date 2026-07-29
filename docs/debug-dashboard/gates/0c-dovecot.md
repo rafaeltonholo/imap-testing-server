@@ -56,19 +56,20 @@ for Gate 0C and avoids reproducing unrelated runtime defaults.
 | Initial condition | Concrete baseline evidence | Task owner | Task 1 treatment |
 |---|---|---|---|
 | A static userdb can resolve a non-existent target | The Task 1 baseline contained `userdb static` with a templated `/srv/vmail/%{user}` home | Task 2 | Replaced in Task 2 with an exact passwd-file userdb lookup against `/etc/dovecot/runtime/users` |
-| A prefix token can make an arbitrary identity active | `oauth2-mock/server.py` returns `active: True` for every `token.startswith("valid-")` suffix | Task 3 | Characterized only; unchanged |
+| A prefix token can make an arbitrary identity active | The Task 1 mock returned `active: True` for every `token.startswith("valid-")` suffix | Task 3 | Replaced in Task 3 with a fresh canonical eligibility lookup on every OAuth decision |
 | Postfix accepts arbitrary local recipients | `postfix/main.cf` has empty `local_recipient_maps` and `smtpd_reject_unlisted_recipient = no` | Task 4 | Characterized only; unchanged |
 | Ordinary mail/OAuth host publications were wildcard-bound | Baseline Compose mappings omitted a host address for Dovecot, Postfix, and OAuth | Task 1 | Replaced with the exact loopback mappings below |
 | The Dovecot image floated and services had fixed names | Baseline used `dovecot/dovecot:latest` and four `container_name` directives | Task 1 | Image pinned; all fixed names removed |
 
-The focused Kotlin audit now keeps the two remaining deferred conditions
-visible as explicit Task 3/4 assignments. Its Task 1 assertions initially failed for
+The focused Kotlin audit now keeps the remaining deferred Postfix condition
+visible as an explicit Task 4 assignment. Its Task 1 assertions initially failed for
 the floating image, wildcard/legacy port mappings, and four fixed container
 names: 1 test passed and 3 failed. This is the intentional RED evidence.
 The deferred assertions are temporary characterization, not desired
-invariants: Tasks 3 and 4 must remove their entries during their own RED/GREEN
-remediation. Task 2 removed the former static-userdb characterization after
-replacing that boundary.
+invariants: Task 4 must remove its entry during its own RED/GREEN remediation.
+Task 2 removed the former static-userdb characterization after replacing that
+boundary, and Task 3 removed the arbitrary prefix-token characterization after
+making OAuth decisions eligibility-aware.
 
 ## Task 1 frozen Compose boundary
 
@@ -221,6 +222,46 @@ live/action/assets variables were absent. Those tests were not enabled because
 this task neither permits live Stalwart access nor supplies the browser
 production bundle environment.
 
+## Task 3 eligibility-aware OAuth boundary
+
+The OAuth mock mounts only the same containing
+`./debug-dashboard/.runtime/dovecot` directory, read-only at
+`/etc/dovecot/runtime`; it does not mount a replaceable file directly or any
+operator-secret directory. Its fixed reader opens
+`/etc/dovecot/runtime/users` read-only without following the final symlink,
+requires a mode-`0600` regular file, bounds reads to 1 MiB, verifies a stable
+file identity, decodes strict UTF-8, and parses the same canonical lowercase
+ASCII addresses and exact ARGON2ID PHC form as the Kotlin writer. A missing,
+unreadable, replaced-during-read, symbolic, malformed, duplicate, or
+incorrectly permissioned authority fails closed.
+
+Authorization, authorization-code exchange, refresh, stored-token
+introspection, and direct `valid-<username>` introspection each perform a
+fresh eligibility decision. Removing an account therefore prevents new
+codes/tokens and makes its existing or test-convention valid token inactive
+without restarting the mock. An ineligible refresh grant is also revoked.
+Expired, insufficient-scope, and invalid test-token responses retain their
+existing behavior. Submitted bearer, authorization-code, refresh, and
+password values are absent from diagnostics, errors, and logs; successful
+protocol responses still return the newly issued code or tokens required by
+OAuth.
+
+### Task 3 RED/GREEN evidence
+
+The first stdlib test run was intentionally RED. It reported the missing
+`EligibilityReader`, allowed non-eligible authorization/code/refresh/token
+paths, and exposed the submitted bearer value in the introspection log. A
+parser-parity regression was then RED for an ARGON2 parameter value that
+Kotlin rejects as outside its signed 32-bit range. After implementation, all
+19 focused Python tests passed on the host and in the Python 3.12 image. They
+cover every issuance/recheck transition, immediate deletion,
+authority-reader failure, canonical parsing, symbolic and
+unreadable/non-regular files, bounded UTF-8 input, no caching, the exact
+read-only Compose mount, retained test-token semantics, and secret canaries in
+errors/logs. `docker compose config --quiet` exited `0`, the focused Kotlin
+baseline audit passed `4/4`, and `docker compose build oauth2-mock` completed
+successfully. No service was started or restarted.
+
 ## Verification
 
 The focused audit command is:
@@ -236,7 +277,7 @@ cd debug-dashboard
 The final run passed `4/4` with zero skipped or failed. It verifies the pinned
 Dovecot image inside the Dovecot service, exact service-scoped port lists
 (including rejection of duplicates or unreviewed syntax), absence of every
-fixed container name, and the temporary Task 3/4 hazard characterization.
+fixed container name, and the temporary Task 4 hazard characterization.
 
 `docker compose config --quiet` exited `0`. The expanded
 `docker compose config` model was inspected with secret-bearing environment
