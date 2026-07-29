@@ -1,0 +1,125 @@
+# Gate 0C — Dovecot identity and operator ingress
+
+## Status
+
+- **Task 1 — Freeze and inspect the Dovecot baseline:** complete.
+- **Gate 0C:** in progress. Tasks 2–4 still own the eligibility, OAuth, and
+  Postfix recipient-boundary work below. This document does not record a Gate
+  0C PASS.
+
+## Task 1 baseline evidence
+
+The baseline was captured from commit
+`79d15652148ea2a52940b3210302ddad52100ac5` on 2026-07-29, before
+`docker-compose.yml` was edited. No image pull was needed.
+
+```text
+$ docker image inspect dovecot/dovecot:latest --format '{{json .RepoDigests}}'
+["dovecot/dovecot@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b"]
+```
+
+The cached image resolved as `linux/arm64`. Its local repository digest matched
+the reviewed multi-platform digest, and the permitted dependency-free
+ephemeral version check reported:
+
+```text
+$ docker compose run --rm --no-deps dovecot dovecot --version
+2.4.1 (7d8c0e5759)
+```
+
+The effective configuration was captured with:
+
+```text
+$ docker compose run --rm --no-deps dovecot doveconf -n
+```
+
+That run reported Dovecot `2.4.1`, Pigeonhole `2.4.1`, Debian 12.11 on
+`aarch64`, and `dovecot_config_version = 2.4.1`. The bounded fields relevant to
+this gate, normalized below for compactness, were:
+
+```text
+service imap-login:  imap=31143, imaps=31993
+service pop3-login: pop3=31110, pop3s=31990
+passdb passwd-file: /etc/dovecot/conf.d/users
+passdb oauth2:      mechanisms_filter=xoauth2 oauthbearer
+userdb static:      uid=1000, gid=1000, home=/srv/vmail/%{user}
+oauth2:             POST introspection at http://oauth2-mock:8080/introspect
+```
+
+The full effective configuration was inspected locally. It is intentionally
+not copied into this report; the excerpt above freezes only the facts required
+for Gate 0C and avoids reproducing unrelated runtime defaults.
+
+## Initial hazard inventory and ownership
+
+| Initial condition | Concrete baseline evidence | Task owner | Task 1 treatment |
+|---|---|---|---|
+| A static userdb can resolve a non-existent target | `config/10-auth.conf` contains `userdb static` with a templated `/srv/vmail/%{user}` home | Task 2 | Characterized only; unchanged |
+| A prefix token can make an arbitrary identity active | `oauth2-mock/server.py` returns `active: True` for every `token.startswith("valid-")` suffix | Task 3 | Characterized only; unchanged |
+| Postfix accepts arbitrary local recipients | `postfix/main.cf` has empty `local_recipient_maps` and `smtpd_reject_unlisted_recipient = no` | Task 4 | Characterized only; unchanged |
+| Ordinary mail/OAuth host publications were wildcard-bound | Baseline Compose mappings omitted a host address for Dovecot, Postfix, and OAuth | Task 1 | Replaced with the exact loopback mappings below |
+| The Dovecot image floated and services had fixed names | Baseline used `dovecot/dovecot:latest` and four `container_name` directives | Task 1 | Image pinned; all fixed names removed |
+
+The focused Kotlin audit keeps the three deferred conditions visible as
+explicit Task 2/3/4 assignments. Its Task 1 assertions initially failed for
+the floating image, wildcard/legacy port mappings, and four fixed container
+names: 1 test passed and 3 failed. This is the intentional RED evidence.
+The deferred assertions are temporary characterization, not desired
+invariants: each owning task must remove its entry during that task's own
+RED/GREEN remediation.
+
+## Task 1 frozen Compose boundary
+
+Dovecot is pinned exactly to:
+
+```text
+dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b
+```
+
+The reviewed ordinary host publications are:
+
+| Protocol | Host publication | Container port |
+|---|---:|---:|
+| IMAP STARTTLS | `127.0.0.1:1143` | `31143` |
+| IMAPS | `127.0.0.1:1993` | `31993` |
+| POP3 STARTTLS | `127.0.0.1:1110` | `31110` |
+| POP3S | `127.0.0.1:1995` | `31990` |
+| SMTP | `127.0.0.1:1025` | `25` |
+| SMTPS | `127.0.0.1:1465` | `465` |
+| SMTP submission | `127.0.0.1:1587` | `587` |
+| OAuth introspection | `127.0.0.1:8080` | `8080` |
+
+No service in the ordinary Compose model has a fixed `container_name`; Compose
+project names remain available as the isolation boundary. Task 1 removes
+Stalwart's fixed name but does not change its image, configuration, data, or
+host publication.
+
+## Verification
+
+The focused audit command is:
+
+```bash
+cd debug-dashboard
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.dovecot.DovecotBaselineConfigAuditTest'
+```
+
+The final run passed `4/4` with zero skipped or failed. It verifies the pinned
+Dovecot image inside the Dovecot service, exact service-scoped port lists
+(including rejection of duplicates or unreviewed syntax), absence of every
+fixed container name, and the temporary Task 2/3/4 hazard characterization.
+
+`docker compose config --quiet` exited `0`. The expanded
+`docker compose config` model was inspected with secret-bearing environment
+values redacted and showed:
+
+- the exact pinned Dovecot image and digest;
+- no `container_name` field on any service;
+- `host_ip: 127.0.0.1` with the exact published/target pairs for all four
+  ordinary Dovecot ports, all three Postfix ports, and the OAuth port.
+
+The unchanged Stalwart publication is outside the Task 1 port scope; only its
+fixed container name was removed. No `docker compose up`, `down`, `restart`,
+live Stalwart access, or Stalwart data operation was performed.
