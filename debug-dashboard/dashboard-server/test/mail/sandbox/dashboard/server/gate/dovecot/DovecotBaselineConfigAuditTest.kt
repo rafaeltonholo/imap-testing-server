@@ -65,7 +65,7 @@ class DovecotBaselineConfigAuditTest {
     }
 
     @Test
-    fun deferredEligibilityHazardsAreCharacterizedUntilOwningTasksRemoveThem() {
+    fun remainingDeferredEligibilityHazardsAreCharacterizedUntilOwningTasksRemoveThem() {
         val authConfig = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
         val oauthServer = Files.readString(repositoryRoot.resolve("oauth2-mock/server.py"))
         val postfixConfig = Files.readString(repositoryRoot.resolve("postfix/main.cf"))
@@ -111,10 +111,9 @@ class DovecotBaselineConfigAuditTest {
         }
 
         // These are temporary characterization expectations, not desired
-        // invariants. Tasks 2–4 must remove their entry as they remediate it.
+        // invariants. Tasks 3–4 must remove their entry as they remediate it.
         assertEquals(
             mapOf(
-                "userdb static accepts non-existent targets" to "Gate 0C Task 2",
                 "valid-<anything> OAuth introspection can be active" to "Gate 0C Task 3",
                 "Postfix accepts arbitrary local recipients" to "Gate 0C Task 4",
             ),

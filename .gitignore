@@ -3,6 +3,10 @@ ssl/*
 stalwart-data/*
 mails/temp/*
 config/*.bak-*
+/config/users
+debug-dashboard/.runtime/dovecot/
+debug-dashboard/.runtime/dovecot-operator/
+debug-dashboard/.runtime/secrets/
 .worktrees/
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,windows,macos,linux,androidstudio
@@ -242,4 +246,3 @@ mails/debugging/*
 # AI stuff
 .claude/settings.local.json
 .superpowers/brainstorm/
-

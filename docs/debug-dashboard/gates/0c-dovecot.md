@@ -3,9 +3,10 @@
 ## Status
 
 - **Task 1 — Freeze and inspect the Dovecot baseline:** complete.
-- **Gate 0C:** in progress. Tasks 2–4 still own the eligibility, OAuth, and
-  Postfix recipient-boundary work below. This document does not record a Gate
-  0C PASS.
+- **Task 2 — Replace tracked plaintext runtime authority:** complete.
+- **Gate 0C:** in progress. Tasks 3–9 still own the OAuth, Postfix,
+  operator-ingress, lifecycle, and final decision work. This document does not
+  record a Gate 0C PASS.
 
 ## Task 1 baseline evidence
 
@@ -54,19 +55,20 @@ for Gate 0C and avoids reproducing unrelated runtime defaults.
 
 | Initial condition | Concrete baseline evidence | Task owner | Task 1 treatment |
 |---|---|---|---|
-| A static userdb can resolve a non-existent target | `config/10-auth.conf` contains `userdb static` with a templated `/srv/vmail/%{user}` home | Task 2 | Characterized only; unchanged |
+| A static userdb can resolve a non-existent target | The Task 1 baseline contained `userdb static` with a templated `/srv/vmail/%{user}` home | Task 2 | Replaced in Task 2 with an exact passwd-file userdb lookup against `/etc/dovecot/runtime/users` |
 | A prefix token can make an arbitrary identity active | `oauth2-mock/server.py` returns `active: True` for every `token.startswith("valid-")` suffix | Task 3 | Characterized only; unchanged |
 | Postfix accepts arbitrary local recipients | `postfix/main.cf` has empty `local_recipient_maps` and `smtpd_reject_unlisted_recipient = no` | Task 4 | Characterized only; unchanged |
 | Ordinary mail/OAuth host publications were wildcard-bound | Baseline Compose mappings omitted a host address for Dovecot, Postfix, and OAuth | Task 1 | Replaced with the exact loopback mappings below |
 | The Dovecot image floated and services had fixed names | Baseline used `dovecot/dovecot:latest` and four `container_name` directives | Task 1 | Image pinned; all fixed names removed |
 
-The focused Kotlin audit keeps the three deferred conditions visible as
-explicit Task 2/3/4 assignments. Its Task 1 assertions initially failed for
+The focused Kotlin audit now keeps the two remaining deferred conditions
+visible as explicit Task 3/4 assignments. Its Task 1 assertions initially failed for
 the floating image, wildcard/legacy port mappings, and four fixed container
 names: 1 test passed and 3 failed. This is the intentional RED evidence.
 The deferred assertions are temporary characterization, not desired
-invariants: each owning task must remove its entry during that task's own
-RED/GREEN remediation.
+invariants: Tasks 3 and 4 must remove their entries during their own RED/GREEN
+remediation. Task 2 removed the former static-userdb characterization after
+replacing that boundary.
 
 ## Task 1 frozen Compose boundary
 
@@ -94,6 +96,123 @@ project names remain available as the isolation boundary. Task 1 removes
 Stalwart's fixed name but does not change its image, configuration, data, or
 host publication.
 
+## Task 2 hashed runtime authority
+
+`config/users` was removed. Its address column alone was converted into the
+deterministically ordered `config/users.seed`; no legacy password or hash was
+printed, retained, or used to initialize runtime state. The root ignore rules
+now include exact `/config/users` plus the Dovecot, future Dovecot-operator,
+and raw-secret runtime directories. There is no tracked default password.
+
+The fixed production authority is
+`debug-dashboard/.runtime/dovecot/users`, with the stable global lock at
+`debug-dashboard/.runtime/dovecot/users.lock`. The Kotlin boundary:
+
+- accepts only canonical lowercase ASCII addr-specs and the bounded provider
+  form `{ARGON2ID}$argon2id$<version>$<parameters>$<salt>$<hash>`, with every
+  encoded segment non-empty;
+- preserves comments, blank lines, and unrelated entries deterministically;
+- exposes only `seed`, `add <address>`, `reset <address>`,
+  `remove <address>`, and `list`;
+- receives bootstrap/add/reset secrets only from stdin and clears mutable
+  password and process buffers;
+- uses the fixed no-shell command equivalent to
+  `docker compose exec -T dovecot doveadm pw -s ARGON2ID`, with the password
+  supplied twice over stdin and bounded output/timeout; and
+- holds `FileChannel.lock()` on the stable lock from read through atomic
+  replace, parent durability, and post-write verification.
+
+The writer rejects symbolic fixed-path components and non-regular or
+incorrectly permissioned target, lock, and temporary files. Its owned
+directory is mode `0700`; target, lock, and recognized same-directory
+temporaries are mode `0600` on POSIX. Tests cover concurrent JVM processes,
+metadata preservation, cleanup of only fixed recognizable abandoned
+temporaries, failure before replace (old truth remains), and failure after
+replace (new truth remains).
+
+Ordinary Dovecot mounts the containing
+`./debug-dashboard/.runtime/dovecot` directory read-only at
+`/etc/dovecot/runtime`; it does not mount the replaceable file or any
+operator-secret directory. Both passwd-file passdb and userdb use
+`/etc/dovecot/runtime/users`. The userdb defaults compile as exact Dovecot 2.4
+`uid:default`, `gid:default`, and `home:default` fields.
+
+The pinned image baseline exposed `service doveadm` /
+`inet_listener http` on port `8080`. `config/20-doveadm.conf` overrides that
+exact listener to `port = 0`; no guessed listener name or network
+administration path was added.
+
+### Task 2 RED/GREEN evidence
+
+The focused RED command was:
+
+```bash
+cd debug-dashboard
+./kotlin test \
+  --include-module dashboard-server \
+  --include-classes \
+  'mail.sandbox.dashboard.server.gate.dovecot.EligibilityFileTest'
+```
+
+It exited `1` during `:dashboard-server:compileJvmTest` because the new
+`EligibilityEntry`, `EligibilityFile`, fixed paths, hash process boundary, and
+CLI symbols did not exist. After the code boundary reached 18/18, a
+configuration assertion produced a second intentional RED: 18/19 passed and
+the missing `config/20-doveadm.conf` was the sole failure.
+
+Self-review then tightened the provider encoding and tracked-seed assertions.
+That regression run was RED at 17/19 because printable
+`{ARGON2ID}garbage` was still accepted and the seed inventory was not
+lexicographically rendered. Both boundaries were corrected. Independent
+review then identified a non-wiping process-output accumulator; its focused
+regression was RED at test compilation before the wipeable collector existed.
+The final focused run passed 20/20. The updated Task 1 audit passed 4/4 and no
+longer expects the Task 2 static-userdb hazard. `docker compose config --quiet`
+exited `0`.
+
+The permitted dependency-free pinned-image check:
+
+```bash
+docker compose run --rm --no-deps dovecot doveconf -n
+```
+
+exited `0` and resolved the relevant configuration as:
+
+```text
+service doveadm:
+  inet_listener http: port=0
+passdb passwd-file: /etc/dovecot/runtime/users
+passdb oauth2:      mechanisms_filter=xoauth2 oauthbearer
+userdb passwd-file: /etc/dovecot/runtime/users
+  gid:default=1000
+  home:default=/srv/vmail/%{user}
+  uid:default=1000
+```
+
+No real seed/hash/bootstrap was executed because no new explicit one-time
+secret was supplied. The safe `list` path created only the mode-`0700`
+Dovecot runtime directory and mode-`0600` stable lock; the runtime `users`
+authority remains absent pending an explicit non-legacy bootstrap. No
+`docker compose up`, `down`, or `restart`, live Stalwart access, or Stalwart
+data operation was performed.
+
+The broad non-live dashboard-server command:
+
+```bash
+./kotlin test \
+  --include-module dashboard-server \
+  --exclude-classes '*LiveTest' \
+  --exclude-classes \
+  'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
+```
+
+passed 289/289. An earlier unfiltered dashboard-server attempt ran 302 tests:
+the then-current 288 passed and 14 environment-gated Stalwart action/live or
+production browser tests failed only because their explicit
+live/action/assets variables were absent. Those tests were not enabled because
+this task neither permits live Stalwart access nor supplies the browser
+production bundle environment.
+
 ## Verification
 
 The focused audit command is:
@@ -109,7 +228,7 @@ cd debug-dashboard
 The final run passed `4/4` with zero skipped or failed. It verifies the pinned
 Dovecot image inside the Dovecot service, exact service-scoped port lists
 (including rejection of duplicates or unreviewed syntax), absence of every
-fixed container name, and the temporary Task 2/3/4 hazard characterization.
+fixed container name, and the temporary Task 3/4 hazard characterization.
 
 `docker compose config --quiet` exited `0`. The expanded
 `docker compose config` model was inspected with secret-bearing environment

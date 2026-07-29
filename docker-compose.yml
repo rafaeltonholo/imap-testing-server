@@ -9,6 +9,7 @@ services:
       - "127.0.0.1:1995:31990"   # POP3S (TLS; image listens on 31990)
     volumes:
       - ./config:/etc/dovecot/conf.d:ro
+      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
       - ./ssl:/etc/dovecot/ssl:ro
       - ./vmail:/srv/vmail
       - ./logs:/var/log/dovecot
