@@ -189,10 +189,12 @@ class EligibilityFileTest {
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$salt_\$ZGlnZXN0",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$salt=\$ZGlnZXN0",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$A\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$AB\$ZGlnZXN0",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest.",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest_",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest=",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$A",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$AAB",
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$ZGlnZXN0\$extra",
         ).forEach { malformedHash ->
             assertFailsWith<IllegalArgumentException>(malformedHash) {

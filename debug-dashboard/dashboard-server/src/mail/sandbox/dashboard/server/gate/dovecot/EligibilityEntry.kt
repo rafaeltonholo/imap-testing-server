@@ -1,5 +1,7 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
+import java.util.Base64
+
 internal object EligibilityAddress {
     private const val MAX_ADDRESS_LENGTH = 254
     private const val MAX_LOCAL_PART_LENGTH = 64
@@ -134,16 +136,30 @@ internal class EligibilityEntry private constructor(
             }
         }
 
-        private fun hasValidUnpaddedPhcBase64(value: String): Boolean =
-            value.length in 1..MAX_ENCODED_VALUE_SEGMENT_LENGTH &&
-                value.length % 4 != 1 &&
-                value.all { character ->
+        private fun hasValidUnpaddedPhcBase64(value: String): Boolean {
+            if (
+                value.length !in 1..MAX_ENCODED_VALUE_SEGMENT_LENGTH ||
+                value.length % 4 == 1 ||
+                !value.all { character ->
                     character in 'A'..'Z' ||
                         character in 'a'..'z' ||
                         character in '0'..'9' ||
                         character == '+' ||
                         character == '/'
                 }
+            ) {
+                return false
+            }
+            var decoded = ByteArray(0)
+            return try {
+                decoded = STANDARD_BASE64_DECODER.decode(value)
+                UNPADDED_STANDARD_BASE64_ENCODER.encodeToString(decoded) == value
+            } catch (_: IllegalArgumentException) {
+                false
+            } finally {
+                decoded.fill(0)
+            }
+        }
 
         private const val ARGON2_ALGORITHM = "argon2id"
         private const val ARGON2_VERSION = "v=19"
@@ -153,6 +169,8 @@ internal class EligibilityEntry private constructor(
         private val ARGON2_PARAMETERS = Regex(
             "m=([1-9][0-9]{0,9}),t=([1-9][0-9]{0,9}),p=([1-9][0-9]{0,9})",
         )
+        private val STANDARD_BASE64_DECODER = Base64.getDecoder()
+        private val UNPADDED_STANDARD_BASE64_ENCODER = Base64.getEncoder().withoutPadding()
     }
 }
 

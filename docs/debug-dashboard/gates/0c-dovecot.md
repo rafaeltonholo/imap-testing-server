@@ -212,7 +212,7 @@ The broad non-live dashboard-server command:
   'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
 ```
 
-passed 289/289. An earlier unfiltered dashboard-server attempt ran 302 tests:
+passed 291/291. An earlier unfiltered dashboard-server attempt ran 302 tests:
 the then-current 288 passed and 14 environment-gated Stalwart action/live or
 production browser tests failed only because their explicit
 live/action/assets variables were absent. Those tests were not enabled because
