@@ -256,17 +256,35 @@ parser-parity regression was then RED for an ARGON2 parameter value that
 Kotlin rejects as outside its signed 32-bit range. Review later exposed a
 second RED parity case: Python treated U+0085 as blank/comment whitespace
 while Kotlin treated it as entry data and rejected the authority. After the
-fix, all 20 focused Python tests passed on the host and in the Python 3.12
-image. They
-cover every issuance/recheck transition, immediate deletion,
+fix, all 23 focused Python tests passed on the host and in the Python 3.12
+image. They cover every issuance/recheck transition, immediate deletion,
 authority-reader failure, canonical parsing, symbolic and
 unreadable/non-regular files, bounded UTF-8 input, no caching, the exact
 read-only Compose mount, retained test-token semantics, and secret canaries in
 errors/logs. A shared exhaustive UTF-16 fixture is checked against actual
 Kotlin/JVM `Char.isWhitespace` and the Python reader, including U+0085 and the
 boundaries of every accepted range; blank/comment parsing no longer inherits
-Python-only whitespace. `docker compose config --quiet` exited `0`, the
-focused Kotlin baseline audit passed `4/4`, and
+Python-only whitespace.
+
+The HTTP form boundary accepts exactly one non-negative ASCII-decimal
+`Content-Length`, limits bodies to 16 KiB, limits forms to 32 fields with
+bounded names and values, decodes strict UTF-8, and applies a one-second total
+body-read deadline. Invalid, duplicate, negative, oversized, incomplete, slow,
+or over-populated forms receive the same fixed `400 invalid_request` without
+reflecting or logging body data. Actual loopback HTTP regressions prove each
+failure and then successfully call `/health` and perform a valid introspection
+on the same single-threaded server.
+
+Eligibility now has explicit eligible, ineligible, and unavailable results.
+Every unavailable decision still fails closed and mints nothing. Refresh
+tokens are revoked only after a valid current snapshot proves the canonical
+identity absent; a missing, malformed, or unstable snapshot preserves the
+refresh token for a later retry. Authorization codes retain their existing
+one-shot exchange behavior, so an unavailable exchange consumes that code but
+cannot mint tokens. Introspection response shapes remain unchanged.
+
+`docker compose config --quiet` exited `0`, the focused Kotlin baseline audit
+passed `4/4`, and
 `docker compose build oauth2-mock` completed successfully. No service was
 started or restarted.
 

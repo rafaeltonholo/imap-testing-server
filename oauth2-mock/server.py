@@ -40,6 +40,7 @@ Token lifetimes:
 
 import base64
 import binascii
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,21 @@ access_tokens = {}   # token → {username, scope, exp}
 
 ACCESS_TOKEN_TTL = 3600  # 1 hour
 AUTH_CODE_TTL = 60        # 1 minute
+MAX_FORM_BODY_BYTES = 16 * 1024
+MAX_FORM_FIELDS = 32
+MAX_FORM_KEY_CHARACTERS = 128
+MAX_FORM_VALUE_CHARACTERS = 8 * 1024
+REQUEST_READ_TIMEOUT_SECONDS = 1.0
+
+
+class EligibilityResult(Enum):
+    ELIGIBLE = "eligible"
+    INELIGIBLE = "ineligible"
+    UNAVAILABLE = "unavailable"
+
+
+class InvalidFormRequest(ValueError):
+    pass
 
 
 class EligibilityReader:
@@ -86,13 +102,20 @@ class EligibilityReader:
     def __init__(self, path=ELIGIBILITY_FILE):
         self._path = Path(path)
 
-    def is_eligible(self, username):
-        if not self._is_canonical_address(username):
-            return False
+    def eligibility(self, username):
         try:
-            return username in self._read_addresses()
+            addresses = self._read_addresses()
         except (OSError, UnicodeError, ValueError):
-            return False
+            return EligibilityResult.UNAVAILABLE
+        if (
+            not self._is_canonical_address(username)
+            or username not in addresses
+        ):
+            return EligibilityResult.INELIGIBLE
+        return EligibilityResult.ELIGIBLE
+
+    def is_eligible(self, username):
+        return self.eligibility(username) is EligibilityResult.ELIGIBLE
 
     def _read_addresses(self):
         self._require_nonsymlink_path()
@@ -286,9 +309,87 @@ def _redirect(handler, url):
 
 
 def _read_form(handler):
-    length = int(handler.headers.get("Content-Length", 0))
-    body = handler.rfile.read(length).decode() if length else ""
-    return parse_qs(body)
+    content_lengths = _header_values(handler.headers, "Content-Length")
+    if len(content_lengths) != 1:
+        raise InvalidFormRequest()
+    encoded_length = content_lengths[0]
+    if (
+        not encoded_length
+        or len(encoded_length) > 10
+        or any(character < "0" or character > "9" for character in encoded_length)
+    ):
+        raise InvalidFormRequest()
+    length = int(encoded_length)
+    if length > MAX_FORM_BODY_BYTES:
+        raise InvalidFormRequest()
+
+    body_bytes = _read_exact_form_body(handler, length)
+    try:
+        body = body_bytes.decode("utf-8", errors="strict")
+        fields = parse_qs(
+            body,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=MAX_FORM_FIELDS,
+            separator="&",
+        )
+    except (UnicodeError, ValueError):
+        raise InvalidFormRequest() from None
+    if (
+        sum(len(values) for values in fields.values()) > MAX_FORM_FIELDS
+        or any(
+            len(key) > MAX_FORM_KEY_CHARACTERS
+            or any(
+                len(value) > MAX_FORM_VALUE_CHARACTERS
+                for value in values
+            )
+            for key, values in fields.items()
+        )
+    ):
+        raise InvalidFormRequest()
+    return fields
+
+
+def _header_values(headers, name):
+    get_all = getattr(headers, "get_all", None)
+    if get_all is not None:
+        return get_all(name, [])
+    value = headers.get(name)
+    return [] if value is None else [value]
+
+
+def _read_exact_form_body(handler, length):
+    if length == 0:
+        return b""
+    deadline = time.monotonic() + REQUEST_READ_TIMEOUT_SECONDS
+    remaining = length
+    chunks = []
+    connection = getattr(handler, "connection", None)
+    try:
+        while remaining:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise InvalidFormRequest()
+            if connection is not None:
+                connection.settimeout(timeout)
+            reader = getattr(handler.rfile, "read1", handler.rfile.read)
+            try:
+                chunk = reader(remaining)
+            except (OSError, TimeoutError):
+                raise InvalidFormRequest() from None
+            if not chunk:
+                raise InvalidFormRequest()
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        if connection is not None:
+            try:
+                connection.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
+            except OSError:
+                pass
+    return b"".join(chunks)
 
 
 def _apply_test_knobs(handler):
@@ -386,18 +487,28 @@ AUTHORIZE_PAGE = """<!DOCTYPE html>
 class OAuthHandler(BaseHTTPRequestHandler):
     eligibility_reader = default_eligibility_reader
 
+    def setup(self):
+        self.request.settimeout(REQUEST_READ_TIMEOUT_SECONDS)
+        super().setup()
+
     def log_request(self, code="-", size="-"):
         self.log_message("HTTP request completed with status %s", code)
 
     def log_error(self, format_, *args):
         self.log_message("HTTP protocol error")
 
-    def _is_eligible(self, username):
+    def _eligibility(self, username):
         try:
-            return self.eligibility_reader.is_eligible(username) is True
+            result = self.eligibility_reader.eligibility(username)
+            if not isinstance(result, EligibilityResult):
+                raise TypeError("Invalid eligibility result")
+            return result
         except Exception:
             self.log_message("Eligibility authority check failed closed")
-            return False
+            return EligibilityResult.UNAVAILABLE
+
+    def _is_eligible(self, username):
+        return self._eligibility(username) is EligibilityResult.ELIGIBLE
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -441,14 +552,21 @@ class OAuthHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
-        if parsed.path == "/authorize":
-            self._handle_authorize_post()
-        elif parsed.path == "/token":
-            self._handle_token()
-        elif parsed.path == "/introspect":
-            self._handle_introspect()
-        else:
-            _json_response(self, {"error": "not_found"}, 404)
+        try:
+            if parsed.path == "/authorize":
+                self._handle_authorize_post()
+            elif parsed.path == "/token":
+                self._handle_token()
+            elif parsed.path == "/introspect":
+                self._handle_introspect()
+            else:
+                _json_response(self, {"error": "not_found"}, 404)
+        except InvalidFormRequest:
+            self.log_message("Rejected invalid request form")
+            _json_response(self, {
+                "error": "invalid_request",
+                "error_description": "Request form is invalid",
+            }, 400)
 
     # ── POST /authorize (form submission from consent page) ───────────────
 
@@ -567,8 +685,10 @@ class OAuthHandler(BaseHTTPRequestHandler):
         username = entry["username"]
         scope = entry["scope"]
 
-        if not self._is_eligible(username):
+        eligibility = self._eligibility(username)
+        if eligibility is EligibilityResult.INELIGIBLE:
             refresh_tokens.pop(refresh_token, None)
+        if eligibility is not EligibilityResult.ELIGIBLE:
             _json_response(self, {
                 "error": "invalid_grant",
                 "error_description": "Refresh grant is no longer valid",

@@ -1,9 +1,12 @@
+import http.client
 import io
 import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -30,8 +33,10 @@ class MutableEligibilityReader:
     def __init__(self, *eligible):
         self.eligible = set(eligible)
 
-    def is_eligible(self, username):
-        return username in self.eligible
+    def eligibility(self, username):
+        if username in self.eligible:
+            return server.EligibilityResult.ELIGIBLE
+        return server.EligibilityResult.INELIGIBLE
 
 
 class OAuthServerTest(unittest.TestCase):
@@ -291,7 +296,7 @@ class OAuthServerTest(unittest.TestCase):
         }
 
         class FailingReader:
-            def is_eligible(self, username):
+            def eligibility(self, username):
                 raise OSError("simulated authority failure")
 
         self.handler_class.eligibility_reader = FailingReader()
@@ -332,8 +337,11 @@ class OAuthServerTest(unittest.TestCase):
         self.assertEqual(["access_denied"], authorization_query["error"])
         self.assertEqual(400, code_exchange.status)
         self.assertEqual("invalid_grant", code_exchange.json()["error"])
+        self.assertNotIn(code, server.auth_codes)
         self.assertEqual(400, refresh_exchange.status)
         self.assertEqual("invalid_grant", refresh_exchange.json()["error"])
+        self.assertIn(refresh, server.refresh_tokens)
+        self.assertNotIn("valid-eligible@local.test", server.access_tokens)
         self.assertFalse(stored.json()["active"])
         self.assertFalse(prefix.json()["active"])
 
@@ -454,6 +462,24 @@ class EligibilityReaderTest(unittest.TestCase):
         self.write_authority("")
 
         self.assertFalse(reader.is_eligible("eligible@local.test"))
+
+    def test_explicit_result_distinguishes_absence_from_unavailable_authority(self):
+        self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
+        reader = server.EligibilityReader(self.authority)
+
+        self.assertEqual(
+            server.EligibilityResult.ELIGIBLE,
+            reader.eligibility("eligible@local.test"),
+        )
+        self.assertEqual(
+            server.EligibilityResult.INELIGIBLE,
+            reader.eligibility("absent@local.test"),
+        )
+        with mock.patch.object(reader, "_same_file_state", return_value=False):
+            self.assertEqual(
+                server.EligibilityResult.UNAVAILABLE,
+                reader.eligibility("eligible@local.test"),
+            )
 
     def test_unreadable_authority_fails_closed(self):
         self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
@@ -591,6 +617,192 @@ class OAuthComposeTest(unittest.TestCase):
         self.assertNotIn(".runtime/secrets", service)
         self.assertNotIn(".runtime/dovecot-operator", service)
         self.assertNotIn("/etc/dovecot/runtime/users:", service)
+
+
+class ActualHttpFormBoundaryTest(unittest.TestCase):
+    def setUp(self):
+        self.logs = []
+        logs = self.logs
+
+        class TestHandler(server.OAuthHandler):
+            eligibility_reader = MutableEligibilityReader("eligible@local.test")
+
+            def log_message(self, format_, *args):
+                logs.append(format_ % args)
+
+        self.httpd = server.HTTPServer(("127.0.0.1", 0), TestHandler)
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            name="oauth-actual-http-test",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=3)
+        self.assertFalse(self.thread.is_alive(), "HTTP test server did not stop")
+
+    def test_malformed_forms_are_fixed_400_and_server_remains_healthy(self):
+        excess_fields = "&".join(f"field{index}=x" for index in range(33)).encode()
+        oversized_value = b"token=" + (b"x" * (8 * 1024 + 1))
+        cases = (
+            (
+                "missing",
+                b"",
+                b"token=x",
+            ),
+            (
+                "negative",
+                b"Content-Length: -1\r\n",
+                b"token=negative-sensitive-value",
+            ),
+            (
+                "non-decimal",
+                b"Content-Length: 7x\r\n",
+                b"token=x",
+            ),
+            (
+                "signed-positive",
+                b"Content-Length: +7\r\n",
+                b"token=x",
+            ),
+            (
+                "duplicate",
+                b"Content-Length: 7\r\nContent-Length: 7\r\n",
+                b"token=x",
+            ),
+            (
+                "huge",
+                b"Content-Length: 999999999999999999999999\r\n",
+                b"",
+            ),
+            (
+                "invalid-utf8",
+                b"Content-Length: 7\r\n",
+                b"token=\xff",
+            ),
+            (
+                "invalid-percent-encoded-utf8",
+                b"Content-Length: 9\r\n",
+                b"token=%FF",
+            ),
+            (
+                "excess-fields",
+                f"Content-Length: {len(excess_fields)}\r\n".encode(),
+                excess_fields,
+            ),
+            (
+                "oversized-value",
+                f"Content-Length: {len(oversized_value)}\r\n".encode(),
+                oversized_value,
+            ),
+            (
+                "incomplete",
+                b"Content-Length: 32\r\n",
+                b"token=x",
+            ),
+        )
+
+        for name, content_length, body in cases:
+            with self.subTest(name=name):
+                response = self.raw_post(
+                    content_length=content_length,
+                    body=body,
+                    keep_write_open=False,
+                )
+                self.assert_fixed_400(response)
+                self.assert_health_works()
+
+        combined_logs = "\n".join(self.logs)
+        for canary in ("negative-sensitive-value", "field32"):
+            self.assertNotIn(canary, combined_logs)
+
+    def test_slow_incomplete_form_is_bounded_and_server_recovers(self):
+        started = time.monotonic()
+        response = self.raw_post(
+            content_length=b"Content-Length: 32\r\n",
+            body=b"token=x",
+            keep_write_open=True,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 3.0)
+        self.assert_fixed_400(response)
+        self.assert_health_works()
+
+    def raw_post(self, content_length, body, keep_write_open):
+        connection = socket.create_connection(
+            ("127.0.0.1", self.httpd.server_port),
+            timeout=2,
+        )
+        connection.settimeout(2.5)
+        request = (
+            b"POST /introspect HTTP/1.0\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Type: application/x-www-form-urlencoded\r\n"
+            + content_length
+            + b"\r\n"
+            + body
+        )
+        try:
+            connection.sendall(request)
+            if not keep_write_open:
+                connection.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                try:
+                    chunk = connection.recv(4096)
+                except TimeoutError:
+                    return b""
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            connection.close()
+
+    def assert_fixed_400(self, response):
+        self.assertIn(b" 400 ", response.split(b"\r\n", 1)[0])
+        self.assertIn(b'"error": "invalid_request"', response)
+        self.assertIn(b'"error_description": "Request form is invalid"', response)
+        self.assertNotIn(b"sensitive", response)
+
+    def assert_health_works(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.httpd.server_port,
+            timeout=2,
+        )
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            body = response.read()
+            self.assertEqual(200, response.status)
+            self.assertEqual({"status": "ok"}, json.loads(body))
+        finally:
+            connection.close()
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.httpd.server_port,
+            timeout=2,
+        )
+        try:
+            form = "token=valid-eligible%40local.test"
+            connection.request(
+                "POST",
+                "/introspect",
+                body=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response = connection.getresponse()
+            body = response.read()
+            self.assertEqual(200, response.status)
+            self.assertTrue(json.loads(body)["active"])
+        finally:
+            connection.close()
 
 
 class HttpResponse:
