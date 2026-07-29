@@ -7,8 +7,9 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Duration
-import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
@@ -106,7 +107,7 @@ internal fun interface EligibilityProcessRunner {
 
 internal class DovecotPasswordHasher(
     private val repositoryRoot: Path,
-    private val processRunner: EligibilityProcessRunner = JvmEligibilityProcessRunner,
+    private val processRunner: EligibilityProcessRunner = JvmEligibilityProcessRunner(),
 ) : EligibilityPasswordHasher {
     override fun hash(password: EligibilityPassword): String {
         val processInput = password.withBytes(::twiceOverStdin)
@@ -198,7 +199,16 @@ internal class DovecotPasswordHasher(
     }
 }
 
-private object JvmEligibilityProcessRunner : EligibilityProcessRunner {
+internal class JvmEligibilityProcessRunner(
+    private val processFactory: (EligibilityProcessRequest) -> Process = { request ->
+        ProcessBuilder(request.argv)
+            .directory(request.workingDirectory.toFile())
+            .start()
+    },
+    private val captureFactory: (Int) -> EligibilityProcessOutputCapture = { maximumBytes ->
+        EligibilityProcessOutputCapture(maximumBytes)
+    },
+) : EligibilityProcessRunner {
     override fun run(request: EligibilityProcessRequest): EligibilityProcessResult {
         require(
             request.argv == listOf(
@@ -232,106 +242,184 @@ private object JvmEligibilityProcessRunner : EligibilityProcessRunner {
         ) {
             "Eligibility process bounds are invalid"
         }
-        val process = ProcessBuilder(request.argv)
-            .directory(request.workingDirectory.toFile())
-            .start()
-        val readers = Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "eligibility-process-output").also { it.isDaemon = true }
-        }
-        val stdoutFuture = readers.submit(
-            Callable {
-                readEligibilityProcessOutputBounded(
-                    process.inputStream,
-                    request.maximumOutputBytes,
-                )
-            },
-        )
-        val stderrFuture = readers.submit(
-            Callable {
-                readEligibilityProcessOutputBounded(
-                    process.errorStream,
-                    request.maximumOutputBytes,
-                )
-            },
-        )
+        var process: Process? = null
+        var readers: ExecutorService? = null
+        var stdoutCapture: EligibilityProcessOutputCapture? = null
+        var stderrCapture: EligibilityProcessOutputCapture? = null
+        var stdoutFuture: Future<*>? = null
+        var stderrFuture: Future<*>? = null
         var stdout = ByteArray(0)
         var stderr = ByteArray(0)
         return try {
-            try {
-                process.outputStream.use { output ->
-                    output.write(request.stdin)
-                    output.flush()
-                }
-            } catch (failure: Throwable) {
-                process.destroyForcibly()
-                throw failure
+            val startedProcess = processFactory(request)
+            process = startedProcess
+            val ownedStdoutCapture = captureFactory(request.maximumOutputBytes)
+            stdoutCapture = ownedStdoutCapture
+            val ownedStderrCapture = captureFactory(request.maximumOutputBytes)
+            stderrCapture = ownedStderrCapture
+            val ownedReaders = Executors.newFixedThreadPool(2) { runnable ->
+                Thread(runnable, "eligibility-process-output").also { it.isDaemon = true }
             }
-            val completed = process.waitFor(
+            readers = ownedReaders
+            val ownedStdoutFuture = ownedReaders.submit {
+                ownedStdoutCapture.readFrom(startedProcess.inputStream)
+            }
+            stdoutFuture = ownedStdoutFuture
+            val ownedStderrFuture = ownedReaders.submit {
+                ownedStderrCapture.readFrom(startedProcess.errorStream)
+            }
+            stderrFuture = ownedStderrFuture
+
+            startedProcess.outputStream.use { output ->
+                output.write(request.stdin)
+                output.flush()
+            }
+            val completed = startedProcess.waitFor(
                 request.timeout.toMillis(),
                 TimeUnit.MILLISECONDS,
             )
             if (!completed) {
-                process.destroyForcibly()
-                process.waitFor(PROCESS_DESTROY_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                return EligibilityProcessResult(
+                    exitCode = null,
+                    timedOut = true,
+                    stdout = ByteArray(0),
+                    stderr = ByteArray(0),
+                )
             }
-            stdout = stdoutFuture.get(
+            ownedStdoutFuture.get(
                 OUTPUT_JOIN_TIMEOUT_SECONDS,
                 TimeUnit.SECONDS,
             )
-            stderr = stderrFuture.get(
+            ownedStderrFuture.get(
                 OUTPUT_JOIN_TIMEOUT_SECONDS,
                 TimeUnit.SECONDS,
             )
+            stdout = ownedStdoutCapture.snapshot()
+            stderr = ownedStderrCapture.snapshot()
             EligibilityProcessResult(
-                exitCode = if (completed) process.exitValue() else null,
-                timedOut = !completed,
+                exitCode = startedProcess.exitValue(),
+                timedOut = false,
                 stdout = stdout,
                 stderr = stderr,
             )
-        } catch (failure: Throwable) {
+        } catch (failure: Exception) {
             stdout.fill(0)
             stderr.fill(0)
-            if (stdoutFuture.isDone) {
-                runCatching { stdoutFuture.get() }.getOrNull()?.fill(0)
+            if (failure is InterruptedException) {
+                Thread.currentThread().interrupt()
             }
-            if (stderrFuture.isDone) {
-                runCatching { stderrFuture.get() }.getOrNull()?.fill(0)
-            }
-            throw failure
+            throw IllegalStateException("Dovecot password hashing process failed")
         } finally {
-            readers.shutdownNow()
-            if (process.isAlive) process.destroyForcibly()
+            stdoutCapture?.close()
+            stderrCapture?.close()
+            process?.let(::closeAndDestroy)
+            stdoutFuture?.cancel(true)
+            stderrFuture?.cancel(true)
+            readers?.shutdownNow()
+            runCatching {
+                readers?.awaitTermination(
+                    OUTPUT_JOIN_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS,
+                )
+            }
         }
     }
 
-    private const val MAX_ALLOWED_OUTPUT_BYTES = 64 * 1024
-    private const val PROCESS_DESTROY_TIMEOUT_SECONDS = 2L
-    private const val OUTPUT_JOIN_TIMEOUT_SECONDS = 2L
+    private fun closeAndDestroy(process: Process) {
+        closeProcessStreams(process)
+        if (runCatching { process.isAlive }.getOrDefault(true)) {
+            runCatching { process.destroyForcibly() }
+            runCatching {
+                process.waitFor(
+                    PROCESS_DESTROY_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS,
+                )
+            }
+        }
+        closeProcessStreams(process)
+    }
+
+    private fun closeProcessStreams(process: Process) {
+        runCatching { process.outputStream.close() }
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
+    }
+
+    companion object {
+        private const val MAX_ALLOWED_OUTPUT_BYTES = 64 * 1024
+        private const val PROCESS_DESTROY_TIMEOUT_SECONDS = 2L
+        private const val OUTPUT_JOIN_TIMEOUT_SECONDS = 2L
+    }
 }
 
-internal fun readEligibilityProcessOutputBounded(
-    input: InputStream,
-    maximumBytes: Int,
-    bufferFactory: (Int) -> ByteArray = ::ByteArray,
-): ByteArray {
-    require(maximumBytes > 0) { "Eligibility process output bound is invalid" }
-    val backing = bufferFactory(maximumBytes)
-    try {
-        require(backing.size == maximumBytes) {
-            "Eligibility process output buffer is invalid"
+internal class EligibilityProcessOutputCapture(
+    private val maximumBytes: Int,
+    backingFactory: (Int) -> ByteArray = ::ByteArray,
+    private val localBufferFactory: (Int) -> ByteArray = ::ByteArray,
+) : AutoCloseable {
+    private val backing = backingFactory(maximumBytes)
+    private var size = 0
+    private var closed = false
+
+    init {
+        if (maximumBytes <= 0 || backing.size != maximumBytes) {
+            backing.fill(0)
+            throw IllegalArgumentException("Eligibility process output buffer is invalid")
         }
-        var size = 0
-        while (size < maximumBytes) {
-            val read = input.read(backing, size, maximumBytes - size)
-            if (read < 0) return backing.copyOf(size)
-            if (read > 0) size += read
+    }
+
+    fun readFrom(input: InputStream) {
+        val localSize = minOf(maximumBytes, LOCAL_BUFFER_BYTES)
+        val local = localBufferFactory(localSize)
+        try {
+            require(local.size == localSize) {
+                "Eligibility process output buffer is invalid"
+            }
+            while (true) {
+                val read = input.read(local, 0, local.size)
+                if (read < 0) return
+                if (read > 0 && !append(local, read)) return
+            }
+        } finally {
+            local.fill(0)
         }
-        check(input.read() < 0) {
+    }
+
+    @Synchronized
+    fun snapshot(): ByteArray {
+        check(!closed) { "Eligibility process output capture is closed" }
+        return backing.copyOf(size)
+    }
+
+    @Synchronized
+    private fun append(
+        source: ByteArray,
+        length: Int,
+    ): Boolean {
+        if (closed) return false
+        check(length in 1..source.size && size <= maximumBytes - length) {
             "Eligibility process output exceeded its bound"
         }
-        return backing.copyOf(size)
-    } finally {
+        source.copyInto(
+            destination = backing,
+            destinationOffset = size,
+            startIndex = 0,
+            endIndex = length,
+        )
+        size += length
+        return true
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
         backing.fill(0)
+        size = 0
+    }
+
+    companion object {
+        private const val LOCAL_BUFFER_BYTES = 8 * 1024
     }
 }
 

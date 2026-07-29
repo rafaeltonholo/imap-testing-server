@@ -2,6 +2,9 @@ package mail.sandbox.dashboard.server.gate.dovecot
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.io.PrintStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -10,7 +13,9 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
+import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
@@ -156,6 +161,42 @@ class EligibilityFileTest {
         ).forEach { malformed ->
             assertFailsWith<IllegalArgumentException> {
                 EligibilityEntry.parse(malformed)
+            }
+        }
+    }
+
+    @Test
+    fun entryParserRejectsUnprovenArgon2idPhcVariants() {
+        listOf(
+            "{ARGON2ID}\$argon2id\$v=16\$m=65536,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=20\$m=65536,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$arbitrary\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$t=3,m=65536,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,p=1,t=3\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$memory=65536,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,parallelism=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,m=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1,x=2\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=0,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=0,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=0\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=-1,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=+1,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=99999999999999999999,t=3,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=99999999999999999999,p=1\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=99999999999999999999\$c2FsdA\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$salt-\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$salt_\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$salt=\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$A\$ZGlnZXN0",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest.",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest_",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$digest=",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$A",
+            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdA\$ZGlnZXN0\$extra",
+        ).forEach { malformedHash ->
+            assertFailsWith<IllegalArgumentException>(malformedHash) {
+                EligibilityEntry.create("alpha@local.test", malformedHash)
             }
         }
     }
@@ -659,35 +700,122 @@ class EligibilityFileTest {
     }
 
     @Test
-    fun boundedProcessOutputCollectorWipesItsBackingStorageOnSuccessAndFailure() {
+    fun boundedProcessOutputCaptureWipesItsBackingAndLocalStorage() {
         val output = "provider-output".toByteArray(StandardCharsets.US_ASCII)
         lateinit var successfulBacking: ByteArray
-        val collected = readEligibilityProcessOutputBounded(
-            input = ByteArrayInputStream(output),
+        lateinit var successfulLocal: ByteArray
+        val successfulCapture = EligibilityProcessOutputCapture(
             maximumBytes = 64,
-            bufferFactory = { size ->
+            backingFactory = { size ->
                 ByteArray(size).also { successfulBacking = it }
             },
+            localBufferFactory = { size ->
+                ByteArray(size).also { successfulLocal = it }
+            },
         )
+        val collected = successfulCapture.use { capture ->
+            capture.readFrom(ByteArrayInputStream(output))
+            capture.snapshot()
+        }
 
         assertContentEquals(output, collected)
         assertTrue(successfulBacking.all { it == 0.toByte() })
+        assertTrue(successfulLocal.all { it == 0.toByte() })
         collected.fill(0)
         output.fill(0)
 
         val canary = "unexpected-secret-output"
         lateinit var failedBacking: ByteArray
+        lateinit var failedLocal: ByteArray
+        val failedCapture = EligibilityProcessOutputCapture(
+            maximumBytes = 4,
+            backingFactory = { size ->
+                ByteArray(size).also { failedBacking = it }
+            },
+            localBufferFactory = { size ->
+                ByteArray(size).also { failedLocal = it }
+            },
+        )
         val failure = assertFailsWith<IllegalStateException> {
-            readEligibilityProcessOutputBounded(
-                input = ByteArrayInputStream(canary.toByteArray()),
-                maximumBytes = 4,
-                bufferFactory = { size ->
-                    ByteArray(size).also { failedBacking = it }
-                },
-            )
+            failedCapture.use { capture ->
+                capture.readFrom(ByteArrayInputStream(canary.toByteArray()))
+            }
         }
         assertFalse(failure.message.orEmpty().contains(canary))
         assertTrue(failedBacking.all { it == 0.toByte() })
+        assertTrue(failedLocal.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun processRunnerWipesClosedCaptureWhenReaderCompletesAfterCleanup() {
+        val fixture = temporaryRepository()
+        val canaryText = "late-reader-canary"
+        val canary = canaryText.toByteArray(StandardCharsets.US_ASCII)
+        val readStarted = CountDownLatch(1)
+        val releaseRead = CountDownLatch(1)
+        val readReturned = CountDownLatch(1)
+        val lateStdout = LateCompletingInputStream(
+            content = canary,
+            readStarted = readStarted,
+            releaseRead = releaseRead,
+            readReturned = readReturned,
+        )
+        val process = LateCompletingOutputProcess(lateStdout, readStarted, canaryText)
+        val backingBuffers = Collections.synchronizedList(mutableListOf<ByteArray>())
+        val localBuffers = Collections.synchronizedList(mutableListOf<ByteArray>())
+        val runner = JvmEligibilityProcessRunner(
+            processFactory = { process },
+            captureFactory = { maximumBytes ->
+                EligibilityProcessOutputCapture(
+                    maximumBytes = maximumBytes,
+                    backingFactory = { size ->
+                        ByteArray(size).also(backingBuffers::add)
+                    },
+                    localBufferFactory = { size ->
+                        ByteArray(size).also(localBuffers::add)
+                    },
+                )
+            },
+        )
+        val requestInput = "runner-input".toByteArray(StandardCharsets.US_ASCII)
+
+        val failure = assertFailsWith<IllegalStateException> {
+            runner.run(
+                EligibilityProcessRequest(
+                    argv = listOf(
+                        "docker",
+                        "compose",
+                        "exec",
+                        "-T",
+                        "dovecot",
+                        "doveadm",
+                        "pw",
+                        "-s",
+                        "ARGON2ID",
+                    ),
+                    workingDirectory = fixture.repositoryRoot,
+                    stdin = requestInput,
+                    timeout = Duration.ofSeconds(1),
+                    maximumOutputBytes = 64,
+                ),
+            )
+        }
+
+        assertTrue(process.destroyed)
+        assertTrue(lateStdout.closed)
+        assertFalse(failure.stackTraceToString().contains(canaryText))
+        assertTrue(backingBuffers.isNotEmpty())
+        assertTrue(backingBuffers.all { buffer -> buffer.isWiped() })
+
+        releaseRead.countDown()
+        assertTrue(readReturned.await(5, TimeUnit.SECONDS))
+        awaitBuffersWiped(localBuffers)
+
+        assertTrue(localBuffers.isNotEmpty())
+        assertTrue(localBuffers.all { buffer -> buffer.isWiped() })
+        assertTrue(backingBuffers.all { buffer -> buffer.isWiped() })
+        requestInput.fill(0)
+        canary.fill(0)
     }
 
     @Test
@@ -895,6 +1023,18 @@ class EligibilityFileTest {
         }
     }
 
+    private fun awaitBuffersWiped(buffers: List<ByteArray>) {
+        val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+        while (buffers.any { buffer -> !buffer.isWiped() }) {
+            check(System.nanoTime() < deadline) {
+                "timed out waiting for process-output buffers to be wiped"
+            }
+            Thread.sleep(10)
+        }
+    }
+
+    private fun ByteArray.isWiped(): Boolean = all { byte -> byte == 0.toByte() }
+
     private fun makeOwnerOnly(path: Path) {
         if (supportsPosix(path)) {
             Files.setPosixFilePermissions(
@@ -932,6 +1072,120 @@ class EligibilityFileTest {
         val dashboardRoot: Path,
         val paths: EligibilityPaths,
     )
+
+    private class LateCompletingInputStream(
+        private val content: ByteArray,
+        private val readStarted: CountDownLatch,
+        private val releaseRead: CountDownLatch,
+        private val readReturned: CountDownLatch,
+    ) : InputStream() {
+        @Volatile
+        var closed: Boolean = false
+            private set
+
+        private var emitted = false
+
+        override fun read(): Int {
+            val oneByte = ByteArray(1)
+            return try {
+                val count = read(oneByte, 0, 1)
+                if (count < 0) -1 else oneByte[0].toInt() and 0xff
+            } finally {
+                oneByte.fill(0)
+            }
+        }
+
+        override fun read(
+            target: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int {
+            if (emitted) return -1
+            require(length >= content.size)
+            content.copyInto(target, destinationOffset = offset)
+            readStarted.countDown()
+            while (true) {
+                try {
+                    if (releaseRead.await(20, TimeUnit.MILLISECONDS)) break
+                } catch (_: InterruptedException) {
+                    // Deliberately complete after runner cancellation to exercise late cleanup.
+                }
+            }
+            emitted = true
+            readReturned.countDown()
+            return content.size
+        }
+
+        override fun close() {
+            closed = true
+        }
+    }
+
+    private class LateCompletingOutputProcess(
+        private val stdout: LateCompletingInputStream,
+        private val readStarted: CountDownLatch,
+        private val exceptionCanary: String,
+    ) : Process() {
+        @Volatile
+        private var alive = true
+
+        @Volatile
+        var destroyed: Boolean = false
+            private set
+
+        private val stdin = object : OutputStream() {
+            override fun write(byte: Int) {
+                write(byteArrayOf(byte.toByte()), 0, 1)
+            }
+
+            override fun write(
+                source: ByteArray,
+                offset: Int,
+                length: Int,
+            ) {
+                check(readStarted.await(5, TimeUnit.SECONDS)) {
+                    "late stdout reader did not start"
+                }
+                throw IOException(exceptionCanary)
+            }
+        }
+
+        override fun getOutputStream(): OutputStream = stdin
+
+        override fun getInputStream(): InputStream = stdout
+
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+        override fun waitFor(): Int {
+            while (alive) {
+                Thread.sleep(10)
+            }
+            return 1
+        }
+
+        override fun waitFor(
+            timeout: Long,
+            unit: TimeUnit,
+        ): Boolean = !alive
+
+        override fun exitValue(): Int {
+            check(!alive) { "process is still running" }
+            return 1
+        }
+
+        override fun destroy() {
+            destroyForcibly()
+        }
+
+        override fun destroyForcibly(): Process {
+            destroyed = true
+            alive = false
+            stdout.close()
+            return this
+        }
+
+        override fun isAlive(): Boolean = alive
+    }
 
     private class SimulatedEligibilityCrash : RuntimeException()
 

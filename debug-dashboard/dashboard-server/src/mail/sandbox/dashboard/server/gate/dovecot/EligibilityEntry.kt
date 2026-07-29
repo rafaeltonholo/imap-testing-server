@@ -116,21 +116,43 @@ internal class EligibilityEntry private constructor(
                 segments.size == ARGON2_SEGMENT_COUNT &&
                     segments[0].isEmpty() &&
                     segments[1] == ARGON2_ALGORITHM &&
-                    segments[2].length in 1..MAX_VERSION_SEGMENT_LENGTH &&
-                    segments[3].length in 1..MAX_PARAMETER_SEGMENT_LENGTH &&
-                    segments[4].length in 1..MAX_ENCODED_VALUE_SEGMENT_LENGTH &&
-                    segments[5].length in 1..MAX_ENCODED_VALUE_SEGMENT_LENGTH,
+                    segments[2] == ARGON2_VERSION &&
+                    hasValidArgon2Parameters(segments[3]) &&
+                    hasValidUnpaddedPhcBase64(segments[4]) &&
+                    hasValidUnpaddedPhcBase64(segments[5]),
             ) {
                 "Eligibility provider hash is invalid"
             }
             return providerHash
         }
 
+        private fun hasValidArgon2Parameters(parameters: String): Boolean {
+            val match = ARGON2_PARAMETERS.matchEntire(parameters) ?: return false
+            return match.groupValues.drop(1).all { value ->
+                value.length <= MAX_PARAMETER_VALUE_DIGITS &&
+                    value.toIntOrNull()?.let { it > 0 } == true
+            }
+        }
+
+        private fun hasValidUnpaddedPhcBase64(value: String): Boolean =
+            value.length in 1..MAX_ENCODED_VALUE_SEGMENT_LENGTH &&
+                value.length % 4 != 1 &&
+                value.all { character ->
+                    character in 'A'..'Z' ||
+                        character in 'a'..'z' ||
+                        character in '0'..'9' ||
+                        character == '+' ||
+                        character == '/'
+                }
+
         private const val ARGON2_ALGORITHM = "argon2id"
+        private const val ARGON2_VERSION = "v=19"
         private const val ARGON2_SEGMENT_COUNT = 6
-        private const val MAX_VERSION_SEGMENT_LENGTH = 32
-        private const val MAX_PARAMETER_SEGMENT_LENGTH = 256
+        private const val MAX_PARAMETER_VALUE_DIGITS = 10
         private const val MAX_ENCODED_VALUE_SEGMENT_LENGTH = 1024
+        private val ARGON2_PARAMETERS = Regex(
+            "m=([1-9][0-9]{0,9}),t=([1-9][0-9]{0,9}),p=([1-9][0-9]{0,9})",
+        )
     }
 }
 

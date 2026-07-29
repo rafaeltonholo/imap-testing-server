@@ -109,13 +109,16 @@ The fixed production authority is
 `debug-dashboard/.runtime/dovecot/users.lock`. The Kotlin boundary:
 
 - accepts only canonical lowercase ASCII addr-specs and the bounded provider
-  form `{ARGON2ID}$argon2id$<version>$<parameters>$<salt>$<hash>`, with every
-  encoded segment non-empty;
+  form
+  `{ARGON2ID}$argon2id$v=19$m=<positive>,t=<positive>,p=<positive>$<salt>$<hash>`,
+  with exact parameter order and bounded, unpadded standard Base64 salt and
+  digest tokens;
 - preserves comments, blank lines, and unrelated entries deterministically;
 - exposes only `seed`, `add <address>`, `reset <address>`,
   `remove <address>`, and `list`;
 - receives bootstrap/add/reset secrets only from stdin and clears mutable
-  password and process buffers;
+  password and process buffers, including runner-owned capture buffers when
+  an output reader completes after failure cleanup;
 - uses the fixed no-shell command equivalent to
   `docker compose exec -T dovecot doveadm pw -s ARGON2ID`, with the password
   supplied twice over stdin and bounded output/timeout; and
@@ -166,9 +169,12 @@ That regression run was RED at 17/19 because printable
 lexicographically rendered. Both boundaries were corrected. Independent
 review then identified a non-wiping process-output accumulator; its focused
 regression was RED at test compilation before the wipeable collector existed.
-The final focused run passed 20/20. The updated Task 1 audit passed 4/4 and no
-longer expects the Task 2 static-userdb hazard. `docker compose config --quiet`
-exited `0`.
+Spec-review regressions subsequently rejected unproven ARGON2ID versions,
+parameter forms, and Base64 variants, and proved that a late output reader
+cannot repopulate a closed capture. The final focused run passed 22/22, the
+updated Task 1 audit passed 4/4, and the permitted non-live dashboard-server
+suite passed 291/291. The audit no longer expects the Task 2 static-userdb
+hazard. `docker compose config --quiet` exited `0`.
 
 The permitted dependency-free pinned-image check:
 
