@@ -4,7 +4,8 @@
 
 - **Task 1 — Freeze and inspect the Dovecot baseline:** complete.
 - **Task 2 — Replace tracked plaintext runtime authority:** complete.
-- **Gate 0C:** in progress. Tasks 3–9 still own the OAuth, Postfix,
+- **Task 3 — Make OAuth decisions eligibility-aware:** complete.
+- **Gate 0C:** in progress. Tasks 4–9 still own the Postfix,
   operator-ingress, lifecycle, and final decision work. This document does not
   record a Gate 0C PASS.
 
@@ -252,15 +253,22 @@ The first stdlib test run was intentionally RED. It reported the missing
 `EligibilityReader`, allowed non-eligible authorization/code/refresh/token
 paths, and exposed the submitted bearer value in the introspection log. A
 parser-parity regression was then RED for an ARGON2 parameter value that
-Kotlin rejects as outside its signed 32-bit range. After implementation, all
-19 focused Python tests passed on the host and in the Python 3.12 image. They
+Kotlin rejects as outside its signed 32-bit range. Review later exposed a
+second RED parity case: Python treated U+0085 as blank/comment whitespace
+while Kotlin treated it as entry data and rejected the authority. After the
+fix, all 20 focused Python tests passed on the host and in the Python 3.12
+image. They
 cover every issuance/recheck transition, immediate deletion,
 authority-reader failure, canonical parsing, symbolic and
 unreadable/non-regular files, bounded UTF-8 input, no caching, the exact
 read-only Compose mount, retained test-token semantics, and secret canaries in
-errors/logs. `docker compose config --quiet` exited `0`, the focused Kotlin
-baseline audit passed `4/4`, and `docker compose build oauth2-mock` completed
-successfully. No service was started or restarted.
+errors/logs. A shared exhaustive UTF-16 fixture is checked against actual
+Kotlin/JVM `Char.isWhitespace` and the Python reader, including U+0085 and the
+boundaries of every accepted range; blank/comment parsing no longer inherits
+Python-only whitespace. `docker compose config --quiet` exited `0`, the
+focused Kotlin baseline audit passed `4/4`, and
+`docker compose build oauth2-mock` completed successfully. No service was
+started or restarted.
 
 ## Verification
 

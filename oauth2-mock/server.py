@@ -159,7 +159,10 @@ class EligibilityReader:
             raw_lines.pop()
         addresses = set()
         for raw_line in raw_lines:
-            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            if (
+                self._is_kotlin_blank(raw_line)
+                or self._trim_kotlin_start(raw_line).startswith("#")
+            ):
                 continue
             if raw_line.count(":") != 1:
                 raise ValueError("eligibility authority entry is invalid")
@@ -172,6 +175,32 @@ class EligibilityReader:
                 raise ValueError("eligibility authority entry is invalid")
             addresses.add(address)
         return addresses
+
+    @classmethod
+    def _is_kotlin_blank(cls, value):
+        return all(cls._is_kotlin_whitespace(character) for character in value)
+
+    @classmethod
+    def _trim_kotlin_start(cls, value):
+        start = 0
+        while start < len(value) and cls._is_kotlin_whitespace(value[start]):
+            start += 1
+        return value[start:]
+
+    @staticmethod
+    def _is_kotlin_whitespace(character):
+        code_point = ord(character)
+        return (
+            0x0009 <= code_point <= 0x000D
+            or 0x001C <= code_point <= 0x0020
+            or code_point == 0x00A0
+            or code_point == 0x1680
+            or 0x2000 <= code_point <= 0x200A
+            or 0x2028 <= code_point <= 0x2029
+            or code_point == 0x202F
+            or code_point == 0x205F
+            or code_point == 0x3000
+        )
 
     @classmethod
     def _is_canonical_address(cls, address):

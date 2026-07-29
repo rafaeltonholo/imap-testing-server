@@ -1,0 +1,30 @@
+# Exhaustive true ranges plus explicit false boundaries for Kotlin/JVM
+# Char.isWhitespace. Format: hexadecimal UTF-16 range, expected boolean.
+0009-000D true
+001C-0020 true
+00A0 true
+1680 true
+2000-200A true
+2028-2029 true
+202F true
+205F true
+3000 true
+0008 false
+000E false
+001B false
+0021 false
+0085 false
+167F false
+1681 false
+180E false
+1FFF false
+200B false
+2027 false
+202A false
+202E false
+2030 false
+205E false
+2060 false
+2FFF false
+3001 false
+FEFF false

@@ -12,6 +12,9 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 
 SERVER_PATH = Path(__file__).with_name("server.py")
+KOTLIN_WHITESPACE_FIXTURE_PATH = SERVER_PATH.with_name(
+    "kotlin-whitespace-fixture.txt",
+)
 SERVER_SPEC = importlib.util.spec_from_file_location("oauth2_mock_server", SERVER_PATH)
 server = importlib.util.module_from_spec(SERVER_SPEC)
 SERVER_SPEC.loader.exec_module(server)
@@ -489,6 +492,64 @@ class EligibilityReaderTest(unittest.TestCase):
                 self.authority.unlink(missing_ok=True)
                 self.authority.write_bytes(contents)
                 os.chmod(self.authority, 0o600)
+                self.assertFalse(reader.is_eligible("eligible@local.test"))
+
+    def test_blank_and_comment_parsing_matches_kotlin_whitespace_fixture(self):
+        records = []
+        for line in KOTLIN_WHITESPACE_FIXTURE_PATH.read_text(
+            encoding="ascii",
+        ).splitlines():
+            if not line or line.startswith("#"):
+                continue
+            encoded, expected = line.split(" ")
+            bounds = [int(value, 16) for value in encoded.split("-")]
+            records.append(
+                (range(bounds[0], bounds[-1] + 1), expected == "true"),
+            )
+        expected_whitespace = {
+            code_point
+            for code_points, expected in records
+            if expected
+            for code_point in code_points
+        }
+        for code_points, expected in records:
+            if not expected:
+                self.assertTrue(
+                    expected_whitespace.isdisjoint(code_points),
+                    "conflicting Kotlin whitespace fixture record",
+                )
+
+        for code_point in range(0x10000):
+            self.assertEqual(
+                code_point in expected_whitespace,
+                server.EligibilityReader._is_kotlin_whitespace(
+                    chr(code_point),
+                ),
+                f"unexpected classification for U+{code_point:04X}",
+            )
+
+        for prefix in ("\u0009", "\u00A0", "\u2007", "\u3000"):
+            with self.subTest(accepted_comment=ord(prefix)):
+                self.write_authority(
+                    f"{prefix}\n"
+                    f"{prefix}# Kotlin whitespace comment\n"
+                    f"eligible@local.test:{VALID_HASH}\n",
+                )
+                reader = server.EligibilityReader(self.authority)
+                self.assertTrue(reader.is_eligible("eligible@local.test"))
+
+        for malformed in (
+            "\u0085",
+            "\u0085# Python-only whitespace must not start a comment",
+            "\u180E# non-whitespace must not start a comment",
+            "\uFEFF# non-whitespace must not start a comment",
+        ):
+            with self.subTest(rejected_prefix=f"U+{ord(malformed[0]):04X}"):
+                self.write_authority(
+                    f"{malformed}\n"
+                    f"eligible@local.test:{VALID_HASH}\n",
+                )
+                reader = server.EligibilityReader(self.authority)
                 self.assertFalse(reader.is_eligible("eligible@local.test"))
 
     def write_authority(self, contents):
