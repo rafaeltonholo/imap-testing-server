@@ -35,6 +35,8 @@ services:
     depends_on:
       dovecot:
         condition: service_healthy
+      oauth2-mock:
+        condition: service_healthy
 
   oauth2-mock:
     build: ./oauth2-mock
@@ -44,7 +46,7 @@ services:
     volumes:
       - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c", "import socket, urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=1).close(); request=b'eligible healthcheck@invalid'; connection=socket.create_connection(('127.0.0.1', 10001), 1); connection.settimeout(1); connection.sendall(str(len(request)).encode('ascii')+b':'+request+b','); stream=connection.makefile('rb'); response=stream.read(12); stream.close(); connection.close(); assert response == b'9:NOTFOUND ,'"]
       interval: 5s
       timeout: 3s
       retries: 3

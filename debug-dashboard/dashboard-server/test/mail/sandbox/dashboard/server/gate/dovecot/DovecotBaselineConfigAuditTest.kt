@@ -65,9 +65,29 @@ class DovecotBaselineConfigAuditTest {
     }
 
     @Test
-    fun remainingDeferredEligibilityHazardIsCharacterizedUntilItsOwningTaskRemovesIt() {
+    fun deferredEligibilityHazardsAreAbsentAfterTheirOwningTasksRemoveThem() {
         val authConfig = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
         val postfixConfig = Files.readString(repositoryRoot.resolve("postfix/main.cf"))
+        val recipientMapAssignments = postfixConfig.lineSequence()
+            .filter { Regex("""^\s*local_recipient_maps\s*=""").containsMatchIn(it) }
+            .toList()
+        val unlistedRecipientAssignments = postfixConfig.lineSequence()
+            .filter {
+                Regex("""^\s*smtpd_reject_unlisted_recipient\s*=""")
+                    .containsMatchIn(it)
+            }
+            .toList()
+
+        assertEquals(
+            listOf(
+                "local_recipient_maps = socketmap:inet:oauth2-mock:10001:eligible",
+            ),
+            recipientMapAssignments,
+        )
+        assertEquals(
+            listOf("smtpd_reject_unlisted_recipient = yes"),
+            unlistedRecipientAssignments,
+        )
 
         val observedHazards = buildMap {
             if (Regex("""(?m)^\s*userdb\s+static\s*\{""").containsMatchIn(authConfig)) {
@@ -86,14 +106,7 @@ class DovecotBaselineConfigAuditTest {
             }
         }
 
-        // These are temporary characterization expectations, not desired
-        // invariants. Task 4 must remove its entry as it remediates it.
-        assertEquals(
-            mapOf(
-                "Postfix accepts arbitrary local recipients" to "Gate 0C Task 4",
-            ),
-            observedHazards,
-        )
+        assertEquals(emptyMap(), observedHazards)
     }
 
     private fun servicePublications(service: String): List<String> {

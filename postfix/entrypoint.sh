@@ -1,11 +1,30 @@
 #!/bin/sh
-set -e
+set -eu
 
-echo "Waiting for Dovecot LMTP on dovecot:24..."
-until nc -z dovecot 24; do
-  sleep 1
-done
-echo "Dovecot LMTP is up."
+MAX_WAIT_ATTEMPTS=60
+
+wait_for_service() {
+  host=$1
+  port=$2
+  label=$3
+  attempt=1
+
+  echo "Waiting for $label on $host:$port..."
+  while [ "$attempt" -le "$MAX_WAIT_ATTEMPTS" ]; do
+    if nc -z -w 1 "$host" "$port"; then
+      echo "$label is up."
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  echo "$label did not become ready after $MAX_WAIT_ATTEMPTS attempts." >&2
+  return 1
+}
+
+wait_for_service oauth2-mock 10001 "OAuth socketmap"
+wait_for_service dovecot 24 "Dovecot LMTP"
 
 # Enable submission (port 587) with SASL auth.
 #

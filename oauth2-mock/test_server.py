@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -584,6 +585,929 @@ class EligibilityReaderTest(unittest.TestCase):
         os.chmod(self.authority, 0o600)
 
 
+class SocketMapLookupTest(unittest.TestCase):
+    def setUp(self):
+        self.reader = MutableEligibilityReader(
+            "eligible@local.test",
+            "ordinary@local.test",
+            "ordinary+tag@local.test",
+            "dashboard-management@local.test",
+            "dashboard-management+tag@local.test",
+            "dashboard-operator-a@local.test",
+            "dashboard-operator-a+tag@local.test",
+            "dashboard-operator-b@local.test",
+            "dashboard-operator-b+tag@local.test",
+        )
+
+    def lookup(self, payload):
+        self.assertTrue(
+            hasattr(server, "SocketMapLookup"),
+            "Task 4 socketmap lookup is not implemented",
+        )
+        return server.SocketMapLookup(self.reader).lookup(payload)
+
+    def test_exact_canonical_eligible_local_recipient_returns_nonempty_ok(self):
+        response = self.lookup(b"eligible eligible@local.test")
+
+        self.assertTrue(response.startswith(b"OK "))
+        self.assertNotEqual(b"OK ", response)
+
+    def test_absent_malformed_offdomain_and_protected_recipients_are_not_found(self):
+        recipients = (
+            "absent@local.test",
+            "ELIGIBLE@local.test",
+            "eligible@other.test",
+            "eligible@sub.local.test",
+            "eligible",
+            "../eligible@local.test",
+            "dashboard-management@local.test",
+            "dashboard-management+tag@local.test",
+            "dashboard-operator-a@local.test",
+            "dashboard-operator-a+tag@local.test",
+            "dashboard-operator-b@local.test",
+            "dashboard-operator-b+tag@local.test",
+        )
+
+        for recipient in recipients:
+            with self.subTest(recipient=recipient):
+                self.assertEqual(
+                    b"NOTFOUND ",
+                    self.lookup(f"eligible {recipient}".encode("ascii")),
+                )
+
+    def test_ordinary_subaddresses_require_the_exact_full_address(self):
+        self.assertEqual(
+            b"OK 1",
+            self.lookup(b"eligible ordinary+tag@local.test"),
+        )
+        self.assertEqual(
+            b"NOTFOUND ",
+            self.lookup(b"eligible ordinary+absent@local.test"),
+        )
+
+    def test_wrong_map_or_missing_separator_is_a_permanent_protocol_error(self):
+        cases = (
+            (b"other eligible@local.test", b"PERM unsupported map"),
+            (b"eligible", b"PERM malformed request"),
+            (b" eligible@local.test", b"PERM malformed request"),
+        )
+
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(expected, self.lookup(payload))
+
+    def test_invalid_keys_after_the_exact_map_are_not_found(self):
+        for payload in (
+            b"eligible ",
+            b"eligible eligible@local.test extra",
+            b"eligible \xff",
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(b"NOTFOUND ", self.lookup(payload))
+
+    def test_unavailable_authority_is_temporary_but_invalid_target_is_not_found(self):
+        class UnavailableReader:
+            def eligibility(self, username):
+                return server.EligibilityResult.UNAVAILABLE
+
+        self.assertTrue(
+            hasattr(server, "SocketMapLookup"),
+            "Task 4 socketmap lookup is not implemented",
+        )
+        lookup = server.SocketMapLookup(UnavailableReader())
+
+        self.assertEqual(
+            b"TEMP eligibility authority unavailable",
+            lookup.lookup(b"eligible eligible@local.test"),
+        )
+        self.assertEqual(
+            b"NOTFOUND ",
+            lookup.lookup(b"eligible ELIGIBLE@local.test"),
+        )
+
+    def test_each_lookup_reads_current_authority_after_deletion_and_update(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            authority = Path(temporary) / "users"
+
+            def write(contents):
+                authority.write_text(contents, encoding="utf-8")
+                os.chmod(authority, 0o600)
+
+            write(f"eligible@local.test:{VALID_HASH}\n")
+            self.assertTrue(
+                hasattr(server, "SocketMapLookup"),
+                "Task 4 socketmap lookup is not implemented",
+            )
+            lookup = server.SocketMapLookup(server.EligibilityReader(authority))
+
+            self.assertTrue(
+                lookup.lookup(b"eligible eligible@local.test").startswith(b"OK "),
+            )
+            write("")
+            self.assertEqual(
+                b"NOTFOUND ",
+                lookup.lookup(b"eligible eligible@local.test"),
+            )
+            write(f"replacement@local.test:{VALID_HASH}\n")
+            self.assertEqual(
+                b"NOTFOUND ",
+                lookup.lookup(b"eligible eligible@local.test"),
+            )
+            self.assertTrue(
+                lookup.lookup(b"eligible replacement@local.test").startswith(b"OK "),
+            )
+
+
+class ActualSocketMapServerTest(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(
+            hasattr(server, "SocketMapServer"),
+            "Task 4 socketmap server is not implemented",
+        )
+        self.logs = []
+        lookup = server.SocketMapLookup(
+            MutableEligibilityReader("eligible@local.test"),
+        )
+        self.socketmap = server.SocketMapServer(
+            ("127.0.0.1", 0),
+            lookup,
+            log_message=self.logs.append,
+            request_timeout_seconds=1.0,
+        )
+        self.thread = threading.Thread(
+            target=self.socketmap.serve_forever,
+            name="socketmap-actual-test",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def tearDown(self):
+        socketmap = getattr(self, "socketmap", None)
+        if socketmap is None:
+            return
+        socketmap.shutdown()
+        socketmap.server_close()
+        self.thread.join(timeout=3)
+        self.assertFalse(self.thread.is_alive(), "socketmap test server did not stop")
+
+    def test_fragmented_request_returns_ok_and_next_connection_succeeds(self):
+        request = self.netstring(b"eligible eligible@local.test")
+
+        response = self.exchange(tuple(bytes((byte,)) for byte in request))
+
+        self.assertEqual(self.netstring(b"OK 1"), response)
+        self.assertEqual(
+            self.netstring(b"NOTFOUND "),
+            self.exchange((self.netstring(b"eligible absent@local.test"),)),
+        )
+
+    def test_reused_connection_accepts_multiple_sequential_requests(self):
+        connection = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        connection.settimeout(2)
+        try:
+            connection.sendall(
+                self.netstring(b"eligible eligible@local.test")
+                + self.netstring(b"eligible absent@local.test"),
+            )
+            connection.shutdown(socket.SHUT_WR)
+            response = self.receive_all(connection)
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            self.netstring(b"OK 1") + self.netstring(b"NOTFOUND "),
+            response,
+        )
+
+    def test_idle_after_success_closes_without_an_unsolicited_response(self):
+        expected = self.netstring(b"OK 1")
+        connection = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        connection.settimeout(2)
+        try:
+            connection.sendall(
+                self.netstring(b"eligible eligible@local.test"),
+            )
+            received = bytearray()
+            while len(received) < len(expected):
+                received.extend(connection.recv(len(expected) - len(received)))
+            trailing = self.receive_all(connection)
+        finally:
+            connection.close()
+
+        self.assertEqual(expected, bytes(received))
+        self.assertEqual(
+            b"",
+            trailing,
+            "an idle keep-alive produced an unsolicited socketmap reply",
+        )
+
+    def test_stalled_connection_does_not_serialize_another_lookup(self):
+        original_timeout = self.socketmap.request_timeout_seconds
+        self.socketmap.request_timeout_seconds = 3.0
+        stalled = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        stalled.settimeout(2)
+        stalled.sendall(b"40:eligible eligible@local")
+        completed = threading.Event()
+        result = []
+
+        def run_fast_lookup():
+            result.append(
+                self.exchange(
+                    (self.netstring(b"eligible eligible@local.test"),),
+                ),
+            )
+            completed.set()
+
+        fast = threading.Thread(target=run_fast_lookup, daemon=True)
+        fast.start()
+        try:
+            self.assertTrue(
+                completed.wait(1.5),
+                "a stalled client serialized an independent lookup",
+            )
+        finally:
+            stalled.close()
+            self.socketmap.request_timeout_seconds = original_timeout
+            fast.join(timeout=2)
+
+        self.assertFalse(fast.is_alive())
+        self.assertEqual([self.netstring(b"OK 1")], result)
+
+    def test_fast_stream_is_capped_and_capacity_recovers(self):
+        self.assertTrue(
+            hasattr(server, "MAX_SOCKETMAP_REQUESTS_PER_CONNECTION"),
+            "Task 4 per-connection request cap is not implemented",
+        )
+        maximum = server.MAX_SOCKETMAP_REQUESTS_PER_CONNECTION
+        request = self.netstring(b"eligible eligible@local.test")
+        expected = self.netstring(b"OK 1")
+        connection = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        connection.settimeout(2)
+        try:
+            responses = []
+            for _ in range(maximum):
+                connection.sendall(request)
+                response = bytearray()
+                while len(response) < len(expected):
+                    response.extend(
+                        connection.recv(len(expected) - len(response)),
+                    )
+                responses.append(bytes(response))
+            try:
+                connection.sendall(request)
+                trailing = self.receive_all(connection)
+            except OSError:
+                trailing = b""
+        finally:
+            connection.close()
+
+        self.assertEqual([expected] * maximum, responses)
+        self.assertEqual(b"", trailing)
+        self.assertEqual(
+            expected,
+            self.exchange((request,)),
+            "the capped connection leaked its concurrency slot",
+        )
+
+    def test_saturation_never_sends_an_unsolicited_reply_and_then_recovers(self):
+        self.assertTrue(
+            hasattr(server, "MAX_SOCKETMAP_CONNECTIONS"),
+            "Task 4 connection bound is not implemented",
+        )
+        held = []
+        original_timeout = self.socketmap.request_timeout_seconds
+        self.socketmap.request_timeout_seconds = 10.0
+        try:
+            for _ in range(server.MAX_SOCKETMAP_CONNECTIONS):
+                connection = socket.create_connection(
+                    ("127.0.0.1", self.socketmap.server_address[1]),
+                    timeout=2,
+                )
+                connection.settimeout(2)
+                connection.sendall(b"40:eligible eligible@local")
+                held.append(connection)
+
+            deadline = time.monotonic() + 2
+            while (
+                self.socketmap.active_connection_count
+                < server.MAX_SOCKETMAP_CONNECTIONS
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(
+                server.MAX_SOCKETMAP_CONNECTIONS,
+                self.socketmap.active_connection_count,
+            )
+            overflow = socket.create_connection(
+                ("127.0.0.1", self.socketmap.server_address[1]),
+                timeout=2,
+            )
+            overflow.settimeout(2)
+            try:
+                unsolicited = overflow.recv(4096)
+            finally:
+                overflow.close()
+
+            self.assertEqual(
+                b"",
+                unsolicited,
+                "a saturated server replied before receiving a request",
+            )
+        finally:
+            for connection in held:
+                connection.close()
+            self.socketmap.request_timeout_seconds = original_timeout
+
+        expected = self.netstring(b"OK 1")
+        deadline = time.monotonic() + 2
+        while (
+            self.socketmap.active_connection_count
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        self.assertEqual(0, self.socketmap.active_connection_count)
+        response = b""
+        while time.monotonic() < deadline:
+            try:
+                response = self.exchange(
+                    (self.netstring(b"eligible eligible@local.test"),),
+                )
+            except OSError:
+                response = b""
+            if response == expected:
+                break
+            time.sleep(0.02)
+        self.assertEqual(expected, response)
+
+    def test_length_syntax_bound_terminator_and_truncation_fail_then_recover(self):
+        self.assertTrue(
+            hasattr(server, "MAX_SOCKETMAP_REQUEST_BYTES"),
+            "Task 4 socketmap request bound is not implemented",
+        )
+        maximum = server.MAX_SOCKETMAP_REQUEST_BYTES
+        cases = (
+            b":,",
+            b"+1:x,",
+            b"01:x,",
+            f"{maximum + 1}:".encode("ascii"),
+            b"3:abc;",
+            b"20:eligible",
+        )
+
+        for request in cases:
+            with self.subTest(request=request[:16]):
+                response = self.exchange((request,))
+                self.assertEqual(
+                    self.netstring(b"PERM malformed request"),
+                    response,
+                )
+                self.assertEqual(
+                    self.netstring(b"OK 1"),
+                    self.exchange(
+                        (self.netstring(b"eligible eligible@local.test"),),
+                    ),
+                )
+
+    def test_slow_truncated_request_times_out_without_blocking_recovery(self):
+        connection = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        connection.settimeout(2)
+        started = time.monotonic()
+        try:
+            connection.sendall(b"40:eligible eligible@local")
+            response = self.receive_all(connection)
+        finally:
+            connection.close()
+
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(self.netstring(b"PERM malformed request"), response)
+        self.assertEqual(
+            self.netstring(b"OK 1"),
+            self.exchange((self.netstring(b"eligible eligible@local.test"),)),
+        )
+
+    def test_malformed_payload_is_absent_from_response_and_logs(self):
+        canary = b"socketmap-raw-payload-canary"
+        response = self.exchange(
+            (f"{len(canary)}:".encode("ascii") + canary + b";",),
+        )
+
+        self.assertEqual(self.netstring(b"PERM malformed request"), response)
+        self.assertNotIn(canary, response)
+        self.assertNotIn(canary.decode("ascii"), "\n".join(self.logs))
+
+    def test_outcome_logs_are_bounded_labels_without_recipient_data(self):
+        canary = "socketmap-outcome-canary@local.test"
+        self.assertEqual(
+            self.netstring(b"OK 1"),
+            self.exchange(
+                (self.netstring(b"eligible eligible@local.test"),),
+            ),
+        )
+        self.assertEqual(
+            self.netstring(b"NOTFOUND "),
+            self.exchange(
+                (self.netstring(f"eligible {canary}".encode("ascii")),),
+            ),
+        )
+        self.assertEqual(
+            self.netstring(b"PERM unsupported map"),
+            self.exchange(
+                (self.netstring(b"other eligible@local.test"),),
+            ),
+        )
+
+        class UnavailableReader:
+            def eligibility(self, username):
+                return server.EligibilityResult.UNAVAILABLE
+
+        self.socketmap.lookup = server.SocketMapLookup(UnavailableReader())
+        self.assertEqual(
+            self.netstring(b"TEMP eligibility authority unavailable"),
+            self.exchange(
+                (self.netstring(b"eligible eligible@local.test"),),
+            ),
+        )
+
+        combined_logs = "\n".join(self.logs)
+        for label in ("OK", "NOTFOUND", "TEMP", "protocol-error"):
+            self.assertIn(f"Socketmap lookup outcome={label}", combined_logs)
+        self.assertNotIn(canary, combined_logs)
+
+    def exchange(self, fragments):
+        connection = socket.create_connection(
+            ("127.0.0.1", self.socketmap.server_address[1]),
+            timeout=2,
+        )
+        connection.settimeout(2)
+        try:
+            for fragment in fragments:
+                connection.sendall(fragment)
+            try:
+                connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            return self.receive_all(connection)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def receive_all(connection):
+        chunks = []
+        while True:
+            chunk = connection.recv(4096)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+    @staticmethod
+    def netstring(payload):
+        return str(len(payload)).encode("ascii") + b":" + payload + b","
+
+
+class ServiceLifecycleTest(unittest.TestCase):
+    def test_socketmap_bind_failure_prevents_http_server_construction(self):
+        http_constructed = []
+
+        def fail_socketmap(*args, **kwargs):
+            raise OSError("simulated socketmap bind failure")
+
+        def construct_http(*args, **kwargs):
+            http_constructed.append(True)
+            return object()
+
+        self.assertTrue(
+            hasattr(server, "build_servers"),
+            "Task 4 service construction lifecycle is not implemented",
+        )
+        with self.assertRaisesRegex(OSError, "socketmap bind failure"):
+            server.build_servers(
+                http_server_factory=construct_http,
+                socketmap_server_factory=fail_socketmap,
+            )
+
+        self.assertEqual([], http_constructed)
+
+    def test_socketmap_stop_requested_before_serve_exits_without_shutdown(self):
+        stop_requested = threading.Event()
+        stop_requested.set()
+        socketmap = server.SocketMapServer(
+            ("127.0.0.1", 0),
+            server.SocketMapLookup(
+                MutableEligibilityReader(),
+            ),
+            log_message=lambda message: None,
+        )
+        failures = []
+
+        def serve():
+            try:
+                socketmap.serve_until(stop_requested)
+            except BaseException as exception:
+                failures.append(exception)
+
+        service_thread = threading.Thread(target=serve, daemon=True)
+        try:
+            service_thread.start()
+            service_thread.join(timeout=2)
+        finally:
+            socketmap.server_close()
+
+        self.assertFalse(
+            service_thread.is_alive(),
+            "a stop request racing ahead of serve left the socketmap blocked",
+        )
+        self.assertEqual([], failures)
+
+    def test_socketmap_start_failure_stops_http_and_is_propagated(self):
+        class FakeHttpServer:
+            def __init__(self):
+                self.closed = False
+
+            def serve_until(self, peer_stopped):
+                if not peer_stopped.wait(1):
+                    raise AssertionError("socketmap failure was not supervised")
+
+            def server_close(self):
+                self.closed = True
+
+        class FailingSocketMapServer:
+            def __init__(self):
+                self.closed = False
+
+            def serve_until(self, stop_requested):
+                raise RuntimeError("simulated socketmap start failure")
+
+            def shutdown(self):
+                raise AssertionError("an already-stopped socketmap was shut down")
+
+            def server_close(self):
+                self.closed = True
+
+        http = FakeHttpServer()
+        socketmap = FailingSocketMapServer()
+        self.assertTrue(
+            hasattr(server, "serve_services"),
+            "Task 4 service runtime lifecycle is not implemented",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "socketmap start failure"):
+            server.serve_services(http, socketmap)
+
+        self.assertTrue(http.closed)
+        self.assertTrue(socketmap.closed)
+
+    def test_http_failure_stops_socketmap_and_is_propagated(self):
+        class FailingHttpServer:
+            def __init__(self, socketmap):
+                self.socketmap = socketmap
+                self.closed = False
+
+            def serve_until(self, peer_stopped):
+                if not self.socketmap.started.wait(1):
+                    raise AssertionError("socketmap did not start")
+                raise RuntimeError("simulated HTTP server failure")
+
+            def server_close(self):
+                self.closed = True
+
+        class RunningSocketMapServer:
+            def __init__(self):
+                self.started = threading.Event()
+                self.stopped = threading.Event()
+                self.exited = threading.Event()
+                self.closed = False
+
+            def serve_until(self, stop_requested):
+                self.started.set()
+                stop_requested.wait(2)
+                self.exited.set()
+
+            def shutdown(self):
+                raise AssertionError("blocking shutdown must not be called")
+
+            def server_close(self):
+                self.closed = True
+
+        socketmap = RunningSocketMapServer()
+        http = FailingHttpServer(socketmap)
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP server failure"):
+            server.serve_services(http, socketmap)
+
+        self.assertTrue(socketmap.exited.is_set())
+        self.assertTrue(socketmap.closed)
+        self.assertTrue(http.closed)
+
+    def test_unresponsive_socketmap_shutdown_has_a_bounded_join(self):
+        class FailingHttpServer:
+            def __init__(self, socketmap):
+                self.socketmap = socketmap
+                self.closed = False
+
+            def serve_until(self, peer_stopped):
+                if not self.socketmap.started.wait(1):
+                    raise AssertionError("socketmap did not start")
+                raise RuntimeError("simulated HTTP server failure")
+
+            def server_close(self):
+                self.closed = True
+
+        class UnresponsiveSocketMapServer:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.shutdown_called = threading.Event()
+                self.closed = False
+
+            def serve_until(self, stop_requested):
+                self.started.set()
+                self.release.wait(3)
+
+            def shutdown(self):
+                self.shutdown_called.set()
+                self.release.wait(3)
+
+            def server_close(self):
+                self.closed = True
+
+        socketmap = UnresponsiveSocketMapServer()
+        http = FailingHttpServer(socketmap)
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "did not stop"):
+                server.serve_services(http, socketmap)
+        finally:
+            socketmap.release.set()
+
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertFalse(
+            socketmap.shutdown_called.is_set(),
+            "the supervisor called a potentially blocking shutdown method",
+        )
+        self.assertTrue(socketmap.closed)
+        self.assertTrue(http.closed)
+
+    def test_socketmap_failure_is_supervised_while_http_handler_is_blocked(self):
+        handler_started = threading.Event()
+        release_handler = threading.Event()
+
+        class BlockingHandler(server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                handler_started.set()
+                release_handler.wait(3)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, format_, *args):
+                return None
+
+        class FailingSocketMapServer:
+            def __init__(self):
+                self.closed = False
+
+            def serve_until(self, stop_requested):
+                if not handler_started.wait(2):
+                    raise AssertionError("HTTP handler did not start")
+                raise RuntimeError("socketmap failed during blocked HTTP")
+
+            def shutdown(self):
+                raise AssertionError("blocking shutdown must not be called")
+
+            def server_close(self):
+                self.closed = True
+
+        http = server.SupervisedHTTPServer(
+            ("127.0.0.1", 0),
+            BlockingHandler,
+        )
+        socketmap = FailingSocketMapServer()
+        failures = []
+        finished = threading.Event()
+
+        def serve():
+            try:
+                server.serve_services(http, socketmap)
+            except BaseException as exception:
+                failures.append(exception)
+            finally:
+                finished.set()
+
+        service_thread = threading.Thread(target=serve, daemon=True)
+        service_thread.start()
+        client = socket.create_connection(http.server_address, timeout=2)
+        client.settimeout(2)
+        try:
+            client.sendall(
+                b"GET /blocked HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Connection: close\r\n\r\n",
+            )
+            self.assertTrue(handler_started.wait(1))
+            self.assertTrue(
+                finished.wait(2),
+                "blocked HTTP handler prevented socketmap failure supervision",
+            )
+        finally:
+            release_handler.set()
+            client.close()
+            service_thread.join(timeout=2)
+
+        self.assertFalse(service_thread.is_alive())
+        self.assertEqual(1, len(failures))
+        self.assertIsInstance(failures[0], RuntimeError)
+        self.assertIn("failed during blocked HTTP", str(failures[0]))
+        self.assertTrue(socketmap.closed)
+
+
+class SupervisedHTTPServerCapacityTest(unittest.TestCase):
+    def test_blocked_handlers_are_capped_overflow_closes_and_capacity_recovers(self):
+        self.assertTrue(
+            hasattr(server, "MAX_HTTP_CONNECTIONS"),
+            "threaded HTTP handler concurrency is not bounded",
+        )
+        maximum = server.MAX_HTTP_CONNECTIONS
+        release_handlers = threading.Event()
+        peer_stopped = threading.Event()
+        handler_count_lock = threading.Lock()
+        handler_count = []
+
+        class BlockingHandler(server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                with handler_count_lock:
+                    handler_count.append(self.path)
+                if self.path == "/blocked":
+                    release_handlers.wait(5)
+                try:
+                    self.send_response(200)
+                    self.end_headers()
+                except OSError:
+                    pass
+
+            def log_message(self, format_, *args):
+                return None
+
+        httpd = server.SupervisedHTTPServer(
+            ("127.0.0.1", 0),
+            BlockingHandler,
+        )
+        failures = []
+
+        def serve():
+            try:
+                httpd.serve_until(peer_stopped)
+            except server._PeerServerStopped:
+                pass
+            except BaseException as exception:
+                failures.append(exception)
+
+        service_thread = threading.Thread(target=serve, daemon=True)
+        service_thread.start()
+        held = []
+        try:
+            for _ in range(maximum):
+                connection = socket.create_connection(
+                    httpd.server_address,
+                    timeout=2,
+                )
+                connection.settimeout(2)
+                connection.sendall(
+                    b"GET /blocked HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"Connection: close\r\n\r\n",
+                )
+                held.append(connection)
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with handler_count_lock:
+                    started_handlers = len(handler_count)
+                if (
+                    httpd.active_connection_count == maximum
+                    and started_handlers == maximum
+                ):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(maximum, httpd.active_connection_count)
+            self.assertEqual(maximum, started_handlers)
+
+            overflow = socket.create_connection(
+                httpd.server_address,
+                timeout=2,
+            )
+            overflow.settimeout(2)
+            try:
+                try:
+                    overflow.sendall(
+                        b"GET /overflow-canary HTTP/1.1\r\n"
+                        b"Host: localhost\r\n"
+                        b"Connection: close\r\n\r\n",
+                    )
+                    overflow_response = overflow.recv(4096)
+                except OSError:
+                    overflow_response = b""
+            finally:
+                overflow.close()
+
+            self.assertEqual(
+                b"",
+                overflow_response,
+                "HTTP saturation returned or reflected request data",
+            )
+            with handler_count_lock:
+                self.assertEqual(maximum, len(handler_count))
+                self.assertNotIn("/overflow-canary", handler_count)
+
+            release_handlers.set()
+            for connection in held:
+                connection.close()
+            held.clear()
+
+            deadline = time.monotonic() + 2
+            while (
+                httpd.active_connection_count
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(0, httpd.active_connection_count)
+
+            recovered = socket.create_connection(
+                httpd.server_address,
+                timeout=2,
+            )
+            recovered.settimeout(2)
+            try:
+                recovered.sendall(
+                    b"GET /health HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"Connection: close\r\n\r\n",
+                )
+                response = bytearray()
+                while True:
+                    chunk = recovered.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            finally:
+                recovered.close()
+
+            self.assertIn(b" 200 ", bytes(response).partition(b"\r\n")[0])
+            with handler_count_lock:
+                self.assertEqual(maximum + 1, len(handler_count))
+                self.assertEqual("/health", handler_count[-1])
+        finally:
+            release_handlers.set()
+            for connection in held:
+                connection.close()
+            peer_stopped.set()
+            service_thread.join(timeout=2)
+            httpd.server_close()
+
+        self.assertFalse(service_thread.is_alive())
+        self.assertEqual([], failures)
+
+    def test_delay_knob_has_a_finite_upper_bound(self):
+        self.assertTrue(
+            hasattr(server, "MAX_TEST_DELAY_SECONDS"),
+            "the mock HTTP delay knob has no finite upper bound",
+        )
+        cases = (
+            ("1000000000", (server.MAX_TEST_DELAY_SECONDS,)),
+            ("inf", (server.MAX_TEST_DELAY_SECONDS,)),
+            ("nan", ()),
+            ("-1", ()),
+            ("not-a-number", ()),
+        )
+
+        for value, expected_sleep in cases:
+            with self.subTest(value=value):
+                handler = types.SimpleNamespace(
+                    path=f"/health?delay={value}",
+                )
+                with mock.patch.object(server.time, "sleep") as sleep:
+                    handled = server._apply_test_knobs(handler)
+
+                self.assertFalse(handled)
+                if expected_sleep:
+                    sleep.assert_called_once_with(*expected_sleep)
+                else:
+                    sleep.assert_not_called()
+
+
 class OAuthComposeTest(unittest.TestCase):
     def test_oauth_mounts_only_the_eligibility_directory_read_only(self):
         self.assertEqual(
@@ -617,6 +1541,134 @@ class OAuthComposeTest(unittest.TestCase):
         self.assertNotIn(".runtime/secrets", service)
         self.assertNotIn(".runtime/dovecot-operator", service)
         self.assertNotIn("/etc/dovecot/runtime/users:", service)
+
+    def test_socketmap_is_ready_internally_and_never_published_to_host(self):
+        compose = SERVER_PATH.parent.parent.joinpath("docker-compose.yml").read_text(
+            encoding="utf-8",
+        )
+        lines = compose.splitlines()
+        oauth_start = lines.index("  oauth2-mock:")
+        oauth_end = lines.index("  stalwart:")
+        oauth = "\n".join(lines[oauth_start:oauth_end])
+        postfix_start = lines.index("  postfix:")
+        postfix_end = lines.index("  oauth2-mock:")
+        postfix = "\n".join(lines[postfix_start:postfix_end])
+
+        self.assertIn("10001", oauth)
+        self.assertNotRegex(
+            oauth,
+            r'(?m)^\s*-\s+"[^"]*10001[^"]*"\s*(?:#.*)?$',
+        )
+        self.assertIn("socket.create_connection", oauth)
+        self.assertIn("sendall", oauth)
+        self.assertIn("NOTFOUND", oauth)
+        self.assertIn("condition: service_healthy", postfix)
+        self.assertIn("oauth2-mock:", postfix)
+        self.assertIn("dovecot:", postfix)
+
+    def test_resolved_compose_model_enforces_socketmap_boundary(self):
+        repository = SERVER_PATH.parent.parent
+        result = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=repository,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            0,
+            result.returncode,
+            "docker compose config --format json failed",
+        )
+        model = json.loads(result.stdout)
+        services = model["services"]
+
+        for service_name, service in services.items():
+            for publication in service.get("ports", []):
+                with self.subTest(
+                    service=service_name,
+                    publication=publication,
+                ):
+                    self.assertNotEqual(10001, int(publication["target"]))
+                    self.assertNotEqual(
+                        10001,
+                        int(publication["published"]),
+                    )
+
+        postfix_dependencies = services["postfix"]["depends_on"]
+        for dependency in ("dovecot", "oauth2-mock"):
+            self.assertEqual(
+                "service_healthy",
+                postfix_dependencies[dependency]["condition"],
+            )
+
+        health_test = services["oauth2-mock"]["healthcheck"]["test"]
+        self.assertEqual(["CMD", "python", "-c"], health_test[:3])
+        health_script = health_test[3]
+        self.assertIn("http://localhost:8080/health", health_script)
+        self.assertIn(
+            "socket.create_connection(('127.0.0.1', 10001), 1)",
+            health_script,
+        )
+        self.assertIn("sendall", health_script)
+        self.assertIn("NOTFOUND", health_script)
+
+
+class PostfixSocketMapConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.repository = SERVER_PATH.parent.parent
+        self.main_cf = self.repository.joinpath("postfix/main.cf").read_text(
+            encoding="utf-8",
+        )
+        self.entrypoint = self.repository.joinpath("postfix/entrypoint.sh").read_text(
+            encoding="utf-8",
+        )
+
+    def test_recipient_boundary_uses_exact_socketmap_and_rejects_unlisted(self):
+        assignments = {}
+        for name in (
+            "local_recipient_maps",
+            "smtpd_reject_unlisted_recipient",
+        ):
+            assignments[name] = [
+                line
+                for line in self.main_cf.splitlines()
+                if line.partition("=")[0].strip() == name
+            ]
+
+        self.assertEqual(
+            [
+                "local_recipient_maps = "
+                "socketmap:inet:oauth2-mock:10001:eligible"
+            ],
+            assignments["local_recipient_maps"],
+        )
+        self.assertEqual(
+            ["smtpd_reject_unlisted_recipient = yes"],
+            assignments["smtpd_reject_unlisted_recipient"],
+        )
+        self.assertIn(
+            "smtpd_relay_restrictions = reject_unauth_destination\n",
+            self.main_cf,
+        )
+        self.assertNotIn("local_recipient_maps =\n", self.main_cf)
+        self.assertNotIn("smtpd_reject_unlisted_recipient = no", self.main_cf)
+
+    def test_entrypoint_waits_boundedly_for_socketmap_and_dovecot(self):
+        self.assertIn("MAX_WAIT_ATTEMPTS=60", self.entrypoint)
+        self.assertIn("nc -z -w 1 \"$host\" \"$port\"", self.entrypoint)
+        self.assertIn(
+            "wait_for_service oauth2-mock 10001 \"OAuth socketmap\"",
+            self.entrypoint,
+        )
+        self.assertIn(
+            "wait_for_service dovecot 24 \"Dovecot LMTP\"",
+            self.entrypoint,
+        )
+        self.assertNotIn("until nc -z", self.entrypoint)
 
 
 class ActualHttpFormBoundaryTest(unittest.TestCase):

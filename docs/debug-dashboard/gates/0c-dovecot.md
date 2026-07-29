@@ -5,7 +5,8 @@
 - **Task 1 — Freeze and inspect the Dovecot baseline:** complete.
 - **Task 2 — Replace tracked plaintext runtime authority:** complete.
 - **Task 3 — Make OAuth decisions eligibility-aware:** complete.
-- **Gate 0C:** in progress. Tasks 4–9 still own the Postfix,
+- **Task 4 — Make Postfix recipient routing eligibility-aware:** complete.
+- **Gate 0C:** in progress. Tasks 5–9 still own the
   operator-ingress, lifecycle, and final decision work. This document does not
   record a Gate 0C PASS.
 
@@ -58,19 +59,17 @@ for Gate 0C and avoids reproducing unrelated runtime defaults.
 |---|---|---|---|
 | A static userdb can resolve a non-existent target | The Task 1 baseline contained `userdb static` with a templated `/srv/vmail/%{user}` home | Task 2 | Replaced in Task 2 with an exact passwd-file userdb lookup against `/etc/dovecot/runtime/users` |
 | A prefix token can make an arbitrary identity active | The Task 1 mock returned `active: True` for every `token.startswith("valid-")` suffix | Task 3 | Replaced in Task 3 with a fresh canonical eligibility lookup on every OAuth decision |
-| Postfix accepts arbitrary local recipients | `postfix/main.cf` has empty `local_recipient_maps` and `smtpd_reject_unlisted_recipient = no` | Task 4 | Characterized only; unchanged |
+| Postfix accepts arbitrary local recipients | `postfix/main.cf` had empty `local_recipient_maps` and `smtpd_reject_unlisted_recipient = no` | Task 4 | Replaced in Task 4 with a live full-recipient socketmap and unlisted-recipient rejection |
 | Ordinary mail/OAuth host publications were wildcard-bound | Baseline Compose mappings omitted a host address for Dovecot, Postfix, and OAuth | Task 1 | Replaced with the exact loopback mappings below |
 | The Dovecot image floated and services had fixed names | Baseline used `dovecot/dovecot:latest` and four `container_name` directives | Task 1 | Image pinned; all fixed names removed |
 
-The focused Kotlin audit now keeps the remaining deferred Postfix condition
-visible as an explicit Task 4 assignment. Its Task 1 assertions initially failed for
+The focused Kotlin audit's Task 1 assertions initially failed for
 the floating image, wildcard/legacy port mappings, and four fixed container
 names: 1 test passed and 3 failed. This is the intentional RED evidence.
-The deferred assertions are temporary characterization, not desired
-invariants: Task 4 must remove its entry during its own RED/GREEN remediation.
 Task 2 removed the former static-userdb characterization after replacing that
 boundary, and Task 3 removed the arbitrary prefix-token characterization after
-making OAuth decisions eligibility-aware.
+making OAuth decisions eligibility-aware. Task 4 removed the final deferred
+Postfix characterization and added positive exact-assignment invariants.
 
 ## Task 1 frozen Compose boundary
 
@@ -288,6 +287,116 @@ passed `4/4`, and
 `docker compose build oauth2-mock` completed successfully. No service was
 started or restarted.
 
+## Task 4 live recipient-routing boundary
+
+Postfix now resolves full recipient addresses through:
+
+```text
+local_recipient_maps = socketmap:inet:oauth2-mock:10001:eligible
+smtpd_reject_unlisted_recipient = yes
+smtpd_relay_restrictions = reject_unauth_destination
+```
+
+The socketmap listener is internal-only. It accepts bounded netstrings, does
+not cache the eligibility authority, and reads its current state before every
+exact local eligibility decision. It returns a non-empty `OK` only for an
+exact canonical eligible `@local.test` address. Invalid, absent, off-domain,
+or protected addresses return `NOTFOUND`; authority unavailability returns
+`TEMP`; framing or map-protocol errors return `PERM`.
+The protected localparts are `dashboard-management`,
+`dashboard-operator-a`, and `dashboard-operator-b`, including every `+`
+subaddress. Ordinary `+` subaddresses are not normalized and must themselves
+be exact eligible entries.
+
+Each frame has a one-second total read deadline and a 512-byte limit. A
+connection handles at most 32 requests, and at most 16 connections are served
+concurrently. Idle keep-alives close silently, partial frames fail with a
+bounded protocol error, saturated accepts close without an unsolicited
+response, and one stalled client cannot serialize another lookup. HTTP
+request handlers are threaded but capped at 16 concurrent connections;
+overflow closes without a handler thread or reflected request data, capacity
+recovers after blocked handlers exit, and the test-only delay knob is capped
+at five seconds. Both accept loops use event-polled supervision rather than
+potentially blocking shutdown calls: either listener's failure stops the
+other, closes both servers, and is propagated. Parsed outcomes log only the
+bounded labels `OK`, `NOTFOUND`, `TEMP`, or `protocol-error`; recipient and
+raw-payload canaries are absent.
+
+Compose health requires both a bounded OAuth HTTP response and a functional
+socketmap request whose exact reply is `NOTFOUND`. Postfix depends directly
+on healthy OAuth and Dovecot services, then its entrypoint performs bounded
+startup probes for socketmap and LMTP. The resolved Compose JSON proves that
+no service publishes target or host port `10001`; the ordinary OAuth
+publication remains the reviewed loopback-only HTTP port.
+
+### Task 4 RED/GREEN and build evidence
+
+The first Task 4 stdlib run was intentionally RED at 35 tests with 24
+failures: the socketmap symbols, listener, Postfix restrictions, readiness,
+and dependencies did not exist. Review-expanded regressions then exposed
+persistent-connection, supervision, connection-capacity, protected-address,
+outcome-log, and resolved-Compose gaps. The consolidated expanded RED run had
+48 tests with 8 failures and 3 errors. An independent review then drove a
+49-test RED run with 3 failures and 4 errors around event-polled lifecycle,
+observable saturation, and functional health. A second quality review then
+drove a 52-test RED run with exactly 2 failures for bounded HTTP concurrency
+and a finite delay policy. The final command:
+
+```bash
+python3 -B -W error -m unittest oauth2-mock/test_server.py
+```
+
+passed `52/52`. It covers fragmented and reused connections, malformed and
+oversized netstrings, idle and partial timeouts, independent concurrent
+lookups, request/connection caps and recovery, current deletion/update
+decisions, exact status semantics, protected subaddresses, safe logs,
+bidirectional listener failure, a stop-before-serve race, supervision during
+a blocked HTTP handler, bounded HTTP saturation and recovery, finite delay
+handling, bounded joins without synchronous shutdown, exact Postfix source
+assignments, and the resolved Compose model.
+
+`sh -n postfix/entrypoint.sh` and `docker compose config --quiet` exited `0`.
+`docker compose build oauth2-mock postfix` completed successfully. In the
+built Postfix image, `postconf -m` includes `socketmap`, while `postconf -n`
+shows exactly the three effective recipient/relay lines above. The built
+OAuth Python 3.12 source also passed warnings-as-errors compilation.
+
+### Task 4 isolated SMTP proof
+
+The live proof used only Compose project `mail-sandbox-task4-proof`. OAuth and
+Dovecot had no host publications; SMTP alone used
+`127.0.0.1:21025`. Mail storage and Dovecot logs used disposable named volumes,
+while TLS and the copied eligibility authority used proof-owned temporary
+directories. The initial Dovecot proof start failed only because the worktree
+contains no TLS fixture; bounded logs identified the missing configured
+`tls.crt`. A one-day proof-only certificate was generated in the temporary
+directory, after which OAuth and Dovecot were healthy.
+
+One disposable address was created through `EligibilityFileCli` with a
+generated password supplied only on stdin. Its resulting authority was copied
+to the proof runtime; the CLI then removed the feature-runtime entry before
+Postfix started, and the verified empty feature authority was removed to
+restore the exact pre-proof state. SMTP stopped before DATA and reported:
+
+```text
+MAIL FROM:       250
+eligible RCPT:   250
+absent RCPT:     550 (User unknown in local recipient table)
+mailbox entries: 0
+```
+
+An explicit `postqueue -p` snapshot was not captured before teardown and is
+therefore not claimed as evidence; the proof establishes the required
+pre-DATA rejection and empty disposable mailbox volume.
+
+The bounded OAuth log contained only `Socketmap lookup outcome=OK` and
+`Socketmap lookup outcome=NOTFOUND`. The proof containers, network, named
+volumes, temporary authority, private key, certificate, and override were
+then removed. The worktree Dovecot runtime again contains only its original
+empty `users.lock`, the worktree `ssl` directory remains empty, and the primary
+`postfix-dev`, `dovecot-dev`, `oauth2-mock`, and `stalwart-dev` containers all
+remained running with zero restarts.
+
 ## Verification
 
 The focused audit command is:
@@ -303,7 +412,8 @@ cd debug-dashboard
 The final run passed `4/4` with zero skipped or failed. It verifies the pinned
 Dovecot image inside the Dovecot service, exact service-scoped port lists
 (including rejection of duplicates or unreviewed syntax), absence of every
-fixed container name, and the temporary Task 4 hazard characterization.
+fixed container name, absence of deferred eligibility hazards, and exactly
+one assignment for each required Postfix recipient restriction.
 
 `docker compose config --quiet` exited `0`. The expanded
 `docker compose config` model was inspected with secret-bearing environment
@@ -313,7 +423,11 @@ values redacted and showed:
 - no `container_name` field on any service;
 - `host_ip: 127.0.0.1` with the exact published/target pairs for all four
   ordinary Dovecot ports, all three Postfix ports, and the OAuth port.
+- no publication whose target or host port is `10001`;
+- direct healthy Postfix dependencies on OAuth and Dovecot, with OAuth health
+  checking HTTP plus an exact functional socketmap request and response.
 
 The unchanged Stalwart publication is outside the Task 1 port scope; only its
-fixed container name was removed. No `docker compose up`, `down`, `restart`,
-live Stalwart access, or Stalwart data operation was performed.
+fixed container name was removed. Task 4 used only the isolated project
+documented above. No primary-stack `up`, `down`, `restart`, live Stalwart
+access, or Stalwart data operation was performed.
