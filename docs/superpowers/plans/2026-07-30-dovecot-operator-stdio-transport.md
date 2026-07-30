@@ -282,11 +282,16 @@ git commit -m "test: define fixed Dovecot operator process launch"
   latch-driven unit schedules and adds no wait, actor, or runtime behavior.
 
 - [ ] Add deterministic regressions for an unreaped abort acknowledged
-  (a) after the old precheck but before stdin authorization, (b) during the
+  (a) after the old precheck but before stdin authorization; (b) during the
   500-ms natural wait but before stdout authorization with a read already
-  admitted, and (c) while an already claimed raw stdout close is blocked before
-  terminal caching. The first two must make no new direction-close request;
-  the third may complete its already claimed close. In every case cache exactly
+  admitted; (c) while an already claimed raw stdout close is blocked before
+  terminal caching; (d) after stdin close but while the post-stdin/pre-wait
+  snapshot is blocked on the abort handshake; and (e) after deferred stdin and
+  completed stdout close but while process selection is blocked on that
+  handshake. The first two must make no new direction-close request; the third
+  may complete its already claimed close; the fourth must skip the natural wait
+  and stdout request; the fifth must skip duplicate lifecycle process
+  termination. In every case cache exactly
   `reaped=false`, `naturalExit=false`, `terminationRequired=true`,
   `streamsClosed=false`, and `exitCode=null`. A stored false result observed at
   either authorization, the post-stdin pre-wait check, process selection, or
