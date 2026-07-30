@@ -580,8 +580,8 @@ seed session, and then gives the strict full-read probe a separately loaded
 credential. The APPEND helper has one five-second total deadline beginning
 before byte-oriented message validation and asynchronous transport allocation
 and continuing through every authentication, write, flush, APPEND, and response
-read. A watchdog aborts blocked I/O, the bounded opener rejects exhausted
-capacity, late or duplicate allocations self-close, and successful completion
+read. Its coordinator rejects exhausted capacity before transport allocation,
+late or duplicate allocations self-close, and successful completion
 atomically disarms the remaining deadline. Invalid timeout and all other
 pre-open failures still close the credential and wipe the caller's message.
 The message remains bounded at 16 KiB and requires exactly one of every fixed
@@ -598,26 +598,44 @@ rejected unless a later positive `EXISTS` arrives. Zero or leading-zero
 `FETCH` sequence numbers and an empty or malformed UID search also fail
 closed.
 
-The production probe and proof helpers no longer share one reusable watchdog
-executor. Every operation owns a disposable daemon watchdog, so an arbitrary
-blocked deadline callback cannot delay a later operation. Probe cancellation
-dispatches `abort` and `close` independently on disposable daemon threads and
-waits only for a bounded successful cancellation; a blocked abort therefore
-cannot prevent close from releasing the current probe or poison later
-deadlines. Held-session deadline and failure cleanup likewise starts
-independent disposable abort and close attempts with a bounded wait; a later
-successful cancellation still publishes the terminal session state, while its
-lease-owned explicit `close()` remains synchronous and retryable. Caller
+The production probe, Held helpers, and raw HTTP client share one process-wide
+`DovecotBoundedOperationWorkers` coordinator with a hard capacity of four
+logical network operations. Each admitted operation owns one serialized daemon
+I/O worker and may register at most two identity-distinct cancellation targets.
+Abort and close actors are started lazily and independently for each target, so
+one operation owns at most five actors and the process-wide maximum is twenty.
+Admission occurs after the absolute monotonic deadline is created but before
+credential access, transport/socket allocation, or another actor. A fifth
+operation therefore fails before its resource factory runs.
+
+Timeout, interruption, and generic failure move a reservation from active to
+abandoned; they do not release it. The reservation remains charged until the
+I/O worker and every started cancellation actor actually exit. Connect/open,
+read, write, flush, and explicit close all run on the serialized I/O worker,
+while caller waits use the one original absolute deadline without a watcher
+thread. Worker-owned request copies are wiped whether a task runs or is
+declined. Read results use a one-winner handoff; a declined or late result is
+wiped on its worker before the operation can release.
+
+Probe and Held cancellation dispatch `abort` and `close` independently and
+wait only within the original deadline and a smaller fixed cleanup budget.
+Blocked original I/O plus blocked abort and close can consume a charged
+reservation, but cannot hold the caller or grow actors past the fixed cap. A
+later successful Held cancellation still publishes terminal session state,
+while lease-owned explicit `close()` remains synchronous and retryable. Caller
 interruption is checked before open/seed allocation, held-session I/O,
-closed-session validation, or HTTP socket allocation, and mid-operation
-interruption is restored and rethrown instead of being treated as proof
-failure or closed-transport evidence.
+closed-session validation, or HTTP socket allocation. For Held and HTTP proof
+helpers, even a generic `IOException` or `SocketException` observed with the
+caller flag set becomes a new redacted `InterruptedException` with the flag
+restored after bounded cleanup; it cannot be mistaken for proof failure or
+closed-transport evidence. The production probe instead restores the caller
+flag and returns its typed `TransportFailure`.
 
 The rotation proof holds an actual authenticated old-ID IMAP session rather
 than a callback-only stand-in. It appends the deterministic read fixture,
-proves every `NOOP` write, flush, and read under one watchdog-backed deadline,
+proves every `NOOP` write, flush, and read under one coordinator-bound deadline,
 registers its real close operation with the old-generation application lease,
-and checks the closed transport under a separate bounded watchdog before old
+and checks the closed transport in a fresh bounded operation before old
 credential revocation.
 
 No auth-cache flush, service restart, or recreation is part of convergence.
@@ -679,16 +697,20 @@ authorization denial requires the exact fixed
 `http://127.0.0.1/callback` origin and path without a port, user information, or
 fragment, then parses percent-decoded unique query fields and requires exact
 `error=access_denied` plus `state=task6` without any decoded `code` key. A fixed
-loopback HTTP/1.0 client applies one watchdog-backed deadline across connect,
-request write and flush, status, headers, and body. It bounds the status line,
+loopback HTTP/1.0 client acquires the shared coordinator before socket
+allocation, registers that socket before connect, and applies one deadline
+across connect, both request writes, flush, status, headers, fixed-length or
+close-delimited body, and successful socket close. It bounds the status line,
 each header line, cumulative header bytes and count, `Location`, declared or
 close-delimited body, and rejects duplicate framing headers or transfer
-encoding. Request headers and every owned response-body buffer are wiped on
-failure, rejection, and close. The fixed Python network helper arms its
-process-local wall deadline before argument processing and the bounded stdin
-read, so a blocked producer cannot escape the deadline. The two live scenarios
-now retain only orchestration; protocol, HTTP, mailbox, process, topology,
-held-session, and deadline logic are separate focused components.
+encoding. A fixed-length collector transfers its owned array to the response,
+which wipes it on ordinary close; the close-delimited scratch array is wiped
+after copying. Collector failure and late result disposal also wipe the owned
+array. The fixed Python network helper arms its process-local wall deadline
+before argument processing and the bounded stdin read, so a blocked producer
+cannot escape the deadline. The two live scenarios now retain only
+orchestration; protocol, HTTP, mailbox, process, topology, held-session, and
+deadline logic are separate focused components.
 
 ### Task 6 non-live evidence and pending live proof
 
@@ -698,29 +720,43 @@ before inverse authentication, corrupt or misrouted durable states reaching
 runtime work, non-terminal lease/runtime and held-session close outcomes,
 overly permissive authentication and OAuth response classification, and HTTP
 operations without one total deadline or complete header/body bounds. The
-repair review also exposed reusable watchdog poisoning, sequential
-abort/close cancellation, swallowed interruption, permissive SMTP `535`
-prefix parsing, incomplete `EXISTS`/`EXPUNGE` state, and cleanup that could
-miss an add which mutated before returning failure. The current 12-class
-reciprocal run passed `121/121`:
+repair review then exposed unbounded reusable/watchdog and cancellation actors,
+missing process-wide admission, generic I/O failures taking precedence over a
+flagged interruption, incomplete real-collector ownership evidence, a
+temporary one-byte repository read without observable wiping, source-text
+live-proof assertions, and cleanup that could miss an add which mutated before
+returning failure.
 
+Adversarial review approved the coordinator integrations, actual HTTP
+collector ownership, repository/terminal replay, and executable live fixtures
+with no remaining finding. Focused non-live selections passed:
+
+- HTTP plus coordinator boundaries: `35/35`;
+- durable repository plus terminal runtime replay: `12/12`;
+- executable isolation-fixture contracts: `5/5`;
+- the complete Held deadline class: `26/26`; and
+- the Probe-to-HTTP cross-class ordering check: `39/39`.
+
+The current 13-class reciprocal run passed `159/159`:
+
+- the bounded operation coordinator: `19/19`;
 - credential recovery, rotation projection, durable repository, and
-  application leases: `50/50`;
-- exact auth classification and the fixed operator probe: `24/24`;
-- OAuth redirect/JSON validation and bounded HTTP transport: `9/9`;
-- held-session, deadline, and mailbox contracts: `27/27`; and
+  application leases: `52/52`;
+- exact auth classification and the fixed operator probe: `25/25`;
+- OAuth redirect/JSON validation and bounded HTTP transport: `16/16`;
+- held-session, deadline, and mailbox contracts: `36/36`; and
 - bounded process and topology proofs: `11/11`.
 
-The network-isolation helper's independent Python suite passed `21/21`.
-
 Under the no-Docker verification boundary, the non-live Dovecot class run
-passed `198/198` and the 13 non-daemon static/config selectors passed `13/13`,
-for `211/211` with zero skips. The four effective-configuration selectors
+passed `236/236` and the 13 non-daemon static/config selectors passed `13/13`,
+for `249/249` with zero skips. The four effective-configuration selectors
 that invoke `docker run` were not executed. The wider `dashboard-server`
-non-live run passed `463/463`, plus those same `13/13` selectors, for
-`476/476`; it excluded all `*LiveTest` classes, the production browser gate
-that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed Docker-backed
-config class from the broad scan.
+non-live run passed `501/501`, plus a second `13/13` run of those same
+selectors, for `514/514`; it excluded all `*LiveTest` classes, the production
+browser gate that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed
+Docker-backed config class from the broad scan. The independent Python helper
+passed `21/21`, and `./kotlin build --module dashboard-server` completed
+successfully.
 
 Task 6 live evidence is **pending**, not passed. No Docker daemon or live
 service operation was performed while implementing this task. A controller
