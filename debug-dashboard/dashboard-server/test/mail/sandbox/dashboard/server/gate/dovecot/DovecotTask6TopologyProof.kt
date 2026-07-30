@@ -40,6 +40,66 @@ private const val TASK6_FIXED_CONNECT_ATTEMPTS = 5
 private const val TASK6_SOCKET_TIMEOUT_MILLIS = 500L
 private const val TASK6_NETWORK_HELPER_MARGIN_MILLIS = 5_000L
 
+internal fun task6NetworkIsolationFailureDiagnostic(
+    exitCode: Int,
+    stdout: String,
+    stderr: String,
+): String? {
+    if (exitCode == 0) {
+        return if (stdout == "OK\n" && stderr.isEmpty()) {
+            null
+        } else {
+            TASK6_INVALID_NETWORK_HELPER_RESULT
+        }
+    }
+    if (stderr.isNotEmpty()) return TASK6_INVALID_NETWORK_HELPER_RESULT
+    val expected = when (exitCode) {
+        1 -> TASK6_NETWORK_HELPER_FAILURES
+        2 -> TASK6_NETWORK_HELPER_INPUT_FAILURES
+        else -> return TASK6_INVALID_NETWORK_HELPER_RESULT
+    }
+    val candidate = stdout.removeSuffix("\n")
+    return if (stdout == "$candidate\n" && candidate in expected) {
+        candidate
+    } else {
+        TASK6_INVALID_NETWORK_HELPER_RESULT
+    }
+}
+
+internal fun requireTask6NetworkIsolationResult(
+    exitCode: Int,
+    stdout: String,
+    stderr: String,
+) {
+    val failureDiagnostic = task6NetworkIsolationFailureDiagnostic(
+        exitCode = exitCode,
+        stdout = stdout,
+        stderr = stderr,
+    )
+    check(failureDiagnostic == null) {
+        "Default-network isolation helper failed: $failureDiagnostic"
+    }
+}
+
+private val TASK6_NETWORK_HELPER_FAILURES = setOf(
+    "CHECK_ERROR",
+    "DOVECOT_UNREACHABLE",
+    "OPERATOR_DNS_RESOLVED",
+    "OPERATOR_IP_REACHABLE",
+    "HOST_DOCKER_INTERNAL_REACHABLE",
+    "HOST_DOCKER_INTERNAL_UNRESOLVED",
+    "GATEWAY_DOCKER_INTERNAL_REACHABLE",
+    "GATEWAY_DOCKER_INTERNAL_UNRESOLVED",
+    "TASK6_HOST_GATEWAY_REACHABLE",
+    "TASK6_HOST_GATEWAY_UNRESOLVED",
+    "HOST_IP_REACHABLE",
+)
+private val TASK6_NETWORK_HELPER_INPUT_FAILURES = setOf(
+    "INVALID_INVOCATION",
+    "INVALID_INPUT",
+)
+private const val TASK6_INVALID_NETWORK_HELPER_RESULT = "INVALID_RESULT"
+
 internal class FixedTask6DockerTopology(
     private val profile: DovecotTask5ProofProfile,
 ) {
@@ -100,12 +160,11 @@ internal class FixedTask6DockerTopology(
                 input,
                 processTimeout,
             )
-            check(result.exitCode == 0) {
-                "Default-network isolation helper failed"
-            }
-            check(result.stdout == "OK\n" && result.stderr.isEmpty()) {
-                "Default-network isolation helper returned an invalid result"
-            }
+            requireTask6NetworkIsolationResult(
+                exitCode = result.exitCode,
+                stdout = result.stdout,
+                stderr = result.stderr,
+            )
         } finally {
             input.fill(0)
         }

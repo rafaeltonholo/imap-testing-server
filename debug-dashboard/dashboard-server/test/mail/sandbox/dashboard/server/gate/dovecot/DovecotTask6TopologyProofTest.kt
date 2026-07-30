@@ -18,6 +18,103 @@ import kotlin.test.assertTrue
 
 class DovecotTask6TopologyProofTest {
     @Test
+    fun networkHelperFailureDiagnosticIsExactAllowlistedAndRedacted() {
+        listOf(
+            "CHECK_ERROR",
+            "DOVECOT_UNREACHABLE",
+            "OPERATOR_DNS_RESOLVED",
+            "OPERATOR_IP_REACHABLE",
+            "HOST_DOCKER_INTERNAL_REACHABLE",
+            "HOST_DOCKER_INTERNAL_UNRESOLVED",
+            "GATEWAY_DOCKER_INTERNAL_REACHABLE",
+            "GATEWAY_DOCKER_INTERNAL_UNRESOLVED",
+            "TASK6_HOST_GATEWAY_REACHABLE",
+            "TASK6_HOST_GATEWAY_UNRESOLVED",
+            "HOST_IP_REACHABLE",
+        ).forEach { diagnostic ->
+            assertEquals(
+                diagnostic,
+                task6NetworkIsolationFailureDiagnostic(
+                    exitCode = 1,
+                    stdout = "$diagnostic\n",
+                    stderr = "",
+                ),
+            )
+        }
+        listOf("INVALID_INVOCATION", "INVALID_INPUT").forEach { diagnostic ->
+            assertEquals(
+                diagnostic,
+                task6NetworkIsolationFailureDiagnostic(
+                    exitCode = 2,
+                    stdout = "$diagnostic\n",
+                    stderr = "",
+                ),
+            )
+        }
+        assertEquals(
+            null,
+            task6NetworkIsolationFailureDiagnostic(
+                exitCode = 0,
+                stdout = "OK\n",
+                stderr = "",
+            ),
+        )
+
+        val canary = "network-helper-secret-canary"
+        listOf(
+            Triple(0, "$canary\n", ""),
+            Triple(0, "OK\n", canary),
+            Triple(0, "CHECK_ERROR\n", ""),
+            Triple(0, "OK", ""),
+            Triple(0, "OK\r\n", ""),
+            Triple(0, "OK\nOK\n", ""),
+            Triple(1, "$canary\n", ""),
+            Triple(1, "CHECK_ERROR\n$canary\n", ""),
+            Triple(1, "CHECK_ERROR", ""),
+            Triple(1, "CHECK_ERROR\n", canary),
+            Triple(2, "CHECK_ERROR\n", ""),
+            Triple(3, "INVALID_INPUT\n", ""),
+        ).forEach { (exitCode, stdout, stderr) ->
+            val diagnostic = task6NetworkIsolationFailureDiagnostic(
+                exitCode = exitCode,
+                stdout = stdout,
+                stderr = stderr,
+            )
+            assertEquals("INVALID_RESULT", diagnostic)
+            assertFalse(diagnostic.orEmpty().contains(canary))
+        }
+
+        requireTask6NetworkIsolationResult(
+            exitCode = 0,
+            stdout = "OK\n",
+            stderr = "",
+        )
+        val fixedFailure = assertFailsWith<IllegalStateException> {
+            requireTask6NetworkIsolationResult(
+                exitCode = 1,
+                stdout = "HOST_IP_REACHABLE\n",
+                stderr = "",
+            )
+        }
+        assertEquals(
+            "Default-network isolation helper failed: HOST_IP_REACHABLE",
+            fixedFailure.message,
+        )
+        val redactedFailure = assertFailsWith<IllegalStateException> {
+            requireTask6NetworkIsolationResult(
+                exitCode = 0,
+                stdout = "$canary\n",
+                stderr = canary,
+            )
+        }
+        assertEquals(
+            "Default-network isolation helper failed: INVALID_RESULT",
+            redactedFailure.message,
+        )
+        assertFalse(redactedFailure.toString().contains(canary))
+    }
+
+    @Test
     fun hostAddressDiscoveryKeepsLinkLocalIpv4InScope() {
         val linkLocal = InetAddress.getByAddress(
             byteArrayOf(169.toByte(), 254.toByte(), 1, 2),
