@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-30
 
-**Status:** Direction approved; detailed contract reviewed; awaiting user confirmation
+**Status:** Confirmed; detailed contract reviewed; implementation planned
 
 **Scope:** Gate 0C Task 6 operator ingress only
 
@@ -28,7 +28,7 @@ overrides, firewall rules, or a relabeled result.
 
 ## Supersession
 
-When confirmed, this amendment replaces only the Dovecot operator-ingress
+This confirmed amendment replaces only the Dovecot operator-ingress
 clauses in:
 
 - `2026-07-23-debug-dashboard-design.md` Mail access and Gate 0C step 7,

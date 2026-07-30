@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 
-**Status:** Design approved; AppPassword amendment incorporated; Dovecot stdio amendment awaiting confirmation
+**Status:** Design approved; AppPassword and confirmed Dovecot stdio amendments incorporated
 
 **Amended:** 2026-07-27 — direct per-account Stalwart AppPasswords and a trusted test-sandbox threat model
 
