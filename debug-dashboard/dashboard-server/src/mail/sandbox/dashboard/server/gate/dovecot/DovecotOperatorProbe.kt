@@ -62,8 +62,7 @@ internal fun interface DovecotOperatorProbeWatchdog {
 }
 
 internal class DovecotOperatorProbe(
-    private val transportFactory: DovecotOperatorTransportFactory =
-        JvmJsseDovecotOperatorTransportFactory.production(),
+    private val transportFactory: DovecotOperatorTransportFactory,
     private val clock: DovecotOperatorProbeClock =
         DovecotOperatorProbeClock(System::nanoTime),
     private val watchdog: DovecotOperatorProbeWatchdog =
