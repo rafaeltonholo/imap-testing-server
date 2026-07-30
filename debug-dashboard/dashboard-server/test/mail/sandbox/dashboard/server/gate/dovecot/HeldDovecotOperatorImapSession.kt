@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class HeldDovecotOperatorImapSession private constructor(
     private val transport: DovecotOperatorTransport,
     private val operationWorkers: DovecotBoundedOperationWorkers,
+    private val beforeFailureClassification: (Throwable) -> Unit,
 ) : AutoCloseable {
     private val closed = AtomicBoolean()
 
@@ -38,7 +39,14 @@ internal class HeldDovecotOperatorImapSession private constructor(
             )
             completeOperation(acquired, operationDeadline)
         } catch (failure: Throwable) {
-            if (abandonAndDetectInterruption(operation, failure)) {
+            if (
+                abandonAndDetectInterruption(
+                    operation = operation,
+                    failure = failure,
+                    beforeFailureClassification =
+                        beforeFailureClassification,
+                )
+            ) {
                 throwRedactedInterruption(
                     "Held Dovecot operator usability proof was interrupted",
                 )
@@ -56,39 +64,54 @@ internal class HeldDovecotOperatorImapSession private constructor(
         var operation: DovecotBoundedOperation? = null
         var deadline: DovecotTask6ProofDeadline? = null
         try {
-            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
-            deadline = operationDeadline
-            val acquired = acquireOperation(
-                operationDeadline.deadlineNanos,
-            )
-            operation = acquired
-            registerTransport(acquired)
-            val io = HeldIo(acquired, transport)
-            val rejected = try {
-                writeFixed(io, CLOSED_SESSION_NOOP_COMMAND)
-                false
+            val operationDeadline = try {
+                DovecotTask6ProofDeadline(timeout) {}
             } catch (failure: Throwable) {
-                if (abandonAndDetectInterruption(acquired, failure)) {
+                throwPostCloseProofFailure(operation, failure)
+            }
+            deadline = operationDeadline
+            val acquired = try {
+                acquireOperation(
+                    operationDeadline.deadlineNanos,
+                )
+            } catch (failure: Throwable) {
+                throwPostCloseProofFailure(operation, failure)
+            }
+            operation = acquired
+            try {
+                registerTransport(acquired)
+            } catch (failure: Throwable) {
+                throwPostCloseProofFailure(operation, failure)
+            }
+            val io = HeldIo(acquired, transport)
+            val writeFailure = try {
+                writeFixed(io, CLOSED_SESSION_NOOP_COMMAND)
+                null
+            } catch (failure: Throwable) {
+                failure
+            }
+            if (writeFailure != null) {
+                if (
+                    abandonAndDetectInterruption(
+                        operation = acquired,
+                        failure = writeFailure,
+                        beforeFailureClassification =
+                            beforeFailureClassification,
+                    )
+                ) {
                     throwRedactedInterruption(
                         "Held Dovecot operator post-close proof " +
                             "was interrupted",
                     )
                 }
-                true
-            }
-            if (rejected) {
                 return
             }
-            completeOperation(acquired, operationDeadline)
-            error("Closed Dovecot operator transport remained usable")
-        } catch (failure: Throwable) {
-            if (abandonAndDetectInterruption(operation, failure)) {
-                throwRedactedInterruption(
-                    "Held Dovecot operator post-close proof " +
-                        "was interrupted",
-                )
+            try {
+                completeOperation(acquired, operationDeadline)
+                error("Closed Dovecot operator transport remained usable")
+            } catch (failure: Throwable) {
+                throwPostCloseProofFailure(operation, failure)
             }
-            error("Held Dovecot operator post-close proof failed")
         } finally {
             deadline?.close()
         }
@@ -125,7 +148,14 @@ internal class HeldDovecotOperatorImapSession private constructor(
             completeOperation(acquired, operationDeadline)
             closeSucceeded
         } catch (failure: Throwable) {
-            if (abandonAndDetectInterruption(operation, failure)) {
+            if (
+                abandonAndDetectInterruption(
+                    operation = operation,
+                    failure = failure,
+                    beforeFailureClassification =
+                        beforeFailureClassification,
+                )
+            ) {
                 throwRedactedInterruption(
                     "Held Dovecot operator close was interrupted",
                 )
@@ -144,6 +174,25 @@ internal class HeldDovecotOperatorImapSession private constructor(
     ): DovecotBoundedOperation =
         operationWorkers.tryAcquire(deadlineNanos)
             ?: error("Held Dovecot operator capacity was exhausted")
+
+    private fun throwPostCloseProofFailure(
+        operation: DovecotBoundedOperation?,
+        failure: Throwable,
+    ): Nothing {
+        if (
+            abandonAndDetectInterruption(
+                operation = operation,
+                failure = failure,
+                beforeFailureClassification =
+                    beforeFailureClassification,
+            )
+        ) {
+            throwRedactedInterruption(
+                "Held Dovecot operator post-close proof was interrupted",
+            )
+        }
+        error("Held Dovecot operator post-close proof failed")
+    }
 
     private fun registerTransport(
         operation: DovecotBoundedOperation,
@@ -176,6 +225,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
             timeout: Duration = SESSION_TIMEOUT,
             operationWorkers: DovecotBoundedOperationWorkers =
                 DovecotBoundedOperationWorkers.processWide,
+            beforeFailureClassification: (Throwable) -> Unit = {},
         ): HeldDovecotOperatorImapSession {
             var operation: DovecotBoundedOperation? = null
             var deadline: DovecotTask6ProofDeadline? = null
@@ -205,9 +255,18 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 return HeldDovecotOperatorImapSession(
                     transport = opened,
                     operationWorkers = operationWorkers,
+                    beforeFailureClassification =
+                        beforeFailureClassification,
                 )
             } catch (failure: Throwable) {
-                if (abandonAndDetectInterruption(operation, failure)) {
+                if (
+                    abandonAndDetectInterruption(
+                        operation = operation,
+                        failure = failure,
+                        beforeFailureClassification =
+                            beforeFailureClassification,
+                    )
+                ) {
                     throwRedactedInterruption(
                         "Held Dovecot operator seed proof was interrupted",
                     )
@@ -523,13 +582,9 @@ internal class HeldDovecotOperatorImapSession private constructor(
         private fun abandonAndDetectInterruption(
             operation: DovecotBoundedOperation?,
             failure: Throwable,
+            beforeFailureClassification: (Throwable) -> Unit,
         ): Boolean {
-            var interrupted =
-                failure is InterruptedException ||
-                    Thread.currentThread().isInterrupted
-            if (Thread.interrupted()) {
-                interrupted = true
-            }
+            var interrupted = failure is InterruptedException
             operation?.abandon()
             try {
                 operation?.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
@@ -537,12 +592,18 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 interrupted = true
                 Thread.interrupted()
             }
-            if (Thread.currentThread().isInterrupted) {
+            if (Thread.interrupted()) {
                 interrupted = true
-                Thread.interrupted()
             }
-            if (interrupted) {
-                Thread.currentThread().interrupt()
+            try {
+                beforeFailureClassification(failure)
+            } finally {
+                if (Thread.interrupted()) {
+                    interrupted = true
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt()
+                }
             }
             return interrupted
         }

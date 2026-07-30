@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.SocketException
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -368,14 +369,20 @@ class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun interruptedSeedIOExceptionIsPromotedToRedactedInterruption() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val injectedFailure = IOException(IO_FAILURE_MARKER)
         val transport = DeadlineTestTransport(
             transcript = SEED_TRANSCRIPT,
             initialBlock = DeadlineTestTransport.Block.Write,
+            ioFailure = injectedFailure,
         )
         val message = validMessage()
         val credential = credential("interrupted-seed-credential")
         val failure = AtomicReference<Throwable?>()
         val interruptPreserved = AtomicBoolean()
+        val classifiedFailure = AtomicReference<Throwable?>()
+        val classificationCalls = AtomicInteger()
+        val classificationReached = CountDownLatch(1)
+        val releaseClassification = CountDownLatch(1)
         val completed = CountDownLatch(1)
         val caller = Thread(
             {
@@ -387,6 +394,12 @@ class DovecotHeldOperatorImapDeadlineTest {
                         message = message,
                         timeout = Duration.ofSeconds(1),
                         operationWorkers = workers,
+                        beforeFailureClassification = { caught ->
+                            classificationCalls.incrementAndGet()
+                            classifiedFailure.set(caught)
+                            classificationReached.countDown()
+                            awaitUninterruptibly(releaseClassification)
+                        },
                     )
                 } catch (caught: Throwable) {
                     failure.set(caught)
@@ -406,20 +419,27 @@ class DovecotHeldOperatorImapDeadlineTest {
 
         try {
             assertTrue(transport.awaitBlockedIo())
-            caller.interrupt()
-            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            transport.releaseBlockedIo()
             assertTrue(transport.awaitIoExitedWithIOException())
+            assertTrue(classificationReached.await(1, TimeUnit.SECONDS))
+            assertSame(injectedFailure, classifiedFailure.get())
+
+            caller.interrupt()
+            releaseClassification.countDown()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
 
             val caught = failure.get()
-            assertTrue(caught is InterruptedException)
-            assertTrue(interruptPreserved.get())
-            assertFalse(
-                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
-                "Interrupted seed failure exposed its transport detail",
+            assertRedactedInterruption(
+                caught = caught,
+                expectedMessage =
+                    "Held Dovecot operator seed proof was interrupted",
             )
+            assertTrue(interruptPreserved.get())
+            assertEquals(1, classificationCalls.get())
             assertTrue(message.all { it == 0.toByte() })
             assertCredentialClosed(credential)
         } finally {
+            releaseClassification.countDown()
             transport.releaseBlockedIo()
             caller.interrupt()
             caller.join(2_000)
@@ -430,7 +450,15 @@ class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun interruptedUsabilityIOExceptionIsPromotedToRedactedInterruption() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
-        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val injectedFailure = SocketException(IO_FAILURE_MARKER)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            ioFailure = injectedFailure,
+        )
+        val classifiedFailure = AtomicReference<Throwable?>()
+        val classificationCalls = AtomicInteger()
+        val classificationReached = CountDownLatch(1)
+        val releaseClassification = CountDownLatch(1)
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
             target = TARGET,
@@ -438,6 +466,12 @@ class DovecotHeldOperatorImapDeadlineTest {
             message = validMessage(),
             timeout = Duration.ofSeconds(1),
             operationWorkers = workers,
+            beforeFailureClassification = { caught ->
+                classificationCalls.incrementAndGet()
+                classifiedFailure.set(caught)
+                classificationReached.countDown()
+                awaitUninterruptibly(releaseClassification)
+            },
         )
         transport.block = DeadlineTestTransport.Block.Write
         val failure = AtomicReference<Throwable?>()
@@ -446,7 +480,9 @@ class DovecotHeldOperatorImapDeadlineTest {
         val caller = Thread(
             {
                 try {
-                    session.requireUsable(Duration.ofSeconds(1))
+                    session.requireUsable(
+                        timeout = Duration.ofSeconds(1),
+                    )
                 } catch (caught: Throwable) {
                     failure.set(caught)
                 } finally {
@@ -465,18 +501,25 @@ class DovecotHeldOperatorImapDeadlineTest {
 
         try {
             assertTrue(transport.awaitBlockedIo())
-            caller.interrupt()
-            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            transport.releaseBlockedIo()
             assertTrue(transport.awaitIoExitedWithIOException())
+            assertTrue(classificationReached.await(1, TimeUnit.SECONDS))
+            assertSame(injectedFailure, classifiedFailure.get())
+
+            caller.interrupt()
+            releaseClassification.countDown()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
 
             val caught = failure.get()
-            assertTrue(caught is InterruptedException)
-            assertTrue(interruptPreserved.get())
-            assertFalse(
-                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
-                "Interrupted usability failure exposed its transport detail",
+            assertRedactedInterruption(
+                caught = caught,
+                expectedMessage =
+                    "Held Dovecot operator usability proof was interrupted",
             )
+            assertTrue(interruptPreserved.get())
+            assertEquals(1, classificationCalls.get())
         } finally {
+            releaseClassification.countDown()
             transport.releaseBlockedIo()
             caller.interrupt()
             caller.join(2_000)
@@ -487,7 +530,15 @@ class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun interruptedPostCloseIOExceptionIsNotAcceptedAsUnusability() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
-        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val injectedFailure = IOException(IO_FAILURE_MARKER)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            ioFailure = injectedFailure,
+        )
+        val classifiedFailure = AtomicReference<Throwable?>()
+        val classificationCalls = AtomicInteger()
+        val classificationReached = CountDownLatch(1)
+        val releaseClassification = CountDownLatch(1)
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
             target = TARGET,
@@ -495,6 +546,12 @@ class DovecotHeldOperatorImapDeadlineTest {
             message = validMessage(),
             timeout = Duration.ofSeconds(1),
             operationWorkers = workers,
+            beforeFailureClassification = { caught ->
+                classificationCalls.incrementAndGet()
+                classifiedFailure.set(caught)
+                classificationReached.countDown()
+                awaitUninterruptibly(releaseClassification)
+            },
         )
         session.close()
         transport.block = DeadlineTestTransport.Block.Write
@@ -525,23 +582,70 @@ class DovecotHeldOperatorImapDeadlineTest {
 
         try {
             assertTrue(transport.awaitBlockedIo())
-            caller.interrupt()
-            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            transport.releaseBlockedIo()
             assertTrue(transport.awaitIoExitedWithIOException())
+            assertTrue(classificationReached.await(1, TimeUnit.SECONDS))
+            assertSame(injectedFailure, classifiedFailure.get())
+
+            caller.interrupt()
+            releaseClassification.countDown()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
 
             assertFalse(returnedNormally.get())
             val caught = failure.get()
-            assertTrue(caught is InterruptedException)
-            assertTrue(interruptPreserved.get())
-            assertFalse(
-                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
-                "Interrupted post-close failure exposed transport detail",
+            assertRedactedInterruption(
+                caught = caught,
+                expectedMessage =
+                    "Held Dovecot operator post-close proof was interrupted",
             )
+            assertTrue(interruptPreserved.get())
+            assertEquals(1, classificationCalls.get())
         } finally {
+            releaseClassification.countDown()
             transport.releaseBlockedIo()
             caller.interrupt()
             caller.join(2_000)
         }
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun throwingSeedFailureClassificationHookRunsAfterCleanup() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(
+            transcript = "* BAD invalid greeting\r\n".toByteArray(
+                StandardCharsets.US_ASCII,
+            ),
+        )
+        val message = validMessage()
+        val credential = credential("classification-hook-credential")
+        val classifiedFailure = AtomicReference<Throwable?>()
+        val classificationCalls = AtomicInteger()
+        val sentinel = FailureClassificationSentinel()
+
+        val caught = assertFailsWith<FailureClassificationSentinel> {
+            HeldDovecotOperatorImapSession.openAndSeed(
+                transportFactory = factoryFor(transport),
+                target = TARGET,
+                credential = credential,
+                message = message,
+                timeout = Duration.ofSeconds(1),
+                operationWorkers = workers,
+                beforeFailureClassification = { failure ->
+                    classificationCalls.incrementAndGet()
+                    classifiedFailure.set(failure)
+                    throw sentinel
+                },
+            )
+        }
+
+        assertSame(sentinel, caught)
+        assertTrue(classifiedFailure.get() is IllegalStateException)
+        assertEquals(1, classificationCalls.get())
+        assertTrue(transport.aborted)
+        assertTrue(transport.closed)
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
         awaitWorkersReleased(workers)
     }
 
@@ -675,6 +779,125 @@ class DovecotHeldOperatorImapDeadlineTest {
         assertTrue(transport.awaitIoExitedWithIOException())
         awaitWorkersReleased(workers)
         assertTrue(transport.closed)
+    }
+
+    @Test
+    fun registeredOpenAbortAndCloseKeepCapacityUntilEveryActorExits() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockAbort = true,
+            blockClose = true,
+        )
+        val openRegistered = CountDownLatch(1)
+        val releaseOpen = CountDownLatch(1)
+        val message = validMessage()
+        val credential = credential("registered-open-capacity-credential")
+        val failure = AtomicReference<Throwable?>()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                failure.set(
+                    runCatching {
+                        HeldDovecotOperatorImapSession.openAndSeed(
+                            transportFactory =
+                                DovecotOperatorTransportFactory { register ->
+                                    register(transport)
+                                    openRegistered.countDown()
+                                    awaitUninterruptibly(releaseOpen)
+                                    transport
+                                },
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SHORT_TIMEOUT,
+                            operationWorkers = workers,
+                        )
+                    }.exceptionOrNull(),
+                )
+                completed.countDown()
+            },
+            "task6-registered-open-capacity-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(openRegistered.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitAbortStarted())
+            assertTrue(transport.awaitCloseStarted())
+            assertTrue(
+                completed.await(1, TimeUnit.SECONDS),
+                "Registered blocked open kept its caller alive",
+            )
+            assertTrue(failure.get() is IllegalStateException)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertEquals(
+                null,
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+
+            releaseOpen.countDown()
+            awaitTrue {
+                workers.snapshot() == DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 3,
+                )
+            }
+            assertEquals(
+                null,
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+
+            transport.releaseBlockedAbort()
+            awaitTrue {
+                workers.snapshot() == DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 1,
+                    peakActors = 3,
+                )
+            }
+            assertEquals(
+                null,
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+
+            transport.releaseBlockedClose()
+            awaitWorkersReleased(workers)
+            assertTrue(transport.closed)
+
+            val recovered = checkNotNull(
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+            recovered.complete()
+            assertTrue(recovered.awaitRelease())
+        } finally {
+            releaseOpen.countDown()
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            caller.join(2_000)
+        }
+
+        awaitWorkersReleased(workers)
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
     }
 
     @Test
@@ -1282,6 +1505,20 @@ class DovecotHeldOperatorImapDeadlineTest {
         }
     }
 
+    private fun assertRedactedInterruption(
+        caught: Throwable?,
+        expectedMessage: String,
+    ) {
+        assertTrue(caught is InterruptedException)
+        assertEquals(expectedMessage, caught.message)
+        assertEquals(null, caught.cause)
+        assertTrue(caught.suppressed.isEmpty())
+        assertFalse(
+            caught.message.orEmpty().contains(IO_FAILURE_MARKER),
+            "Interrupted Held failure exposed its transport detail",
+        )
+    }
+
     private fun awaitTrue(condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
         while (!condition() && System.nanoTime() < deadline) {
@@ -1299,6 +1536,21 @@ class DovecotHeldOperatorImapDeadlineTest {
                     snapshot.abandonedOperations == 0 &&
                     snapshot.activeActors == 0
             }
+        }
+    }
+
+    private fun awaitUninterruptibly(latch: CountDownLatch) {
+        var interrupted = false
+        while (true) {
+            try {
+                latch.await()
+                break
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt()
         }
     }
 
@@ -1343,6 +1595,9 @@ private class DeadlineTestTransport(
     blockAbort: Boolean = false,
     blockClose: Boolean = false,
     private val cancellationDelayMillis: Long = 0,
+    private val ioFailure: IOException = IOException(
+        "fixture-transport-io-secret-marker",
+    ),
 ) : DovecotOperatorTransport {
     enum class Block {
         Write,
@@ -1541,8 +1796,9 @@ private class DeadlineTestTransport(
 
     private fun throwFixtureIOException(): Nothing {
         ioExitedWithIOException.countDown()
-        throw IOException(
-            "fixture-transport-io-secret-marker",
-        )
+        throw ioFailure
     }
 }
+
+private class FailureClassificationSentinel :
+    RuntimeException("Held failure classification sentinel")
