@@ -12,6 +12,7 @@ internal class DovecotBoundedHttpProofClient(
     private val port: Int,
     private val timeoutMillis: Int,
     private val maximumResponseBytes: Int,
+    private val socketFactory: () -> Socket = { Socket() },
 ) {
     init {
         require(port in 1..65_535)
@@ -23,10 +24,11 @@ internal class DovecotBoundedHttpProofClient(
         path: String,
         body: ByteArray,
     ): DovecotBoundedHttpResponse {
+        requireCallerNotInterrupted()
         require(path in ALLOWED_PATHS) {
             "OAuth proof path was invalid"
         }
-        val socket = Socket()
+        val socket = socketFactory()
         val deadline = DovecotTask6ProofDeadline(
             timeout = Duration.ofMillis(timeoutMillis.toLong()),
             onDeadline = {
@@ -70,6 +72,9 @@ internal class DovecotBoundedHttpProofClient(
             )
             responseBody = null
             return response
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
         } catch (_: Exception) {
             error("OAuth HTTP proof failed")
         } finally {
@@ -330,6 +335,14 @@ internal class DovecotBoundedHttpProofClient(
                 nanos + TimeUnit.MILLISECONDS.toNanos(1) - 1,
             ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
         )
+    }
+
+    private fun requireCallerNotInterrupted() {
+        if (Thread.currentThread().isInterrupted) {
+            throw InterruptedException(
+                "OAuth HTTP proof operation was interrupted",
+            )
+        }
     }
 
     private fun Byte.asciiDigit(): Int {

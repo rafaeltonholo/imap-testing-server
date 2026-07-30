@@ -5,7 +5,9 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.Test
@@ -16,6 +18,69 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class DovecotOAuthProofValidatorTest {
+    @Test
+    fun preInterruptedHttpProofFailsBeforeSocketAllocation() {
+        val socketAllocations = AtomicInteger()
+        var interruptPreserved = false
+
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<InterruptedException> {
+                DovecotBoundedHttpProofClient(
+                    port = 1,
+                    timeoutMillis = 1_000,
+                    maximumResponseBytes = 1024,
+                    socketFactory = {
+                        socketAllocations.incrementAndGet()
+                        Socket()
+                    },
+                ).postForm("/introspect", ByteArray(0))
+            }
+            interruptPreserved = Thread.currentThread().isInterrupted
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertTrue(interruptPreserved)
+        assertEquals(0, socketAllocations.get())
+    }
+
+    @Test
+    fun midOperationHttpInterruptionEscapesAndPreservesStatus() {
+        val caller = Thread.currentThread()
+        var interruptPreserved = false
+
+        withLoopbackHttpServer(
+            responseWriter = { output ->
+                caller.interrupt()
+                output.write(
+                    (
+                        "HTTP/1.0 200 OK\r\n" +
+                            "Content-Length: 0\r\n" +
+                            "\r\n"
+                        ).toByteArray(StandardCharsets.US_ASCII),
+                )
+                output.flush()
+            },
+        ) { port ->
+            try {
+                assertFailsWith<InterruptedException> {
+                    DovecotBoundedHttpProofClient(
+                        port = port,
+                        timeoutMillis = 1_000,
+                        maximumResponseBytes = 1024,
+                    ).postForm("/introspect", ByteArray(0))
+                }
+                interruptPreserved =
+                    Thread.currentThread().isInterrupted
+            } finally {
+                Thread.interrupted()
+            }
+        }
+
+        assertTrue(interruptPreserved)
+    }
+
     @Test
     fun inactiveProofRequiresAnActualJsonBooleanFalse() {
         DovecotOAuthProofValidator.requireInactive(

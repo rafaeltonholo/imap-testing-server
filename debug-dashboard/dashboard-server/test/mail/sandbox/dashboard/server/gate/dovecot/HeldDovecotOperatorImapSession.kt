@@ -43,6 +43,10 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 deadline,
             )
             deadline.complete()
+        } catch (interrupted: InterruptedException) {
+            closeFromDeadline()
+            Thread.currentThread().interrupt()
+            throw interrupted
         } catch (_: Throwable) {
             closeFromDeadline()
             error("Held Dovecot operator usability proof failed")
@@ -67,6 +71,9 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 transport.outputStream.flush()
                 deadline.requireRemaining()
                 false
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
             } catch (_: Exception) {
                 true
             }
@@ -179,7 +186,9 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     abandoned.set(true)
                     openFuture.cancel(true)
                     Thread.currentThread().interrupt()
-                    error("Held Dovecot operator open was interrupted")
+                    throw InterruptedException(
+                        "Held Dovecot operator open was interrupted",
+                    )
                 } catch (failure: ExecutionException) {
                     throwOpenFailure(failure.cause)
                 }
@@ -202,6 +211,10 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     allocated.get(),
                 )
                 when (failure) {
+                    is InterruptedException -> {
+                        Thread.currentThread().interrupt()
+                        throw failure
+                    }
                     is IllegalArgumentException -> throw failure
                     is IllegalStateException -> throw failure
                     else -> error(

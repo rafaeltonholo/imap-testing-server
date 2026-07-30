@@ -10,11 +10,163 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DovecotHeldOperatorImapDeadlineTest {
+    @Test
+    fun blockedCancellationCallbackCannotDelayASubsequentDeadline() {
+        val blockedCallbackStarted = CountDownLatch(1)
+        val releaseBlockedCallback = CountDownLatch(1)
+        val subsequentCallbackFired = CountDownLatch(1)
+        val blocked = DovecotTask6ProofDeadline(SHORT_TIMEOUT) {
+            blockedCallbackStarted.countDown()
+            releaseBlockedCallback.await()
+        }
+        var subsequent: DovecotTask6ProofDeadline? = null
+
+        try {
+            assertTrue(blockedCallbackStarted.await(1, TimeUnit.SECONDS))
+            subsequent = DovecotTask6ProofDeadline(SHORT_TIMEOUT) {
+                subsequentCallbackFired.countDown()
+            }
+
+            assertTrue(
+                subsequentCallbackFired.await(1, TimeUnit.SECONDS),
+                "A blocked cancellation callback delayed a later deadline",
+            )
+        } finally {
+            releaseBlockedCallback.countDown()
+            blocked.close()
+            subsequent?.close()
+        }
+    }
+
+    @Test
+    fun preInterruptedOpenAndSeedFailsBeforeTransportAllocation() {
+        val openCalls = AtomicInteger()
+        val message = validMessage()
+        val credential = credential("pre-interrupted-open-secret")
+        var interruptPreserved = false
+
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<InterruptedException> {
+                HeldDovecotOperatorImapSession.openAndSeed(
+                    transportFactory = DovecotOperatorTransportFactory {
+                        openCalls.incrementAndGet()
+                        error("Pre-interrupted open must not allocate transport")
+                    },
+                    target = TARGET,
+                    credential = credential,
+                    message = message,
+                    timeout = Duration.ofSeconds(1),
+                )
+            }
+            interruptPreserved = Thread.currentThread().isInterrupted
+        } finally {
+            Thread.interrupted()
+        }
+
+        Thread.sleep(100)
+        assertTrue(interruptPreserved)
+        assertEquals(0, openCalls.get())
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+    }
+
+    @Test
+    fun preInterruptedUsabilityProofFailsBeforeTransportIo() {
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("pre-interrupted-noop-secret"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+        )
+        val readsBefore = transport.readCalls
+        val writesBefore = transport.writeCalls
+        val flushesBefore = transport.flushCalls
+        var interruptPreserved = false
+
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<InterruptedException> {
+                session.requireUsable(Duration.ofSeconds(1))
+            }
+            interruptPreserved = Thread.currentThread().isInterrupted
+        } finally {
+            Thread.interrupted()
+            session.close()
+        }
+
+        assertTrue(interruptPreserved)
+        assertEquals(readsBefore, transport.readCalls)
+        assertEquals(writesBefore, transport.writeCalls)
+        assertEquals(flushesBefore, transport.flushCalls)
+    }
+
+    @Test
+    fun preInterruptedPostCloseValidationFailsBeforeTransportIo() {
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("pre-interrupted-post-close-secret"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+        )
+        session.close()
+        val readsBefore = transport.readCalls
+        val writesBefore = transport.writeCalls
+        val flushesBefore = transport.flushCalls
+        var interruptPreserved = false
+
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<InterruptedException> {
+                session.requireClosedAndUnusable(Duration.ofSeconds(1))
+            }
+            interruptPreserved = Thread.currentThread().isInterrupted
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertTrue(interruptPreserved)
+        assertEquals(readsBefore, transport.readCalls)
+        assertEquals(writesBefore, transport.writeCalls)
+        assertEquals(flushesBefore, transport.flushCalls)
+    }
+
+    @Test
+    fun postCloseValidationDoesNotTreatInterruptionAsUnusability() {
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("interrupted-post-close-secret"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+        )
+        session.close()
+        transport.interruptWrites = true
+        var interruptPreserved = false
+
+        try {
+            assertFailsWith<InterruptedException> {
+                session.requireClosedAndUnusable(Duration.ofSeconds(1))
+            }
+            interruptPreserved = Thread.currentThread().isInterrupted
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertTrue(interruptPreserved)
+    }
+
     @Test
     fun invalidTimeoutStillClosesCredentialAndWipesMessageBeforeOpening() {
         val message = validMessage()
@@ -321,6 +473,9 @@ private class DeadlineTestTransport(
     var block: Block? = initialBlock
 
     @Volatile
+    var interruptWrites = false
+
+    @Volatile
     var aborted = false
         private set
 
@@ -336,8 +491,21 @@ private class DeadlineTestTransport(
     val closeCalls: Int
         get() = closeCounter.get()
 
+    private val readCounter = AtomicInteger()
+    val readCalls: Int
+        get() = readCounter.get()
+
+    private val writeCounter = AtomicInteger()
+    val writeCalls: Int
+        get() = writeCounter.get()
+
+    private val flushCounter = AtomicInteger()
+    val flushCalls: Int
+        get() = flushCounter.get()
+
     override val input: InputStream = object : InputStream() {
         override fun read(): Int {
+            readCounter.incrementAndGet()
             if (block == Block.Read) {
                 awaitRelease()
                 throw IOException("aborted")
@@ -356,6 +524,13 @@ private class DeadlineTestTransport(
             offset: Int,
             length: Int,
         ) {
+            writeCounter.incrementAndGet()
+            if (interruptWrites) {
+                Thread.currentThread().interrupt()
+                throw InterruptedException(
+                    "Post-close validation was interrupted",
+                )
+            }
             if (block == Block.Write) {
                 awaitRelease()
                 throw IOException("aborted")
@@ -363,6 +538,7 @@ private class DeadlineTestTransport(
         }
 
         override fun flush() {
+            flushCounter.incrementAndGet()
             if (block == Block.Flush) {
                 awaitRelease()
                 throw IOException("aborted")
