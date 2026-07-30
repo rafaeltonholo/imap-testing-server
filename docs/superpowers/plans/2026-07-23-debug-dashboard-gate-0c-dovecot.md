@@ -486,7 +486,10 @@ Expected final state: the fixed proof project has no containers or named volumes
      hash it through the stdin-only boundary;
   2. durably publish intent, then the inactive owner-`0600` raw slot, then the
      ordered old+new hash file;
-  3. boundedly observe a staged full LIST/read probe;
+  3. boundedly observe a staged strict read probe: authenticate, `LIST`,
+     read-only `EXAMINE`, require a non-empty well-formed `UID SEARCH ALL`,
+     then `UID FETCH` the first selected UID's
+     `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` and validate the bounded literal;
   4. atomically switch active, synchronously copy the new credential into the
      narrow application lease holder, and verify a fresh application-owned
      lease/session selects the new ID;
@@ -497,6 +500,19 @@ Expected final state: the fixed proof project has no containers or named volumes
   7. only then durably delete the old raw slot, verify the stable-new
      projection while intent remains, delete intent as the last durable
      mutation, and strictly verify one raw/hash/active result.
+
+- [ ] Before the isolation class's first strict read assertion, APPEND one
+  deterministic complete RFC 5322 message through the pinned operator
+  transport. Use a fresh active credential for the seed and another for the
+  read, close the seed session before probing, and wipe the payload and both
+  credentials on every path. Keep an empty UID search a protocol failure.
+
+- [ ] Hold a real authenticated old-ID IMAP session across the rotation
+  switch. Register that transport's close operation with its application
+  lease, prove it is usable before rotation, and prove it is closed and
+  unusable after drain. Cap ordinary application leases at 15, reserve one
+  verification lease within the total bound of 16, launch old-session closes
+  concurrently, and enforce one shared one-second drain deadline.
 
 - [ ] Do not invoke `doveadm auth cache flush`, restart, or recreate a service
   for convergence. Each positive or negative passwd-file observation gets at

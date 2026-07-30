@@ -23,15 +23,15 @@ class DovecotOperatorProbeTest {
         val messageIdLiteral =
             "Message-ID: <task6-probe@local.test>\r\n\r\n"
         lateinit var retainingInput: RetainingBulkReadInputStream
-        val fixture = probeFixture(
-            response = (
+        val response =
+            (
                 "* OK Dovecot ready\r\n" +
                     "+ VXNlcm5hbWU6\r\n" +
                     "+ UGFzc3dvcmQ6\r\n" +
                     "A001 OK Logged in\r\n" +
                     "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
                     "A002 OK List completed\r\n" +
-                    "* 0 EXISTS\r\n" +
+                    "* 1 EXISTS\r\n" +
                     "A003 OK [READ-ONLY] Examine completed\r\n" +
                     "* SEARCH 7 9\r\n" +
                     "A004 OK Search completed\r\n" +
@@ -41,7 +41,14 @@ class DovecotOperatorProbeTest {
                     messageIdLiteral +
                     ")\r\n" +
                     "A005 OK Fetch completed\r\n"
-                ).toByteArray(StandardCharsets.US_ASCII),
+                ).toByteArray(StandardCharsets.US_ASCII)
+        assertTrue(
+            response.toString(StandardCharsets.US_ASCII)
+                .contains("* 1 EXISTS\r\n"),
+            "A successful full-read transcript must declare a non-empty INBOX",
+        )
+        val fixture = probeFixture(
+            response = response,
             secret = "read-probe-secret",
             requireMailboxRead = true,
             inputFactory = { response ->

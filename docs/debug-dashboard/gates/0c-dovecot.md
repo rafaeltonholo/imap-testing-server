@@ -557,8 +557,10 @@ The implemented A/B sequence is:
 
 1. generate and hash a distinct inactive credential;
 2. durably publish intent, inactive raw slot, and ordered old/new hashes;
-3. require a bounded fresh-credential IMAP `LIST` plus read-only `EXAMINE`
-   probe;
+3. require a bounded fresh-credential IMAP login, `LIST`, read-only `EXAMINE`,
+   non-empty `UID SEARCH ALL`, and
+   `UID FETCH <first-uid> (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])`; the fetched
+   literal must contain one syntactically valid `Message-ID`;
 4. switch the active reference, copy the credential into the application
    generation holder, and verify a fresh application-owned lease;
 5. block and synchronously drain all adapter-owned old-generation sessions;
@@ -567,11 +569,34 @@ The implemented A/B sequence is:
 7. verify the stable projection while the original intent still exists,
    delete intent last, and strictly re-read the one-slot/one-hash result.
 
+The isolation proof does not treat an empty new Maildir as a successful read.
+After adding its disposable eligible target, it uses the same pinned operator
+transport to append one deterministic, complete RFC 5322 message, closes that
+seed session, and then gives the strict full-read probe a separately loaded
+credential. The APPEND helper has one five-second deadline, bounds the message
+at 16 KiB, validates its required headers before opening a transport, and
+always closes the credential and wipes the message buffer. The caller also
+closes the seed session and repeats the credential/payload cleanup in
+`finally`. Eligibility cleanup removes the target; the checked disposable
+lifecycle owns removal of its Maildir volume. An empty or malformed UID search
+continues to fail closed.
+
+The rotation proof holds an actual authenticated old-ID IMAP session rather
+than a callback-only stand-in. It appends the deterministic read fixture,
+proves that session with a bounded `NOOP`, registers its real close operation
+with the old-generation application lease, and requires the drained transport
+to be both closed and unusable before old credential revocation.
+
 No auth-cache flush, service restart, or recreation is part of convergence.
 Each passwd-file observation has at most seven attempts and six conditional
 250-millisecond delays. Acceptance retries only authentication failure;
 rejection retries only success. Protocol, transport, and interruption fail
 immediately, and each attempt owns and wipes a fresh consumable credential.
+The lease registry admits at most 15 ordinary application sessions and
+reserves the sixteenth tracked slot for the one fresh verification lease.
+Old-session closes are submitted concurrently and share a single one-second
+drain deadline; timeout or any close failure stops rotation before revocation
+and leaves the failed lease tracked for explicit retry.
 
 Recovery is deterministic: active-old rolls back and active-new completes
 forward. It rejects malformed, reversed, duplicate, symbolic, wrong-mode,
@@ -596,25 +621,30 @@ inactive through ordinary IMAPS, ordinary POP3S, Postfix SMTP SASL, and OAuth.
 
 ### Task 6 non-live evidence and pending live proof
 
-Focused test-driven runs first exposed missing read-probe support and four
-additional fail-closed gaps: failed lease closes were dropped, the original
-intent was not revalidated before deletion, identical A/B raw slots could be
-accepted during recovery, and a failed pre-replace write deleted its temporary
-outside explicit recovery. The final focused runs passed:
+Focused test-driven runs exposed missing read-probe support, the impossible
+empty-mailbox isolation flow, and four additional fail-closed gaps: failed
+lease closes were dropped, the original intent was not revalidated before
+deletion, identical A/B raw slots could be accepted during recovery, and a
+failed pre-replace write deleted its temporary outside explicit recovery. The
+current focused runs passed:
 
-- credential store and application leases: `27/27`;
-- fixed operator probe, including read-only mailbox open: `13/13`;
+- credential store and application leases: `33/33`;
+- fixed operator probe, including non-empty UID search and bounded
+  `Message-ID` header fetch: `16/16`;
+- isolation orchestration plus held-session cleanup: `17/17`;
 - fixed proof profile/readiness: `5/5`;
 - proof Compose static selectors: `2/2`;
 - fake checked lifecycle: `33/33`; and
-- network-isolation helper: `14/14`.
+- network-isolation helper: `20/20`.
 
-The combined non-live Dovecot run, excluding selected `*LiveTest` classes and
-the daemon-backed effective-config methods, passed `117/117` with zero skips.
-The two Task 6 proof-Compose methods were run separately and passed `2/2`.
-The wider `dashboard-server` non-live run passed `382/382` after also excluding
-the unrelated production browser gate that requires generated
-`DASHBOARD_WEB_ASSETS`.
+Under the no-Docker verification boundary, the non-live Dovecot class run
+passed `143/143` and the 13 non-daemon static/config selectors passed `13/13`,
+for `156/156` with zero skips. The four effective-configuration selectors
+that invoke `docker run` were not executed. The wider `dashboard-server`
+non-live run passed `408/408`, plus those same `13/13` selectors, for
+`421/421`; it excluded all `*LiveTest` classes, the production browser gate
+that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed
+Docker-backed config class from the broad scan.
 
 Task 6 live evidence is **pending**, not passed. No Docker daemon or live
 service operation was performed while implementing this task. A controller

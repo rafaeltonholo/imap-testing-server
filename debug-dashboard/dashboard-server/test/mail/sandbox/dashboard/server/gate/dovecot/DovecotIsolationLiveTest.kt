@@ -31,6 +31,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -104,11 +105,12 @@ class DovecotIsolationLiveTest {
                 ),
             ),
         )
+        val transportFactory =
+            JvmJsseDovecotOperatorTransportFactory.task5Proof(
+                live.profile,
+            )
         val probe = DovecotOperatorProbe(
-            transportFactory =
-                JvmJsseDovecotOperatorTransportFactory.task5Proof(
-                    live.profile,
-                ),
+            transportFactory = transportFactory,
             requireMailboxRead = true,
         )
         val sslContext = pinnedSslContext(live.profile)
@@ -129,7 +131,11 @@ class DovecotIsolationLiveTest {
 
                 assertEquals(
                     DovecotOperatorProbeResult.Success,
-                    probe.probe(target, store.loadActive()),
+                    seedAndProbeTask6IsolationMailbox(
+                        transportFactory = transportFactory,
+                        target = target,
+                        credentialSupplier = store::loadActive,
+                    ),
                 )
                 store.loadActive().use { master ->
                     assertImapRejected(
@@ -858,6 +864,46 @@ class DovecotIsolationLiveTest {
     }
 }
 
+internal fun seedAndProbeTask6IsolationMailbox(
+    transportFactory: DovecotOperatorTransportFactory,
+    target: DovecotOperatorTarget,
+    credentialSupplier: () -> DovecotOperatorCredential,
+): DovecotOperatorProbeResult {
+    val message = deterministicTask6IsolationMessage(target)
+    var seedCredential: DovecotOperatorCredential? = null
+    try {
+        seedCredential = credentialSupplier()
+        HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = transportFactory,
+            target = target,
+            credential = seedCredential,
+            message = message,
+        ).use { }
+    } finally {
+        seedCredential?.close()
+        message.fill(0)
+    }
+    return DovecotOperatorProbe(
+        transportFactory = transportFactory,
+        requireMailboxRead = true,
+    ).probe(target, credentialSupplier())
+}
+
+private fun deterministicTask6IsolationMessage(
+    target: DovecotOperatorTarget,
+): ByteArray =
+    (
+        "From: dashboard-isolation@local.test\r\n" +
+            "To: ${target.address}\r\n" +
+            "Date: Thu, 30 Jul 2026 12:00:00 +0000\r\n" +
+            "Subject: Dovecot Task 6 isolation proof\r\n" +
+            "Message-ID: <task6-isolation-read-proof.${target.address}>\r\n" +
+            "MIME-Version: 1.0\r\n" +
+            "Content-Type: text/plain; charset=UTF-8\r\n" +
+            "\r\n" +
+            "Deterministic Dovecot Task 6 isolation mailbox proof.\r\n"
+        ).toByteArray(StandardCharsets.US_ASCII)
+
 private fun task6MasterLogin(
     targetAddress: String,
     masterId: DovecotOperatorId,
@@ -1445,6 +1491,107 @@ private data class Task6RuntimeTopology(
 
 class DovecotIsolationContractTest {
     @Test
+    fun isolationMailboxProofSeedsBeforeStrictReadAndConsumesFreshCredentials() {
+        val target = DovecotOperatorTarget.create(
+            "task6-isolation-seed@local.test",
+        )
+        val fetchedMessageId =
+            "Message-ID: <task6-isolation-read-proof." +
+                "${target.address}>\r\n\r\n"
+        val seedTransport = Task6ScriptedOperatorTransport(
+            (
+                "* OK Dovecot ready\r\n" +
+                    "+ VXNlcm5hbWU6\r\n" +
+                    "+ UGFzc3dvcmQ6\r\n" +
+                    "A001 OK authenticated\r\n" +
+                    "+ OK continue\r\n" +
+                    "A002 OK append completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+        )
+        val readTransport = Task6ScriptedOperatorTransport(
+            (
+                "* OK Dovecot ready\r\n" +
+                    "+ VXNlcm5hbWU6\r\n" +
+                    "+ UGFzc3dvcmQ6\r\n" +
+                    "A001 OK authenticated\r\n" +
+                    "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
+                    "A002 OK list completed\r\n" +
+                    "* 1 EXISTS\r\n" +
+                    "A003 OK [READ-ONLY] examine completed\r\n" +
+                    "* SEARCH 1\r\n" +
+                    "A004 OK search completed\r\n" +
+                    "* 1 FETCH (UID 1 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${fetchedMessageId.length}}\r\n" +
+                    fetchedMessageId +
+                    ")\r\n" +
+                    "A005 OK fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+        )
+        val openIndex = AtomicInteger()
+        val transportFactory = DovecotOperatorTransportFactory { register ->
+            when (openIndex.getAndIncrement()) {
+                0 -> seedTransport
+                1 -> {
+                    check(seedTransport.closed) {
+                        "Seed session must close before the read probe opens"
+                    }
+                    readTransport
+                }
+                else -> error("Unexpected Task 6 isolation transport")
+            }.also(register)
+        }
+        val credentials = listOf(
+            task6TestCredential("isolation-seed-secret"),
+            task6TestCredential("isolation-read-secret"),
+        )
+        val credentialIndex = AtomicInteger()
+
+        try {
+            assertEquals(
+                DovecotOperatorProbeResult.Success,
+                seedAndProbeTask6IsolationMailbox(
+                    transportFactory = transportFactory,
+                    target = target,
+                    credentialSupplier = {
+                        credentials[credentialIndex.getAndIncrement()]
+                    },
+                ),
+            )
+
+            val seedWrites = seedTransport.writtenBytes()
+                .toString(StandardCharsets.US_ASCII)
+            val appendIndex = seedWrites.indexOf(
+                "A002 APPEND \"INBOX\" {",
+            )
+            val messageIdIndex = seedWrites.indexOf(
+                "Message-ID: <task6-isolation-read-proof." +
+                    "${target.address}>",
+            )
+            assertTrue(appendIndex >= 0)
+            assertTrue(messageIdIndex > appendIndex)
+            assertTrue(
+                readTransport.writtenBytes()
+                    .toString(StandardCharsets.US_ASCII)
+                    .contains("A004 UID SEARCH ALL\r\n"),
+            )
+            assertEquals(2, openIndex.get())
+            assertEquals(2, credentialIndex.get())
+            assertTrue(seedTransport.closed)
+            assertTrue(readTransport.closed)
+            credentials.forEach { credential ->
+                assertFailsWith<IllegalStateException> {
+                    credential.withSecretBytes { }
+                }
+            }
+        } finally {
+            credentials.forEach(DovecotOperatorCredential::close)
+            seedTransport.close()
+            readTransport.close()
+        }
+    }
+
+    @Test
     fun ordinaryPasswordEscalationUsesTheActualActiveMasterIdentity() {
         assertEquals(
             "target@local.test*dashboard-operator-a",
@@ -1838,6 +1985,42 @@ class DovecotIsolationContractTest {
 
         override fun isAlive(): Boolean = alive
     }
+
+    private class Task6ScriptedOperatorTransport(
+        transcript: ByteArray,
+    ) : DovecotOperatorTransport {
+        private val inputBytes = ByteArrayInputStream(transcript)
+        private val outputBytes = ByteArrayOutputStream()
+
+        var closed = false
+            private set
+
+        override val input: InputStream = inputBytes
+        override val outputStream: OutputStream = outputBytes
+
+        fun writtenBytes(): ByteArray = outputBytes.toByteArray()
+
+        override fun abort() {
+            close()
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            inputBytes.close()
+            outputBytes.close()
+        }
+    }
+
+    private fun task6TestCredential(
+        secret: String,
+    ): DovecotOperatorCredential =
+        DovecotOperatorCredential(
+            id = DovecotOperatorId.A,
+            secret = DovecotOperatorSecret.takeOwnership(
+                secret.toByteArray(StandardCharsets.US_ASCII),
+            ),
+        )
 
     companion object {
         private val FIXED_TEST_COMMAND = listOf("task6-fixed-test")

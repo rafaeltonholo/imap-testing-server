@@ -589,7 +589,7 @@ private class ScriptedHeldOperatorTransport(
     }
 }
 
-private class HeldDovecotOperatorImapSession private constructor(
+internal class HeldDovecotOperatorImapSession private constructor(
     private val transport: DovecotOperatorTransport,
 ) : AutoCloseable {
     @Volatile
