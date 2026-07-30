@@ -1046,6 +1046,9 @@ class DovecotOperatorProbeTest {
     @Test
     fun watchdogCancelsBlockedOpenAndLateTransportSelfAborts() {
         val openStarted = CountDownLatch(1)
+        val releaseOpen = CountDownLatch(1)
+        val operationWorkers =
+            DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = RecordingTransport(
             ByteArrayInputStream("* OK ready\r\n".toByteArray()),
         )
@@ -1058,11 +1061,7 @@ class DovecotOperatorProbeTest {
             transportFactory = DovecotOperatorTransportFactory { register ->
                 register(transport)
                 openStarted.countDown()
-                try {
-                    CountDownLatch(1).await(10, TimeUnit.SECONDS)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
+                releaseOpen.await()
                 transport
             },
             watchdog = DovecotOperatorProbeWatchdog { onDeadline ->
@@ -1080,19 +1079,32 @@ class DovecotOperatorProbeTest {
                     thread.join(2_000)
                 }
             },
+            operationWorkers = operationWorkers,
         )
 
-        assertEquals(
-            DovecotOperatorProbeResult.TransportFailure,
-            probe.probe(TARGET, credential),
-        )
-        val abortDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (!transport.closed && System.nanoTime() < abortDeadline) {
-            Thread.sleep(10)
+        try {
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                probe.probe(TARGET, credential),
+            )
+            val abortDeadline =
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (!transport.closed && System.nanoTime() < abortDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(transport.closed)
+            assertTrue(credentialBytes.all { it == 0.toByte() })
+            assertTrue(transport.output.snapshots.isEmpty())
+        } finally {
+            releaseOpen.countDown()
         }
-        assertTrue(transport.closed)
-        assertTrue(credentialBytes.all { it == 0.toByte() })
-        assertTrue(transport.output.snapshots.isEmpty())
+        assertProbeEventually {
+            operationWorkers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
     }
 
     @Test
