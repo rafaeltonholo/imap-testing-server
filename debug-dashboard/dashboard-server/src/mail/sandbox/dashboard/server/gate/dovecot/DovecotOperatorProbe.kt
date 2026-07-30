@@ -7,10 +7,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.Path
-import java.nio.file.attribute.BasicFileAttributes
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
@@ -963,14 +959,12 @@ internal class DovecotOperatorProbe(
 }
 
 internal class JvmJsseDovecotOperatorTransportFactory private constructor(
-    private val certificatePath: Path,
-    private val proofProfile: DovecotTask5ProofProfile?,
+    private val proofProfile: DovecotTask5ProofProfile,
 ) : DovecotOperatorTransportFactory {
     override fun open(
         registerAllocated: (DovecotOperatorTransport) -> Unit,
     ): DovecotOperatorTransport {
-        val certificateBytes = proofProfile?.readStableTlsCertificate() ?:
-            readBoundedStableCertificate(certificatePath)
+        val certificateBytes = proofProfile.readStableTlsCertificate()
         val certificate = try {
             ByteArrayInputStream(certificateBytes).use { input ->
                 CertificateFactory
@@ -1023,22 +1017,10 @@ internal class JvmJsseDovecotOperatorTransportFactory private constructor(
             OPERATOR_TLS_PORT,
         )
 
-        fun production(): JvmJsseDovecotOperatorTransportFactory {
-            val repositoryRoot =
-                DovecotOperatorPaths.production().repositoryRoot
-            return JvmJsseDovecotOperatorTransportFactory(
-                repositoryRoot.resolve("ssl/tls.crt"),
-                proofProfile = null,
-            )
-        }
-
         fun task5Proof(
             profile: DovecotTask5ProofProfile,
         ): JvmJsseDovecotOperatorTransportFactory =
-            JvmJsseDovecotOperatorTransportFactory(
-                profile.tlsCertificate,
-                proofProfile = profile,
-            )
+            JvmJsseDovecotOperatorTransportFactory(profile)
     }
 }
 
@@ -1207,57 +1189,3 @@ private const val ASCII_CASE_OFFSET = 'a'.code - 'A'.code
 private val ASCII_ZERO = '0'.code.toByte()
 private val ASCII_ONE = '1'.code.toByte()
 private val ASCII_NINE = '9'.code.toByte()
-
-private fun readBoundedStableCertificate(path: Path): ByteArray {
-    if (
-        !path.isAbsolute ||
-        path.normalize() != path ||
-        !Files.isDirectory(
-            requireNotNull(path.parent),
-            LinkOption.NOFOLLOW_LINKS,
-        ) ||
-        Files.isSymbolicLink(path.parent) ||
-        path.parent.toRealPath() != path.parent ||
-        !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ||
-        Files.isSymbolicLink(path) ||
-        path.toRealPath() != path
-    ) {
-        throw IOException("Dovecot operator trust anchor is invalid")
-    }
-    val before = Files.readAttributes(
-        path,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    if (before.size() !in 1..MAX_TLS_CERTIFICATE_BYTES) {
-        throw IOException("Dovecot operator trust anchor is invalid")
-    }
-    val bytes = Files.newInputStream(
-        path,
-        LinkOption.NOFOLLOW_LINKS,
-    ).use { input ->
-        input.readNBytes(MAX_TLS_CERTIFICATE_BYTES + 1)
-    }
-    try {
-        val after = Files.readAttributes(
-            path,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        if (
-            bytes.size.toLong() != before.size() ||
-            !after.isRegularFile ||
-            before.fileKey() != after.fileKey() ||
-            before.size() != after.size() ||
-            before.lastModifiedTime() != after.lastModifiedTime()
-        ) {
-            throw IOException("Dovecot operator trust anchor changed")
-        }
-        return bytes
-    } catch (failure: Throwable) {
-        bytes.fill(0)
-        throw failure
-    }
-}
-
-private const val MAX_TLS_CERTIFICATE_BYTES = 64 * 1024

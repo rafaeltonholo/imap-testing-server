@@ -414,6 +414,36 @@ class DovecotOperatorRuntimeTest {
                     .none { it.parameterCount == 0 },
             )
         }
+
+    @Test
+    fun jsseFactoryRetainsOnlyProofProfileConstructionUntilTask5Migration() {
+        val factoryClass =
+            JvmJsseDovecotOperatorTransportFactory::class.java
+        val companionClass = factoryClass.declaredClasses.single {
+            it.simpleName == "Companion"
+        }
+
+        assertTrue(
+            companionClass.declaredMethods.none {
+                it.name == "production"
+            },
+        )
+        val task5Proof = companionClass.declaredMethods.single {
+            it.name == "task5Proof"
+        }
+        assertEquals(
+            listOf(DovecotTask5ProofProfile::class.java),
+            task5Proof.parameterTypes.toList(),
+        )
+        val constructor =
+            factoryClass.declaredConstructors
+                .filterNot { it.isSynthetic }
+                .single()
+        assertEquals(
+            listOf(DovecotTask5ProofProfile::class.java),
+            constructor.parameterTypes.toList(),
+        )
+    }
 }
 
 private class RecordingRuntimeTransportBinding {

@@ -356,9 +356,11 @@ return closeFailure?.let { TransportFailure } ?: protocolResult
 
 - [ ] Refactor the probe to keep classifications provisional, close/reap
   through the same operation, complete finite ownership, and only then return.
-  Remove `JvmJsseDovecotOperatorTransportFactory` and the probe's implicit
-  default; production uses `DovecotOperatorRuntime.production()` and
-  proof/live callers inject the proof factory.
+  Remove the probe's implicit default and the production entry point from
+  `JvmJsseDovecotOperatorTransportFactory`; production uses
+  `DovecotOperatorRuntime.production()`. Retain only the explicitly injected
+  `task5Proof` JSSE adapter until Task 5 migrates the remaining live
+  host-socket helpers, then remove that adapter and transport there.
 
 - [ ] Run the complete focused set GREEN:
 
