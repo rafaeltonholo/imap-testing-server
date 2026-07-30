@@ -78,16 +78,16 @@ class DovecotOperatorRotationLiveTest {
         )
         var oldLease: DovecotOperatorApplicationLease? = null
         var heldOldSession: HeldDovecotOperatorImapSession? = null
-        var targetAdded = false
+        var addAttempted = false
         var primaryFailure: Throwable? = null
         try {
             require(address !in EligibilityFile(eligibilityPaths).list()) {
                 "Disposable rotation target unexpectedly exists"
             }
             generateTargetPassword().use { password ->
+                addAttempted = true
                 addEligibleTarget(eligibilityCli, address, password)
             }
-            targetAdded = true
 
             val oldCredential = store.loadActive()
             val seedMessage = deterministicRotationMessage(target)
@@ -194,13 +194,13 @@ class DovecotOperatorRotationLiveTest {
             }
             attemptCleanup {
                 if (
-                    targetAdded &&
+                    addAttempted &&
                     address in EligibilityFile(eligibilityPaths).list()
                 ) {
                     removeEligibleTarget(eligibilityCli, address)
                 }
             }
-            if (targetAdded) {
+            if (addAttempted) {
                 attemptCleanup {
                     awaitDovecotOperatorTargetRejection(
                         resultSupplier = {

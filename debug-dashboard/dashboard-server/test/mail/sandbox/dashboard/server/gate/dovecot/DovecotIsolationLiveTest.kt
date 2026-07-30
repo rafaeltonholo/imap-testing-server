@@ -77,7 +77,7 @@ class DovecotIsolationLiveTest {
             transportFactory = transportFactory,
             requireMailboxRead = true,
         )
-        var targetAdded = false
+        var addAttempted = false
         var targetRemoved = false
         var primaryFailure: Throwable? = null
         try {
@@ -85,12 +85,12 @@ class DovecotIsolationLiveTest {
                 "Disposable isolation target unexpectedly exists"
             }
             generateTargetPassword().use { targetPassword ->
+                addAttempted = true
                 addEligibleTarget(
                     cli = eligibilityCli,
                     address = address,
                     password = targetPassword,
                 )
-                targetAdded = true
 
                 assertEquals(
                     DovecotOperatorProbeResult.Success,
@@ -105,6 +105,11 @@ class DovecotIsolationLiveTest {
                         live.operatorImapsPort,
                         task6MasterLogin(address, master.id),
                         targetPassword,
+                    )
+                    protocol.requireImapRejected(
+                        live.operatorImapsPort,
+                        task6InactiveMasterLogin(address, master.id),
+                        master,
                     )
                     protocol.requireImapRejected(
                         live.operatorImapsPort,
@@ -169,7 +174,7 @@ class DovecotIsolationLiveTest {
         } finally {
             try {
                 if (
-                    targetAdded &&
+                    addAttempted &&
                     !targetRemoved &&
                     address in EligibilityFile(eligibilityPaths).list()
                 ) {

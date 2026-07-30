@@ -142,7 +142,7 @@ internal class DovecotIsolationProtocolProof private constructor(
                     writeBase64Line(socket.outputStream, secret)
                 }
                 readBoundedLine(socket.inputStream).useBytes { response ->
-                    check(response.startsWithAscii("535")) {
+                    check(response.isTerminalSmtpReply("535")) {
                         "SMTP SASL accepted the operator master credential"
                     }
                 }
@@ -367,6 +367,21 @@ internal class DovecotIsolationProtocolProof private constructor(
         }
     }
 
+    private fun ByteArray.isTerminalSmtpReply(code: String): Boolean {
+        val expected = code.toByteArray(StandardCharsets.US_ASCII)
+        return try {
+            size > expected.size + 1 &&
+                expected.indices.all { this[it] == expected[it] } &&
+                this[expected.size] == ' '.code.toByte() &&
+                (expected.size + 1 until size).all { index ->
+                    this[index] == '\t'.code.toByte() ||
+                        this[index].toInt() in 32..126
+                }
+        } finally {
+            expected.fill(0)
+        }
+    }
+
     private fun ByteArray.containsBytes(candidate: ByteArray): Boolean {
         if (candidate.isEmpty() || candidate.size > size) return false
         return (0..size - candidate.size).any { offset ->
@@ -459,6 +474,16 @@ internal fun task6MasterLogin(
     targetAddress: String,
     masterId: DovecotOperatorId,
 ): String = "$targetAddress*${masterId.masterUsername}"
+
+internal fun task6InactiveMasterLogin(
+    targetAddress: String,
+    activeMasterId: DovecotOperatorId,
+): String = task6MasterLogin(
+    targetAddress = targetAddress,
+    masterId = DovecotOperatorId.entries.single {
+        it != activeMasterId
+    },
+)
 
 internal fun task6IsHostNonLoopbackIpv4(address: Inet4Address): Boolean =
     !address.isAnyLocalAddress && !address.isLoopbackAddress
