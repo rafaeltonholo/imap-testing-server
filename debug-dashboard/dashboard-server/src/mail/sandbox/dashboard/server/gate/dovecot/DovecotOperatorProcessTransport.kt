@@ -1,9 +1,13 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Collections
+import java.util.concurrent.TimeUnit
 
 internal class DovecotOperatorLaunchProfile(
     val dockerCli: Path,
@@ -125,6 +129,235 @@ internal class JvmDovecotOperatorProcessStarter(
         }
         return builderLauncher(builder)
     }
+}
+
+internal class JvmDockerExecDovecotOperatorTransportFactory(
+    private val profile: DovecotOperatorLaunchProfile,
+    private val starter: DovecotOperatorProcessStarter =
+        JvmDovecotOperatorProcessStarter(),
+) : DovecotOperatorTransportFactory {
+    override fun open(
+        registerAllocated: (DovecotOperatorTransport) -> Unit,
+    ): DovecotOperatorTransport {
+        val process = try {
+            starter.start(profile)
+        } catch (_: Throwable) {
+            throw IOException(START_FAILURE_MESSAGE)
+        }
+        val transport = ManagedDovecotOperatorProcessTransport(process)
+        try {
+            transport.mapProcessStreams()
+        } catch (_: Throwable) {
+            transport.cleanupRegistrationFailure()
+            throw IOException(ALLOCATION_FAILURE_MESSAGE)
+        }
+        try {
+            registerAllocated(transport)
+        } catch (_: Throwable) {
+            transport.cleanupRegistrationFailure()
+            throw IOException(REGISTRATION_FAILURE_MESSAGE)
+        }
+        return transport
+    }
+
+    override fun toString(): String =
+        "JvmDockerExecDovecotOperatorTransportFactory(fixed, redacted)"
+
+    private companion object {
+        const val START_FAILURE_MESSAGE =
+            "Dovecot operator process transport start failed"
+        const val ALLOCATION_FAILURE_MESSAGE =
+            "Dovecot operator process transport allocation failed"
+        const val REGISTRATION_FAILURE_MESSAGE =
+            "Dovecot operator process transport registration failed"
+    }
+}
+
+private class ManagedDovecotOperatorProcessTransport(
+    private val process: Process,
+) : DovecotOperatorTransport {
+    private val lifecycleLock = Any()
+    private var childStdin: OutputStream? = null
+    private var childStdout: InputStream? = null
+    private var terminationOutcome: TerminationOutcome? = null
+
+    @Volatile
+    private var terminal = false
+
+    fun mapProcessStreams() {
+        childStdin = process.outputStream
+        childStdout = process.inputStream
+    }
+
+    override val input: InputStream
+        get() {
+            check(!terminal) {
+                CLOSED_MESSAGE
+            }
+            return checkNotNull(childStdout) {
+                CLOSED_MESSAGE
+            }
+        }
+
+    override val outputStream: OutputStream
+        get() {
+            check(!terminal) {
+                CLOSED_MESSAGE
+            }
+            return checkNotNull(childStdin) {
+                CLOSED_MESSAGE
+            }
+        }
+
+    override fun abort() {
+        terminate(
+            mode = TerminationMode.Abort,
+            failureMessage =
+                "Dovecot operator process transport abort failed",
+        )
+    }
+
+    override fun close() {
+        terminate(
+            mode = TerminationMode.NormalClose,
+            failureMessage =
+                "Dovecot operator process transport close failed",
+        )
+    }
+
+    fun cleanupRegistrationFailure() {
+        runCatching {
+            terminate(
+                mode = TerminationMode.RegistrationCleanup,
+                failureMessage =
+                    "Dovecot operator process transport registration cleanup failed",
+            )
+        }
+    }
+
+    override fun toString(): String =
+        "JvmDockerExecDovecotOperatorTransport(redacted)"
+
+    private fun terminate(
+        mode: TerminationMode,
+        failureMessage: String,
+    ) {
+        val outcome = synchronized(lifecycleLock) {
+            terminationOutcome ?: run {
+                terminal = true
+                performTermination(mode).also { completed ->
+                    terminationOutcome = completed
+                }
+            }
+        }
+        val accepted = when (mode) {
+            TerminationMode.NormalClose ->
+                outcome.reaped &&
+                    outcome.naturalExit &&
+                    outcome.streamsClosed &&
+                    outcome.exitCode == 0
+            TerminationMode.Abort,
+            TerminationMode.RegistrationCleanup,
+            -> outcome.reaped
+        }
+        if (!accepted) {
+            throw IOException(failureMessage)
+        }
+    }
+
+    private fun performTermination(
+        initialMode: TerminationMode,
+    ): TerminationOutcome {
+        var restoreInterrupt = Thread.currentThread().isInterrupted
+
+        fun awaitProcess(timeoutMillis: Long): Boolean =
+            try {
+                process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                restoreInterrupt = true
+                false
+            } catch (_: Throwable) {
+                false
+            }
+
+        return try {
+            val stdinClosed = closeQuietly(childStdin)
+            val naturalExit = awaitProcess(NATURAL_EXIT_WAIT_MILLIS)
+            val stdoutClosed = closeQuietly(childStdout)
+
+            var reaped = naturalExit
+            if (!reaped) {
+                try {
+                    process.destroy()
+                } catch (_: Throwable) {
+                    // Continue to the bounded force/reap sequence.
+                }
+                reaped = awaitProcess(DESTROY_WAIT_MILLIS)
+            }
+            if (!reaped) {
+                try {
+                    process.destroyForcibly()
+                } catch (_: Throwable) {
+                    // The final bounded reap attempt is still mandatory.
+                }
+                reaped = awaitProcess(FORCE_WAIT_MILLIS)
+            }
+
+            val exitCode =
+                if (
+                    reaped &&
+                    naturalExit &&
+                    initialMode != TerminationMode.RegistrationCleanup
+                ) {
+                    try {
+                        process.exitValue()
+                    } catch (_: Throwable) {
+                        null
+                    }
+                } else {
+                    null
+                }
+            TerminationOutcome(
+                reaped = reaped,
+                naturalExit = naturalExit,
+                streamsClosed = stdinClosed && stdoutClosed,
+                exitCode = exitCode,
+            )
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
+    private fun closeQuietly(stream: AutoCloseable?): Boolean =
+        try {
+            stream?.close()
+            true
+        } catch (_: Throwable) {
+            false
+        }
+
+    private companion object {
+        const val CLOSED_MESSAGE =
+            "Dovecot operator process transport is closed"
+        const val NATURAL_EXIT_WAIT_MILLIS = 500L
+        const val DESTROY_WAIT_MILLIS = 250L
+        const val FORCE_WAIT_MILLIS = 250L
+    }
+
+    private enum class TerminationMode {
+        NormalClose,
+        Abort,
+        RegistrationCleanup,
+    }
+
+    private data class TerminationOutcome(
+        val reaped: Boolean,
+        val naturalExit: Boolean,
+        val streamsClosed: Boolean,
+        val exitCode: Int?,
+    )
 }
 
 private fun requireCanonicalDockerCli(path: Path) {
