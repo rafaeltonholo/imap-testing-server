@@ -10,6 +10,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotOperatorRuntimeTest {
@@ -270,7 +271,7 @@ class DovecotOperatorRuntimeTest {
     }
 
     @Test
-    fun dockerSelectionIsFrozenBeforeProbeConstructionAndUse() =
+    fun productionBindsOneFactoryToTheFrozenProfileAndOpensOnlyOnUse() =
         withRuntimeFixture { fixture ->
             val symbolicDocker =
                 fixture.workspace.resolve("startup-only-docker")
@@ -278,25 +279,29 @@ class DovecotOperatorRuntimeTest {
             val environment = CountingStartupEnvironment(
                 mapOf(DOCKER_OVERRIDE_KEY to symbolicDocker.toString()),
             )
+            val binding = RecordingRuntimeTransportBinding()
             val runtime = DovecotOperatorRuntime.production(
                 paths = fixture.operatorPaths(),
                 startupEnvironment = environment,
                 dockerCandidates = emptyList(),
+                transportFactoryProvider = binding::create,
             )
             Files.delete(symbolicDocker)
-            var opens = 0
-            val transportFactory = DovecotOperatorTransportFactory { _ ->
-                opens += 1
-                throw IOException("explicit-factory-canary")
-            }
 
-            val probe = runtime.probe(transportFactory)
+            assertEquals(1, binding.providerCalls)
+            assertSame(runtime.launchProfile, binding.boundProfile)
+            assertEquals(fixture.docker, binding.boundProfile?.dockerCli)
+            assertEquals(0, binding.opens)
+            val probe = runtime.probe()
+            val secondProbe = runtime.probe()
 
             assertEquals(1, environment.dockerOverrideReads)
-            assertEquals(0, opens)
+            assertEquals(1, binding.providerCalls)
+            assertEquals(0, binding.opens)
+            assertNotSame(probe, secondProbe)
             assertEquals(fixture.docker, runtime.launchProfile.dockerCli)
             val secretBytes =
-                "runtime-explicit-probe-secret"
+                "runtime-bound-probe-secret"
                     .toByteArray(StandardCharsets.US_ASCII)
             val result = probe.probe(
                 target = DovecotOperatorTarget.create("dev@local.test"),
@@ -309,24 +314,86 @@ class DovecotOperatorRuntimeTest {
                 DovecotOperatorProbeResult.TransportFailure,
                 result,
             )
-            assertEquals(1, opens)
+            assertEquals(1, binding.opens)
+            assertEquals(1, binding.providerCalls)
             assertEquals(1, environment.dockerOverrideReads)
             assertTrue(secretBytes.all { it == 0.toByte() })
         }
 
     @Test
-    fun runtimeOffersOnlyExplicitProbeConstruction() =
+    fun task5ProofBindsOneFactoryToItsFrozenProfileAndOpensOnlyOnUse() =
+        withRuntimeFixture { fixture ->
+            val binding = RecordingRuntimeTransportBinding()
+            val runtime = DovecotOperatorRuntime.task5Proof(
+                profile = fixture.proofProfile(),
+                selectedDockerCli = fixture.docker,
+                transportFactoryProvider = binding::create,
+            )
+
+            assertEquals(1, binding.providerCalls)
+            assertSame(runtime.launchProfile, binding.boundProfile)
+            assertEquals(
+                listOf(fixture.compose, fixture.composeOverride),
+                binding.boundProfile?.composeFiles,
+            )
+            assertEquals(0, binding.opens)
+            val probe = runtime.probe()
+            assertEquals(1, binding.providerCalls)
+            assertEquals(0, binding.opens)
+            val secretBytes =
+                "proof-runtime-bound-secret"
+                    .toByteArray(StandardCharsets.US_ASCII)
+
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                probe.probe(
+                    target =
+                        DovecotOperatorTarget.create("proof@local.test"),
+                    credential = DovecotOperatorCredential(
+                        id = DovecotOperatorId.A,
+                        secret =
+                            DovecotOperatorSecret.takeOwnership(secretBytes),
+                    ),
+                ),
+            )
+
+            assertEquals(1, binding.opens)
+            assertEquals(1, binding.providerCalls)
+            assertTrue(secretBytes.all { it == 0.toByte() })
+        }
+
+    @Test
+    fun productionDefaultsToTheProcessTransportWithoutStartingIt() =
         withRuntimeFixture { fixture ->
             val runtime = fixture.productionRuntime()
-            var opens = 0
-            val transportFactory = DovecotOperatorTransportFactory { _ ->
-                opens += 1
-                throw IOException("explicit-factory-canary")
-            }
 
-            runtime.probe(transportFactory)
+            assertTrue(
+                runtimeTransportFactory(runtime) is
+                    JvmDockerExecDovecotOperatorTransportFactory,
+            )
+            runtime.probe()
 
-            assertEquals(0, opens)
+            assertTrue(
+                runtimeTransportFactory(runtime) is
+                    JvmDockerExecDovecotOperatorTransportFactory,
+            )
+        }
+
+    @Test
+    fun runtimeOffersOnlyZeroArgumentProbeConstruction() =
+        withRuntimeFixture { fixture ->
+            val binding = RecordingRuntimeTransportBinding()
+            val runtime = DovecotOperatorRuntime.production(
+                paths = fixture.operatorPaths(),
+                startupEnvironment = emptyMap(),
+                dockerCandidates = listOf(fixture.docker),
+                transportFactoryProvider = binding::create,
+            )
+
+            runtime.probe()
+
+            assertEquals(1, binding.providerCalls)
+            assertEquals(0, binding.opens)
             val runtimeMethods =
                 DovecotOperatorRuntime::class.java.declaredMethods
             assertTrue(
@@ -335,7 +402,7 @@ class DovecotOperatorRuntimeTest {
                 },
             )
             assertEquals(
-                listOf(1),
+                listOf(0),
                 runtimeMethods
                     .filter {
                         it.name.substringBefore('$') == "probe"
@@ -347,6 +414,36 @@ class DovecotOperatorRuntimeTest {
                     .none { it.parameterCount == 0 },
             )
         }
+}
+
+private class RecordingRuntimeTransportBinding {
+    var providerCalls: Int = 0
+        private set
+    var opens: Int = 0
+        private set
+    var boundProfile: DovecotOperatorLaunchProfile? = null
+        private set
+
+    fun create(
+        profile: DovecotOperatorLaunchProfile,
+    ): DovecotOperatorTransportFactory {
+        providerCalls += 1
+        check(boundProfile == null)
+        boundProfile = profile
+        return DovecotOperatorTransportFactory { _ ->
+            opens += 1
+            throw IOException("runtime-transport-open-canary")
+        }
+    }
+}
+
+private fun runtimeTransportFactory(
+    runtime: DovecotOperatorRuntime,
+): DovecotOperatorTransportFactory {
+    val field =
+        DovecotOperatorRuntime::class.java.getDeclaredField("transportFactory")
+    field.isAccessible = true
+    return field.get(runtime) as DovecotOperatorTransportFactory
 }
 
 private data class RuntimeFixture(

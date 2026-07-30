@@ -7,10 +7,13 @@ import java.util.Collections
 
 internal class DovecotOperatorRuntime private constructor(
     val launchProfile: DovecotOperatorLaunchProfile,
+    transportFactoryProvider:
+        (DovecotOperatorLaunchProfile) -> DovecotOperatorTransportFactory,
 ) {
-    fun probe(
-        transportFactory: DovecotOperatorTransportFactory,
-    ): DovecotOperatorProbe =
+    private val transportFactory =
+        transportFactoryProvider(launchProfile)
+
+    fun probe(): DovecotOperatorProbe =
         DovecotOperatorProbe(transportFactory = transportFactory)
 
     companion object {
@@ -21,6 +24,8 @@ internal class DovecotOperatorRuntime private constructor(
                 repositoryRoot = repositoryRoot,
                 startupEnvironment = System.getenv(),
                 dockerCandidates = productionDockerCandidates,
+                transportFactoryProvider =
+                    DEFAULT_TRANSPORT_FACTORY_PROVIDER,
             )
         }
 
@@ -28,19 +33,38 @@ internal class DovecotOperatorRuntime private constructor(
             paths: DovecotOperatorPaths,
             startupEnvironment: Map<String, String>,
             dockerCandidates: List<Path>,
+            transportFactoryProvider:
+                (DovecotOperatorLaunchProfile) ->
+                    DovecotOperatorTransportFactory =
+                DEFAULT_TRANSPORT_FACTORY_PROVIDER,
         ): DovecotOperatorRuntime =
             production(
                 repositoryRoot = paths.repositoryRoot,
                 startupEnvironment = startupEnvironment,
                 dockerCandidates = dockerCandidates,
+                transportFactoryProvider = transportFactoryProvider,
             )
 
         fun task5Proof(
             profile: DovecotTask5ProofProfile,
             selectedDockerCli: Path,
         ): DovecotOperatorRuntime =
+            task5Proof(
+                profile = profile,
+                selectedDockerCli = selectedDockerCli,
+                transportFactoryProvider =
+                    DEFAULT_TRANSPORT_FACTORY_PROVIDER,
+            )
+
+        internal fun task5Proof(
+            profile: DovecotTask5ProofProfile,
+            selectedDockerCli: Path,
+            transportFactoryProvider:
+                (DovecotOperatorLaunchProfile) ->
+                    DovecotOperatorTransportFactory,
+        ): DovecotOperatorRuntime =
             DovecotOperatorRuntime(
-                DovecotOperatorLaunchProfile(
+                launchProfile = DovecotOperatorLaunchProfile(
                     dockerCli = selectedDockerCli,
                     repositoryRoot = profile.repositoryRoot,
                     composeFiles = listOf(
@@ -49,17 +73,21 @@ internal class DovecotOperatorRuntime private constructor(
                     ),
                     projectName = PROOF_PROJECT_NAME,
                 ),
+                transportFactoryProvider = transportFactoryProvider,
             )
 
         private fun production(
             repositoryRoot: Path,
             startupEnvironment: Map<String, String>,
             dockerCandidates: List<Path>,
+            transportFactoryProvider:
+                (DovecotOperatorLaunchProfile) ->
+                    DovecotOperatorTransportFactory,
         ): DovecotOperatorRuntime {
             val projectName = repositoryRoot.fileName?.toString()
                 ?: throw IllegalArgumentException(INVALID_PROJECT_MESSAGE)
             return DovecotOperatorRuntime(
-                DovecotOperatorLaunchProfile(
+                launchProfile = DovecotOperatorLaunchProfile(
                     dockerCli = selectDockerCli(
                         startupEnvironment = startupEnvironment,
                         dockerCandidates = dockerCandidates,
@@ -69,6 +97,7 @@ internal class DovecotOperatorRuntime private constructor(
                         listOf(repositoryRoot.resolve("docker-compose.yml")),
                     projectName = projectName,
                 ),
+                transportFactoryProvider = transportFactoryProvider,
             )
         }
 
@@ -125,6 +154,11 @@ internal class DovecotOperatorRuntime private constructor(
             "Dovecot operator Compose project is invalid"
         private const val PROOF_PROJECT_NAME =
             "mail-sandbox-task5-proof"
+        private val DEFAULT_TRANSPORT_FACTORY_PROVIDER:
+            (DovecotOperatorLaunchProfile) ->
+                DovecotOperatorTransportFactory = { profile ->
+                    JvmDockerExecDovecotOperatorTransportFactory(profile)
+                }
         internal val productionDockerCandidates: List<Path> =
             Collections.unmodifiableList(
                 listOf(
