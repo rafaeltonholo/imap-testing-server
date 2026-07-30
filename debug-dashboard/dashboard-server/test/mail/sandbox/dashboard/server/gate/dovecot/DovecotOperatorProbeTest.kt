@@ -642,6 +642,12 @@ class DovecotOperatorProbeTest {
                     .toByteArray(StandardCharsets.US_ASCII),
                 expected = DovecotOperatorProbeResult.ProtocolFailure,
             ),
+            ProbeCloseCase(
+                name = "framing",
+                response = "* OK Dovecot ready\n"
+                    .toByteArray(StandardCharsets.US_ASCII),
+                expected = DovecotOperatorProbeResult.ProtocolFailure,
+            ),
         )
 
         cases.forEach { case ->
