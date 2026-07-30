@@ -1,5 +1,6 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
+import java.io.IOException
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -417,6 +418,147 @@ class DovecotBoundedOperationWorkersTest {
     }
 
     @Test
+    fun workerInterruptedFailureCannotBeDemotedBeforeCallerClaimsIt() {
+        val workerInterruptHandled = CountDownLatch(1)
+        val callerFailure = AtomicReference<Throwable>()
+        val callerInterruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            beforeTaskClaim = {
+                assertTrue(
+                    workerInterruptHandled.await(1, TimeUnit.SECONDS),
+                )
+            },
+            afterWorkerDispositionInterrupt = {
+                workerInterruptHandled.countDown()
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        val caller = Thread {
+            try {
+                operation.execute<Unit> {
+                    Thread.currentThread().interrupt()
+                    throw InterruptedException("worker interruption")
+                }
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+                callerInterruptRestored.set(
+                    Thread.currentThread().isInterrupted,
+                )
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        caller.join(1_000)
+
+        assertFalse(caller.isAlive)
+        assertTrue(callerFailure.get() is InterruptedException)
+        assertEquals(
+            "Dovecot operation was interrupted",
+            callerFailure.get().message,
+        )
+        assertFalse(
+            callerFailure.get().toString().contains("worker interruption"),
+        )
+        assertTrue(callerInterruptRestored.get())
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 1)
+        }
+    }
+
+    @Test
+    fun resultClaimCrossingDeadlineIsTimedOutAndDisposed() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val resultReference = AtomicReference<ByteArray>()
+        val disposalCalls = AtomicInteger()
+        val workers = DovecotBoundedOperationWorkers(
+            nanoTime = handoffClock(clock),
+            beforeTaskClaim = { clock.set(deadline) },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+
+        val failure = runCatching {
+            operation.execute(
+                disposeLate = { result: ByteArray ->
+                    disposalCalls.incrementAndGet()
+                    result.fill(0)
+                },
+            ) {
+                byteArrayOf(4, 5, 6).also(resultReference::set)
+            }
+        }.exceptionOrNull()
+        operation.abandon()
+
+        try {
+            assertTrue(failure is DovecotBoundedOperationTimeoutException)
+            assertEventually {
+                resultReference.get().all { it == 0.toByte() } &&
+                    workers.snapshot() ==
+                    DovecotBoundedOperationSnapshot(peakActors = 1)
+            }
+            assertEquals(1, disposalCalls.get())
+        } finally {
+            resultReference.get()?.fill(0)
+        }
+    }
+
+    @Test
+    fun failureClaimCrossingDeadlineIsTimedOut() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val workers = DovecotBoundedOperationWorkers(
+            nanoTime = handoffClock(clock),
+            beforeTaskClaim = { clock.set(deadline) },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+
+        val failure = runCatching {
+            operation.execute<Unit> {
+                throw IOException("worker failure")
+            }
+        }.exceptionOrNull()
+
+        assertTrue(failure is DovecotBoundedOperationTimeoutException)
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 1)
+        }
+    }
+
+    @Test
+    fun interruptedFailureClaimedAtDeadlineKeepsPrecedence() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val workers = DovecotBoundedOperationWorkers(
+            nanoTime = handoffClock(clock),
+            beforeTaskClaim = { clock.set(deadline) },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+
+        try {
+            val failure = assertFailsWith<InterruptedException> {
+                operation.execute<Unit> {
+                    throw InterruptedException("worker interruption")
+                }
+            }
+
+            assertEquals("Dovecot operation was interrupted", failure.message)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 1)
+        }
+    }
+
+    @Test
     fun cancellationLedgerDeduplicatesIdentityAndRejectsAThirdTarget() {
         val firstCalls = AtomicInteger()
         val duplicateCalls = AtomicInteger()
@@ -756,6 +898,18 @@ class DovecotBoundedOperationWorkersTest {
     private fun deadlineAfter(
         duration: Duration = Duration.ofSeconds(2),
     ): Long = Math.addExact(System.nanoTime(), duration.toNanos())
+
+    private fun handoffClock(clock: AtomicLong): () -> Long = {
+        if (
+            Thread.currentThread().name.startsWith(
+                "dovecot-bounded-operation-io-",
+            )
+        ) {
+            0L
+        } else {
+            clock.get()
+        }
+    }
 
     private fun assertEventually(assertion: () -> Boolean) {
         val deadline = deadlineAfter()

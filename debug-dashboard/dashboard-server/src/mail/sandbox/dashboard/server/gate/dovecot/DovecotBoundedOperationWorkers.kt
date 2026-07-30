@@ -45,6 +45,8 @@ internal class DovecotBoundedOperationWorkers(
     private val beforeOperationConstruction: () -> Unit = {},
     private val beforeOperationStart: () -> Unit = {},
     private val beforeTaskSubmission: () -> Unit = {},
+    private val beforeTaskClaim: () -> Unit = {},
+    private val afterWorkerDispositionInterrupt: () -> Unit = {},
     private val nanoTime: () -> Long = System::nanoTime,
     private val copyBytes: (ByteArray) -> ByteArray = ByteArray::copyOf,
     private val wipeBytes: (ByteArray) -> Unit = { bytes -> bytes.fill(0) },
@@ -78,6 +80,9 @@ internal class DovecotBoundedOperationWorkers(
                 deadlineNanos = deadlineNanos,
                 actorLauncher = actorLauncher,
                 beforeTaskSubmission = beforeTaskSubmission,
+                beforeTaskClaim = beforeTaskClaim,
+                afterWorkerDispositionInterrupt =
+                    afterWorkerDispositionInterrupt,
                 nanoTime = nanoTime,
                 copyBytes = copyBytes,
                 wipeBytes = wipeBytes,
@@ -161,6 +166,8 @@ internal class DovecotBoundedOperation internal constructor(
     private val deadlineNanos: Long,
     private val actorLauncher: DovecotBoundedActorLauncher,
     private val beforeTaskSubmission: () -> Unit,
+    private val beforeTaskClaim: () -> Unit,
+    private val afterWorkerDispositionInterrupt: () -> Unit,
     private val nanoTime: () -> Long,
     private val copyBytes: (ByteArray) -> ByteArray,
     private val wipeBytes: (ByteArray) -> Unit,
@@ -215,6 +222,8 @@ internal class DovecotBoundedOperation internal constructor(
         val task = OperationTask(
             deadlineNanos = deadlineNanos,
             disposeLate = disposeLate,
+            beforeClaim = beforeTaskClaim,
+            afterDispositionInterrupt = afterWorkerDispositionInterrupt,
             nanoTime = nanoTime,
             block = { block(context) },
         )
@@ -242,6 +251,8 @@ internal class DovecotBoundedOperation internal constructor(
             deadlineNanos = deadlineNanos,
             disposeLate = disposeLate,
             disposeBeforeRun = wipeOwned,
+            beforeClaim = beforeTaskClaim,
+            afterDispositionInterrupt = afterWorkerDispositionInterrupt,
             nanoTime = nanoTime,
             block = {
                 try {
@@ -424,6 +435,7 @@ internal class DovecotBoundedOperation internal constructor(
     }
 
     private fun runWorker() {
+        var restoreInterrupt = false
         lock.withLock {
             check(ioActorThread == null) {
                 "Dovecot I/O worker was started more than once"
@@ -454,6 +466,9 @@ internal class DovecotBoundedOperation internal constructor(
                 try {
                     task.run()
                 } finally {
+                    if (Thread.interrupted()) {
+                        restoreInterrupt = true
+                    }
                     lock.withLock {
                         inFlightTask = null
                         workAvailable.signalAll()
@@ -461,9 +476,15 @@ internal class DovecotBoundedOperation internal constructor(
                 }
             }
         } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
+            restoreInterrupt = true
         } finally {
+            if (Thread.interrupted()) {
+                restoreInterrupt = true
+            }
             finishIoActor()
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt()
+            }
         }
     }
 
@@ -631,6 +652,8 @@ private class OperationTask<T>(
     private val deadlineNanos: Long,
     private val disposeLate: (T) -> Unit,
     private val disposeBeforeRun: () -> Unit = {},
+    private val beforeClaim: () -> Unit,
+    private val afterDispositionInterrupt: () -> Unit,
     private val nanoTime: () -> Long,
     private val block: () -> T,
 ) : WorkerTask {
@@ -683,15 +706,15 @@ private class OperationTask<T>(
                         decline()
                         throw DovecotBoundedOperationTimeoutException()
                     }
+                    beforeClaim()
                     if (
                         state.compareAndSet(
                             TaskState.Result,
                             TaskState.Claimed,
                         )
                     ) {
-                        disposition.countDown()
                         @Suppress("UNCHECKED_CAST")
-                        return result as T
+                        return claimedResult(result as T)
                     }
                 }
                 TaskState.Failure -> {
@@ -699,14 +722,14 @@ private class OperationTask<T>(
                         decline()
                         throw DovecotBoundedOperationTimeoutException()
                     }
+                    beforeClaim()
                     if (
                         state.compareAndSet(
                             TaskState.Failure,
                             TaskState.Claimed,
                         )
                     ) {
-                        disposition.countDown()
-                        throw checkNotNull(failure)
+                        claimedFailure(checkNotNull(failure))
                     }
                 }
                 TaskState.Declined,
@@ -754,17 +777,29 @@ private class OperationTask<T>(
     }
 
     private fun awaitDisposition() {
-        val remaining = remainingNanos(deadlineNanos, nanoTime)
+        var restoreInterrupt = false
         try {
-            if (
-                remaining <= 0L ||
-                !disposition.await(remaining, TimeUnit.NANOSECONDS)
-            ) {
-                decline()
+            while (true) {
+                val remaining = remainingNanos(deadlineNanos, nanoTime)
+                if (remaining <= 0L) {
+                    decline()
+                    break
+                }
+                try {
+                    if (disposition.await(remaining, TimeUnit.NANOSECONDS)) {
+                        break
+                    }
+                    decline()
+                    break
+                } catch (_: InterruptedException) {
+                    restoreInterrupt = true
+                    afterDispositionInterrupt()
+                }
             }
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            decline()
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt()
+            }
         }
         if (
             state.get() == TaskState.Declined &&
@@ -773,6 +808,38 @@ private class OperationTask<T>(
             @Suppress("UNCHECKED_CAST")
             dispose(result as T)
             state.compareAndSet(TaskState.Declined, TaskState.Disposed)
+        }
+    }
+
+    private fun claimedResult(value: T): T {
+        var handedOff = false
+        try {
+            if (remainingNanos(deadlineNanos, nanoTime) <= 0L) {
+                throw DovecotBoundedOperationTimeoutException()
+            }
+            handedOff = true
+            return value
+        } finally {
+            if (!handedOff) {
+                dispose(value)
+            }
+            disposition.countDown()
+        }
+    }
+
+    private fun claimedFailure(caught: Throwable): Nothing {
+        try {
+            val expired =
+                remainingNanos(deadlineNanos, nanoTime) <= 0L
+            if (caught is InterruptedException) {
+                throw caught
+            }
+            if (expired) {
+                throw DovecotBoundedOperationTimeoutException()
+            }
+            throw caught
+        } finally {
+            disposition.countDown()
         }
     }
 
