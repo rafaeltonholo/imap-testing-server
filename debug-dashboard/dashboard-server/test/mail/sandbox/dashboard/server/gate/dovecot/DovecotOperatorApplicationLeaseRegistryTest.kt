@@ -363,6 +363,9 @@ class DovecotOperatorApplicationLeaseRegistryTest {
         available.bind {}
         val lease = available.commit()
 
+        assertFailsWith<IllegalStateException> {
+            available.commit()
+        }
         assertTrue(lease.isOpen)
         lease.close()
         assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
