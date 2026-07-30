@@ -43,6 +43,181 @@ class DovecotBoundedOperationWorkersTest {
     }
 
     @Test
+    fun closedReapedFiniteOperationReleasesWithoutBecomingAHandoff() {
+        val closed = AtomicBoolean()
+        val reaped = AtomicBoolean()
+        val cancellationCalls = AtomicInteger()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val operation = workers.tryAcquire(deadlineAfter())!!
+
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = cancellationCalls::incrementAndGet,
+                close = cancellationCalls::incrementAndGet,
+            )
+        }
+        operation.execute<Unit> {
+            closed.set(true)
+            reaped.set(true)
+        }
+
+        assertTrue(operation.completeFinite())
+        assertTrue(closed.get())
+        assertTrue(reaped.get())
+        assertEquals(0, cancellationCalls.get())
+        assertEquals(
+            DovecotBoundedOperationSnapshot(peakActors = 1),
+            workers.snapshot(),
+        )
+        assertFalse(operation.commitHandoff())
+
+        val recovered = workers.tryAcquire(deadlineAfter())!!
+        assertTrue(recovered.completeFinite())
+        assertEquals(
+            DovecotBoundedOperationSnapshot(peakActors = 1),
+            workers.snapshot(),
+        )
+    }
+
+    @Test
+    fun interruptionDuringFiniteFinalClockSampleRetainsCleanupOwnership() {
+        val interruptOnFinalClock = AtomicBoolean()
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val callerFailure = AtomicReference<Throwable?>()
+        val completed = AtomicBoolean()
+        val interruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                interruptOnFinalClock.set(true)
+            },
+            nanoTime = {
+                val sampled = System.nanoTime()
+                if (interruptOnFinalClock.compareAndSet(true, false)) {
+                    Thread.currentThread().interrupt()
+                }
+                sampled
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+        val caller = Thread {
+            try {
+                completed.set(operation.completeFinite())
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertFalse(completed.get())
+            assertTrue(callerFailure.get() is InterruptedException)
+            assertEquals(
+                "Dovecot operation was interrupted",
+                callerFailure.get()?.message,
+            )
+            assertTrue(interruptRestored.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+        } finally {
+            releaseCancellation.countDown()
+            caller.join(1_000)
+        }
+
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
+    fun expiryDuringFiniteFinalClockSampleRetainsCleanupOwnership() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val expireOnFinalClock = AtomicBoolean()
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                expireOnFinalClock.set(true)
+            },
+            nanoTime = {
+                if (expireOnFinalClock.compareAndSet(true, false)) {
+                    deadline
+                } else {
+                    clock.get()
+                }
+            },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+
+        try {
+            assertFalse(operation.completeFinite())
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadline))
+        } finally {
+            releaseCancellation.countDown()
+        }
+
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
     fun workerExitRetainsReservationUntilCallerCommitsHandoff() {
         val commitReached = CountDownLatch(1)
         val releaseCommit = CountDownLatch(1)

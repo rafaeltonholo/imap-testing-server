@@ -191,6 +191,7 @@ internal class DovecotBoundedOperation internal constructor(
     private var cancellationActors = 0
     private var commitInProgress = false
     private var handoffCommitted = false
+    private var finiteCompleted = false
     private var releaseWithoutHandoff = false
     private var reservationReleased = false
 
@@ -311,8 +312,16 @@ internal class DovecotBoundedOperation internal constructor(
         launchCancellationActors(launches)
     }
 
-    fun commitHandoff(): Boolean {
-        when (requestWorkerExit()) {
+    fun commitHandoff(): Boolean =
+        completeOwnership(OwnershipCompletion.Handoff)
+
+    fun completeFinite(): Boolean =
+        completeOwnership(OwnershipCompletion.Finite)
+
+    private fun completeOwnership(
+        completion: OwnershipCompletion,
+    ): Boolean {
+        when (requestWorkerExit(completion)) {
             HandoffState.Committed -> return true
             HandoffState.Unavailable -> return false
             HandoffState.Pending -> Unit
@@ -335,9 +344,19 @@ internal class DovecotBoundedOperation internal constructor(
         }
 
         val decision = lock.withLock {
+            val alreadyCompleted = when (completion) {
+                OwnershipCompletion.Handoff -> handoffCommitted
+                OwnershipCompletion.Finite -> finiteCompleted
+            }
+            val conflictingCompletion = when (completion) {
+                OwnershipCompletion.Handoff -> finiteCompleted
+                OwnershipCompletion.Finite -> handoffCommitted
+            }
             when {
-                handoffCommitted -> HandoffDecision.Committed
-                abandoned || releaseWithoutHandoff ->
+                alreadyCompleted -> HandoffDecision.Committed
+                abandoned ||
+                    conflictingCompletion ||
+                    releaseWithoutHandoff ->
                     HandoffDecision.Unavailable
                 else -> {
                     val finalRemaining =
@@ -351,7 +370,12 @@ internal class DovecotBoundedOperation internal constructor(
                         }
                         else -> {
                             commitInProgress = false
-                            handoffCommitted = true
+                            when (completion) {
+                                OwnershipCompletion.Handoff ->
+                                    handoffCommitted = true
+                                OwnershipCompletion.Finite ->
+                                    finiteCompleted = true
+                            }
                             maybeReleaseLocked()
                             HandoffDecision.Committed
                         }
@@ -583,14 +607,32 @@ internal class DovecotBoundedOperation internal constructor(
         }
     }
 
-    private fun requestWorkerExit(): HandoffState = lock.withLock {
+    private fun requestWorkerExit(
+        completion: OwnershipCompletion,
+    ): HandoffState = lock.withLock {
+        val alreadyCompleted = when (completion) {
+            OwnershipCompletion.Handoff -> handoffCommitted
+            OwnershipCompletion.Finite -> finiteCompleted
+        }
+        val conflictingCompletion = when (completion) {
+            OwnershipCompletion.Handoff -> finiteCompleted
+            OwnershipCompletion.Finite -> handoffCommitted
+        }
         when {
-            handoffCommitted -> HandoffState.Committed
-            abandoned || releaseWithoutHandoff || reservationReleased ->
+            alreadyCompleted -> HandoffState.Committed
+            abandoned ||
+                conflictingCompletion ||
+                releaseWithoutHandoff ||
+                reservationReleased ->
                 HandoffState.Unavailable
             else -> {
                 check(!commitInProgress) {
-                    "Dovecot operation handoff is already being committed"
+                    when (completion) {
+                        OwnershipCompletion.Handoff ->
+                            "Dovecot operation handoff is already being committed"
+                        OwnershipCompletion.Finite ->
+                            "Dovecot finite operation completion is already in progress"
+                    }
                 }
                 commitInProgress = true
                 finishRequested = true
@@ -621,6 +663,7 @@ internal class DovecotBoundedOperation internal constructor(
         if (
             !abandoned &&
             !handoffCommitted &&
+            !finiteCompleted &&
             !releaseWithoutHandoff &&
             !reservationReleased
         ) {
@@ -720,6 +763,7 @@ internal class DovecotBoundedOperation internal constructor(
             (
                 !abandoned &&
                     !handoffCommitted &&
+                    !finiteCompleted &&
                     !releaseWithoutHandoff
                 )
         ) {
@@ -748,6 +792,11 @@ internal class DovecotBoundedOperation internal constructor(
         Pending,
         Committed,
         Unavailable,
+    }
+
+    private enum class OwnershipCompletion {
+        Finite,
+        Handoff,
     }
 
     private sealed interface HandoffDecision {
