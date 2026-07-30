@@ -587,10 +587,31 @@ pre-open failures still close the credential and wipe the caller's message.
 The message remains bounded at 16 KiB and requires exactly one of every fixed
 header without first materializing the payload as an immutable string. The
 caller also closes the seed session and repeats credential/payload cleanup in
-`finally`. Eligibility cleanup removes the target; the checked disposable
-lifecycle owns removal of its Maildir volume. Zero `EXISTS` and `RECENT`
-notifications are valid mailbox metadata, while zero or leading-zero `FETCH`
-sequence numbers and an empty or malformed UID search fail closed.
+`finally`. The add-attempt marker is set before eligibility mutation, so
+cleanup re-reads membership and removes a target even if the add landed before
+returning failure; the checked disposable lifecycle owns removal of its
+Maildir volume. Zero `EXISTS` and `RECENT` notifications are valid mailbox
+metadata. The probe carries the latest exact `EXISTS` count through
+`EXAMINE`, `UID SEARCH`, and `UID FETCH`: `EXISTS` may stay level or increase,
+an exact `EXPUNGE` decrements it, and a fetch after the count reaches zero is
+rejected unless a later positive `EXISTS` arrives. Zero or leading-zero
+`FETCH` sequence numbers and an empty or malformed UID search also fail
+closed.
+
+The production probe and proof helpers no longer share one reusable watchdog
+executor. Every operation owns a disposable daemon watchdog, so an arbitrary
+blocked deadline callback cannot delay a later operation. Probe cancellation
+dispatches `abort` and `close` independently on disposable daemon threads and
+waits only for a bounded successful cancellation; a blocked abort therefore
+cannot prevent close from releasing the current probe or poison later
+deadlines. Held-session deadline and failure cleanup likewise starts
+independent disposable abort and close attempts with a bounded wait; a later
+successful cancellation still publishes the terminal session state, while its
+lease-owned explicit `close()` remains synchronous and retryable. Caller
+interruption is checked before open/seed allocation, held-session I/O,
+closed-session validation, or HTTP socket allocation, and mid-operation
+interruption is restored and rethrown instead of being treated as proof
+failure or closed-transport evidence.
 
 The rotation proof holds an actual authenticated old-ID IMAP session rather
 than a callback-only stand-in. It appends the deterministic read fixture,
@@ -644,6 +665,12 @@ alias, and every supplied host address to port `2993`. The Kotlin live matrix
 also requires exact runtime publications and network membership, rejects
 non-loopback host access to `1993` and `2993`, and proves the master credential
 inactive through ordinary IMAPS, ordinary POP3S, Postfix SMTP SASL, and OAuth.
+Its raw LOGIN matrix submits the active secret against the other fixed,
+inactive `DovecotOperatorId.masterUsername` suffix, independently of the
+absent-master, master-as-self, and revoked-old rows. SMTP rejection requires
+one terminal `535 <text>` line whose text is HTAB or printable US-ASCII;
+`5350...`, `535-...`, empty text, and control-byte lookalikes are
+indeterminate rather than accepted rejection evidence.
 IMAP and POP3 rejection count as permanent only for their exact tagged
 `[AUTHENTICATIONFAILED]` and `-ERR [AUTH]` response forms; unavailable,
 temporary, server, bare, malformed, and misleading responses are indeterminate.
@@ -671,23 +698,27 @@ before inverse authentication, corrupt or misrouted durable states reaching
 runtime work, non-terminal lease/runtime and held-session close outcomes,
 overly permissive authentication and OAuth response classification, and HTTP
 operations without one total deadline or complete header/body bounds. The
-current 12-class reciprocal run passed `102/102`:
+repair review also exposed reusable watchdog poisoning, sequential
+abort/close cancellation, swallowed interruption, permissive SMTP `535`
+prefix parsing, incomplete `EXISTS`/`EXPUNGE` state, and cleanup that could
+miss an add which mutated before returning failure. The current 12-class
+reciprocal run passed `121/121`:
 
 - credential recovery, rotation projection, durable repository, and
   application leases: `50/50`;
-- exact auth classification and the fixed operator probe: `19/19`;
-- OAuth redirect/JSON validation and bounded HTTP transport: `7/7`;
-- held-session, deadline, and mailbox contracts: `15/15`; and
+- exact auth classification and the fixed operator probe: `24/24`;
+- OAuth redirect/JSON validation and bounded HTTP transport: `9/9`;
+- held-session, deadline, and mailbox contracts: `27/27`; and
 - bounded process and topology proofs: `11/11`.
 
 The network-isolation helper's independent Python suite passed `21/21`.
 
 Under the no-Docker verification boundary, the non-live Dovecot class run
-passed `179/179` and the 13 non-daemon static/config selectors passed `13/13`,
-for `192/192` with zero skips. The four effective-configuration selectors
+passed `198/198` and the 13 non-daemon static/config selectors passed `13/13`,
+for `211/211` with zero skips. The four effective-configuration selectors
 that invoke `docker run` were not executed. The wider `dashboard-server`
-non-live run passed `444/444`, plus those same `13/13` selectors, for
-`457/457`; it excluded all `*LiveTest` classes, the production browser gate
+non-live run passed `463/463`, plus those same `13/13` selectors, for
+`476/476`; it excluded all `*LiveTest` classes, the production browser gate
 that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed Docker-backed
 config class from the broad scan.
 
