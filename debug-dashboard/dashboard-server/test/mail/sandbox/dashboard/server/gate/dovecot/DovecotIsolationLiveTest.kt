@@ -1,15 +1,20 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.PrintStream
+import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
+import java.net.NoRouteToHostException
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -20,17 +25,25 @@ import java.security.cert.CertificateFactory
 import java.time.Duration
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -122,24 +135,30 @@ class DovecotIsolationLiveTest {
                     assertImapRejected(
                         sslContext,
                         live.operatorImapsPort,
+                        task6MasterLogin(address, master.id),
+                        targetPassword,
+                    )
+                    assertImapRejected(
+                        sslContext,
+                        live.operatorImapsPort,
                         "$address*absent-master",
                         targetPassword,
                     )
                     assertImapRejected(
                         sslContext,
                         live.ordinaryImapsPort,
-                        "$address*${master.id.masterUsername}",
+                        task6MasterLogin(address, master.id),
                         master,
                     )
                     assertPop3Rejected(
                         sslContext,
                         live.ordinaryPop3sPort,
-                        "$address*${master.id.masterUsername}",
+                        task6MasterLogin(address, master.id),
                         master,
                     )
                     assertSmtpRejected(
                         live.smtpPort,
-                        "$address*${master.id.masterUsername}",
+                        task6MasterLogin(address, master.id),
                         master,
                     )
                     assertMasterOauthInactive(live.oauthPort, master)
@@ -257,7 +276,7 @@ class DovecotIsolationLiveTest {
                 rawImapLogin(
                     sslContext,
                     port,
-                    "$target*${credential.id.masterUsername}",
+                    task6MasterLogin(target, credential.id),
                     bytes,
                 ),
                 "Operator accepted forbidden raw target",
@@ -670,11 +689,7 @@ class DovecotIsolationLiveTest {
             .filter { it.isUp }
             .flatMap { it.inetAddresses.toList() }
             .filterIsInstance<Inet4Address>()
-            .filter {
-                !it.isAnyLocalAddress &&
-                    !it.isLoopbackAddress &&
-                    !it.isLinkLocalAddress
-            }
+            .filter(::task6IsHostNonLoopbackIpv4)
             .distinctBy { it.hostAddress }
             .sortedBy { it.hostAddress }
         require(addresses.isNotEmpty()) {
@@ -684,16 +699,22 @@ class DovecotIsolationLiveTest {
     }
 
     private fun assertTcpRejected(address: InetAddress, port: Int) {
-        val connected = runCatching {
+        val rejected = try {
             Socket().use { socket ->
                 socket.connect(
                     InetSocketAddress(address, port),
                     NETWORK_NEGATIVE_TIMEOUT_MILLIS,
                 )
             }
-        }.isSuccess
-        assertFalse(
-            connected,
+            false
+        } catch (failure: Throwable) {
+            if (!task6IsExpectedTcpRejection(failure)) {
+                throw failure
+            }
+            true
+        }
+        assertTrue(
+            rejected,
             "A non-loopback host interface reached a loopback-only proof port",
         )
     }
@@ -837,10 +858,308 @@ class DovecotIsolationLiveTest {
     }
 }
 
+private fun task6MasterLogin(
+    targetAddress: String,
+    masterId: DovecotOperatorId,
+): String = "$targetAddress*${masterId.masterUsername}"
+
+private fun task6IsHostNonLoopbackIpv4(address: Inet4Address): Boolean =
+    !address.isAnyLocalAddress && !address.isLoopbackAddress
+
+private fun task6IsExpectedTcpRejection(failure: Throwable): Boolean =
+    failure is ConnectException ||
+        failure is NoRouteToHostException ||
+        failure is SocketTimeoutException
+
+private fun task6NetworkIsolationProcessTimeout(
+    hostCount: Int,
+): Duration {
+    require(hostCount in 1..TASK6_MAX_HOST_ADDRESSES) {
+        "Task 6 host IPv4 inventory is out of bounds"
+    }
+    val connectAttempts = Math.addExact(
+        hostCount,
+        TASK6_FIXED_CONNECT_ATTEMPTS,
+    )
+    val socketBudgetMillis = Math.multiplyExact(
+        connectAttempts.toLong(),
+        TASK6_SOCKET_TIMEOUT_MILLIS,
+    )
+    return Duration.ofMillis(
+        Math.addExact(
+            maxOf(
+                socketBudgetMillis,
+                TASK6_NETWORK_HELPER_WALL_MILLIS,
+            ),
+            TASK6_NETWORK_HELPER_MARGIN_MILLIS,
+        ),
+    )
+}
+
+private const val TASK6_MAX_HOST_ADDRESSES = 32
+private const val TASK6_FIXED_CONNECT_ATTEMPTS = 5
+private const val TASK6_SOCKET_TIMEOUT_MILLIS = 500L
+private const val TASK6_NETWORK_HELPER_WALL_MILLIS = 20_000L
+private const val TASK6_NETWORK_HELPER_MARGIN_MILLIS = 5_000L
+
+private class Task6FixedProcessRunner(
+    private val dockerRouting: DovecotDockerRouting,
+    private val isApprovedCommand: (List<String>) -> Boolean,
+    private val processFactory: ((EligibilityProcessRequest) -> Process)? = null,
+    private val captureFactory: (Int) -> EligibilityProcessOutputCapture = {
+        EligibilityProcessOutputCapture(it)
+    },
+) : EligibilityProcessRunner {
+    override fun run(
+        request: EligibilityProcessRequest,
+    ): EligibilityProcessResult {
+        require(isApprovedCommand(request.argv)) {
+            "Task 6 process command is not approved"
+        }
+        require(
+            request.workingDirectory.isAbsolute &&
+                request.workingDirectory.normalize() ==
+                request.workingDirectory &&
+                Files.isRegularFile(
+                    request.workingDirectory.resolve("docker-compose.yml"),
+                ),
+        ) {
+            "Task 6 process working directory is invalid"
+        }
+        require(
+            !request.timeout.isNegative &&
+                !request.timeout.isZero &&
+                request.stdin.size <= MAX_STDIN_BYTES &&
+                request.maximumOutputBytes in 1..MAX_OUTPUT_BYTES,
+        ) {
+            "Task 6 process bounds are invalid"
+        }
+
+        var process: Process? = null
+        var workers: ExecutorService? = null
+        var stdoutCapture: EligibilityProcessOutputCapture? = null
+        var stderrCapture: EligibilityProcessOutputCapture? = null
+        var stdinFuture: Future<*>? = null
+        var stdoutFuture: Future<*>? = null
+        var stderrFuture: Future<*>? = null
+        var stdout = ByteArray(0)
+        var stderr = ByteArray(0)
+        var interrupted = false
+        return try {
+            val started = processFactory?.invoke(request) ?:
+                ProcessBuilder(request.argv)
+                    .directory(request.workingDirectory.toFile())
+                    .also { builder ->
+                        dockerRouting.applyTo(builder.environment())
+                    }
+                    .start()
+            process = started
+            val ownedStdoutCapture =
+                captureFactory(request.maximumOutputBytes)
+            stdoutCapture = ownedStdoutCapture
+            val ownedStderrCapture =
+                captureFactory(request.maximumOutputBytes)
+            stderrCapture = ownedStderrCapture
+            val ownedWorkers = Executors.newFixedThreadPool(3) { runnable ->
+                Thread(runnable, "task6-fixed-process-io").also {
+                    it.isDaemon = true
+                }
+            }
+            workers = ownedWorkers
+            stdoutFuture = submitGuarded(ownedWorkers, started) {
+                ownedStdoutCapture.readFrom(started.inputStream)
+            }
+            stderrFuture = submitGuarded(ownedWorkers, started) {
+                ownedStderrCapture.readFrom(started.errorStream)
+            }
+            stdinFuture = submitGuarded(ownedWorkers, started) {
+                started.outputStream.use { output ->
+                    output.write(request.stdin)
+                    output.flush()
+                }
+            }
+
+            val completed = started.waitFor(
+                request.timeout.toMillis(),
+                TimeUnit.MILLISECONDS,
+            )
+            if (!completed) {
+                terminateAndReap(started) {
+                    interrupted = true
+                }
+                return EligibilityProcessResult(
+                    exitCode = null,
+                    timedOut = true,
+                    stdout = ByteArray(0),
+                    stderr = ByteArray(0),
+                )
+            }
+            stdinFuture.get(
+                IO_JOIN_TIMEOUT_SECONDS,
+                TimeUnit.SECONDS,
+            )
+            stdoutFuture.get(
+                IO_JOIN_TIMEOUT_SECONDS,
+                TimeUnit.SECONDS,
+            )
+            stderrFuture.get(
+                IO_JOIN_TIMEOUT_SECONDS,
+                TimeUnit.SECONDS,
+            )
+            stdout = ownedStdoutCapture.snapshot()
+            stderr = ownedStderrCapture.snapshot()
+            EligibilityProcessResult(
+                exitCode = started.exitValue(),
+                timedOut = false,
+                stdout = stdout,
+                stderr = stderr,
+            )
+        } catch (failure: Exception) {
+            stdout.fill(0)
+            stderr.fill(0)
+            if (failure is InterruptedException) {
+                interrupted = true
+            }
+            throw IllegalStateException("Task 6 fixed process failed")
+        } finally {
+            stdoutCapture?.close()
+            stderrCapture?.close()
+            var cleanupFailure: Throwable? = null
+            process?.let { started ->
+                try {
+                    terminateAndReap(started) {
+                        interrupted = true
+                    }
+                } catch (failure: Throwable) {
+                    cleanupFailure = failure
+                }
+            }
+            stdinFuture?.cancel(true)
+            stdoutFuture?.cancel(true)
+            stderrFuture?.cancel(true)
+            workers?.shutdownNow()
+            val workersStopped = try {
+                workers?.let { executor ->
+                    awaitTermination(
+                        executor,
+                        IO_JOIN_TIMEOUT_SECONDS,
+                    ) {
+                        interrupted = true
+                    }
+                } ?: true
+            } catch (failure: Throwable) {
+                if (cleanupFailure == null) {
+                    cleanupFailure = failure
+                }
+                false
+            }
+            if (!workersStopped && cleanupFailure == null) {
+                cleanupFailure =
+                    IllegalStateException(
+                        "Task 6 fixed process workers did not stop",
+                    )
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt()
+            }
+            if (cleanupFailure != null) {
+                throw IllegalStateException(
+                    "Task 6 fixed process cleanup failed",
+                )
+            }
+        }
+    }
+
+    private fun awaitTermination(
+        workers: ExecutorService,
+        timeoutSeconds: Long,
+        onInterrupted: () -> Unit,
+    ): Boolean {
+        val deadline =
+            System.nanoTime() +
+                TimeUnit.SECONDS.toNanos(timeoutSeconds)
+        while (true) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0L) return workers.isTerminated
+            try {
+                return workers.awaitTermination(
+                    remaining,
+                    TimeUnit.NANOSECONDS,
+                )
+            } catch (_: InterruptedException) {
+                onInterrupted()
+            }
+        }
+    }
+
+    private fun submitGuarded(
+        workers: ExecutorService,
+        process: Process,
+        operation: () -> Unit,
+    ): Future<*> = workers.submit {
+        try {
+            operation()
+        } catch (failure: Throwable) {
+            runCatching {
+                if (process.isAlive) process.destroyForcibly()
+            }
+            throw failure
+        }
+    }
+
+    private fun terminateAndReap(
+        process: Process,
+        onInterrupted: () -> Unit,
+    ) {
+        if (process.isAlive) {
+            process.destroyForcibly()
+        }
+        closeProcessStreams(process)
+        val deadline =
+            System.nanoTime() +
+                TimeUnit.SECONDS.toNanos(
+                    IO_JOIN_TIMEOUT_SECONDS,
+                )
+        var reaped = false
+        while (!reaped) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0L) break
+            try {
+                reaped = process.waitFor(
+                    remaining,
+                    TimeUnit.NANOSECONDS,
+                )
+            } catch (_: InterruptedException) {
+                onInterrupted()
+            }
+        }
+        check(reaped && !process.isAlive) {
+            "Task 6 fixed process could not be reaped"
+        }
+        closeProcessStreams(process)
+    }
+
+    private fun closeProcessStreams(process: Process) {
+        runCatching { process.outputStream.close() }
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
+    }
+
+    companion object {
+        private const val MAX_STDIN_BYTES = 1024
+        private const val MAX_OUTPUT_BYTES = 64 * 1024
+        private const val IO_JOIN_TIMEOUT_SECONDS = 2L
+    }
+}
+
 private class FixedTask6DockerTopology(
     private val profile: DovecotTask5ProofProfile,
 ) {
     private val repositoryRoot = profile.repositoryRoot
+    private val processRunner = Task6FixedProcessRunner(
+        dockerRouting = DovecotDockerRouting.task5Proof(profile),
+        isApprovedCommand = ::isFixedCommand,
+    )
 
     fun inspect(): Task6RuntimeTopology {
         val containers = FIXED_SERVICES.associateWith(::composeContainerId)
@@ -866,6 +1185,8 @@ private class FixedTask6DockerTopology(
         operatorIngressAddress: String,
         hostAddresses: List<Inet4Address>,
     ) {
+        val processTimeout =
+            task6NetworkIsolationProcessTimeout(hostAddresses.size)
         val input = buildString {
             append("operator ")
             append(operatorIngressAddress)
@@ -889,6 +1210,7 @@ private class FixedTask6DockerTopology(
                     "/proof/network-isolation-check.py",
                 ),
                 input,
+                processTimeout,
             )
             check(result.exitCode == 0) {
                 "Default-network isolation helper failed: " +
@@ -946,79 +1268,50 @@ private class FixedTask6DockerTopology(
     private fun runFixed(
         command: List<String>,
         stdin: ByteArray,
+        timeout: Duration = PROCESS_TIMEOUT,
     ): FixedProcessResult {
-        require(
-            command in FIXED_COMMANDS ||
-                (
-                    command.size == 5 &&
-                        command.take(4) ==
-                        listOf("docker", "compose", "ps", "--quiet") &&
-                        command.last() in FIXED_SERVICES
-                    ) ||
-                (
-                    command.size == 5 &&
-                        command.take(3) ==
-                        listOf("docker", "inspect", "--format") &&
-                        command[3] in setOf(PORTS_FORMAT, NETWORKS_FORMAT) &&
-                        CONTAINER_ID.matches(command[4])
-                    ),
-        ) {
-            "Task 6 process command is not fixed"
-        }
-        val stdout = Files.createTempFile("task6-process-out-", ".txt")
-        val stderr = Files.createTempFile("task6-process-err-", ".txt")
-        var process: Process? = null
+        val result = processRunner.run(
+            EligibilityProcessRequest(
+                argv = command,
+                workingDirectory = repositoryRoot,
+                stdin = stdin,
+                timeout = timeout,
+                maximumOutputBytes = MAX_PROCESS_OUTPUT_BYTES,
+            ),
+        )
         try {
-            val builder = ProcessBuilder(command)
-                .directory(repositoryRoot.toFile())
-                .redirectOutput(stdout.toFile())
-                .redirectError(stderr.toFile())
-            builder.environment().keys
-                .filter {
-                    it.startsWith("COMPOSE_") ||
-                        it.startsWith("DOCKER_")
-                }
-                .toList()
-                .forEach(builder.environment()::remove)
-            builder.environment().putAll(profile.dockerRoutingEnvironment)
-            process = builder.start()
-            process.outputStream.use { it.write(stdin) }
             check(
-                process.waitFor(PROCESS_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS),
+                !result.timedOut &&
+                    result.exitCode != null,
             ) {
-                process.destroyForcibly()
                 "Task 6 fixed process timed out"
             }
-            val outBytes = Files.newInputStream(stdout).use { input ->
-                input.readNBytes(MAX_PROCESS_OUTPUT_BYTES + 1)
-            }
-            val errBytes = Files.newInputStream(stderr).use { input ->
-                input.readNBytes(MAX_PROCESS_OUTPUT_BYTES + 1)
-            }
-            try {
-                check(
-                    outBytes.size <= MAX_PROCESS_OUTPUT_BYTES &&
-                        errBytes.size <= MAX_PROCESS_OUTPUT_BYTES,
-                ) {
-                    "Task 6 fixed process output exceeded its bound"
-                }
-                return FixedProcessResult(
-                    exitCode = process.exitValue(),
-                    stdout = outBytes.toString(StandardCharsets.UTF_8),
-                    stderr = errBytes.toString(StandardCharsets.UTF_8),
-                )
-            } finally {
-                outBytes.fill(0)
-                errBytes.fill(0)
-            }
+            return FixedProcessResult(
+                exitCode = requireNotNull(result.exitCode),
+                stdout = result.stdout.toString(StandardCharsets.UTF_8),
+                stderr = result.stderr.toString(StandardCharsets.UTF_8),
+            )
         } finally {
-            process?.let {
-                if (it.isAlive) it.destroyForcibly()
-            }
-            Files.deleteIfExists(stdout)
-            Files.deleteIfExists(stderr)
+            result.stdout.fill(0)
+            result.stderr.fill(0)
         }
     }
+
+    private fun isFixedCommand(command: List<String>): Boolean =
+        command in FIXED_COMMANDS ||
+            (
+                command.size == 5 &&
+                    command.take(4) ==
+                    listOf("docker", "compose", "ps", "--quiet") &&
+                    command.last() in FIXED_SERVICES
+                ) ||
+            (
+                command.size == 5 &&
+                    command.take(3) ==
+                    listOf("docker", "inspect", "--format") &&
+                    command[3] in setOf(PORTS_FORMAT, NETWORKS_FORMAT) &&
+                    CONTAINER_ID.matches(command[4])
+                )
 
     private data class FixedProcessResult(
         val exitCode: Int,
@@ -1061,17 +1354,30 @@ private data class Task6RuntimeTopology(
     val operatorIngressAddress: String,
 ) {
     fun requireExactIsolation() {
+        requireExactPublishedPorts(
+            service = "dovecot-operator",
+            expected = setOf("31993/tcp"),
+        )
         requirePort(
             service = "dovecot-operator",
             containerPort = "31993/tcp",
             hostPort = "2993",
         )
-        check(ports.getValue("dovecot-operator").jsonObject.keys == setOf("31993/tcp")) {
-            "Operator runtime has an unexpected protocol publication"
-        }
+        requireExactPublishedPorts(
+            service = "dovecot",
+            expected = setOf("31993/tcp", "31990/tcp"),
+        )
         requirePort("dovecot", "31993/tcp", "1993")
         requirePort("dovecot", "31990/tcp", "21995")
+        requireExactPublishedPorts(
+            service = "postfix",
+            expected = setOf("25/tcp"),
+        )
         requirePort("postfix", "25/tcp", "21025")
+        requireExactPublishedPorts(
+            service = "oauth2-mock",
+            expected = setOf("8080/tcp"),
+        )
         requirePort("oauth2-mock", "8080/tcp", "28080")
 
         val operatorNetworks =
@@ -1087,6 +1393,22 @@ private data class Task6RuntimeTopology(
         }
         check(IPV4.matches(operatorIngressAddress)) {
             "Operator ingress address discovery failed"
+        }
+    }
+
+    private fun requireExactPublishedPorts(
+        service: String,
+        expected: Set<String>,
+    ) {
+        val published = ports.getValue(service)
+            .jsonObject
+            .filterValues { bindings ->
+                bindings !is JsonNull &&
+                    (bindings !is JsonArray || bindings.isNotEmpty())
+            }
+            .keys
+        check(published == expected) {
+            "Proof runtime has an unexpected protocol publication"
         }
     }
 
@@ -1118,5 +1440,406 @@ private data class Task6RuntimeTopology(
         private val IPV4 = Regex(
             "(?:[0-9]{1,3}\\.){3}[0-9]{1,3}",
         )
+    }
+}
+
+class DovecotIsolationContractTest {
+    @Test
+    fun ordinaryPasswordEscalationUsesTheActualActiveMasterIdentity() {
+        assertEquals(
+            "target@local.test*dashboard-operator-a",
+            task6MasterLogin(
+                "target@local.test",
+                DovecotOperatorId.A,
+            ),
+        )
+        assertEquals(
+            "target@local.test*dashboard-operator-b",
+            task6MasterLogin(
+                "target@local.test",
+                DovecotOperatorId.B,
+            ),
+        )
+    }
+
+    @Test
+    fun hostAddressDiscoveryKeepsLinkLocalIpv4InScope() {
+        val linkLocal = InetAddress.getByAddress(
+            byteArrayOf(169.toByte(), 254.toByte(), 1, 2),
+        ) as Inet4Address
+        val loopback = InetAddress.getByAddress(
+            byteArrayOf(127, 0, 0, 1),
+        ) as Inet4Address
+        val wildcard = InetAddress.getByAddress(
+            byteArrayOf(0, 0, 0, 0),
+        ) as Inet4Address
+
+        assertTrue(task6IsHostNonLoopbackIpv4(linkLocal))
+        assertFalse(task6IsHostNonLoopbackIpv4(loopback))
+        assertFalse(task6IsHostNonLoopbackIpv4(wildcard))
+    }
+
+    @Test
+    fun hostTcpNegativeAcceptsOnlyExpectedNetworkRejections() {
+        assertTrue(task6IsExpectedTcpRejection(ConnectException()))
+        assertTrue(task6IsExpectedTcpRejection(NoRouteToHostException()))
+        assertTrue(task6IsExpectedTcpRejection(SocketTimeoutException()))
+        assertFalse(task6IsExpectedTcpRejection(IOException()))
+        assertFalse(task6IsExpectedTcpRejection(IllegalStateException()))
+    }
+
+    @Test
+    fun runtimeTopologyIgnoresUnboundExposedPorts() {
+        runtimeTopology(includeUnboundPorts = true).requireExactIsolation()
+    }
+
+    @Test
+    fun runtimeTopologyRejectsUnexpectedPublishedPortsForEveryService() {
+        listOf(
+            "dovecot",
+            "postfix",
+            "oauth2-mock",
+            "dovecot-operator",
+        ).forEach { service ->
+            assertFailsWith<IllegalStateException>(service) {
+                runtimeTopology(extraPublishedService = service)
+                    .requireExactIsolation()
+            }
+        }
+    }
+
+    @Test
+    fun worstCaseNetworkHelperTimeoutExceedsItsSocketAttemptBudget() {
+        val minimumHostTimeout = task6NetworkIsolationProcessTimeout(1)
+        val maximumHostTimeout = task6NetworkIsolationProcessTimeout(32)
+
+        assertEquals(Duration.ofSeconds(25), minimumHostTimeout)
+        assertEquals(Duration.ofSeconds(25), maximumHostTimeout)
+        assertTrue(minimumHostTimeout > Duration.ofSeconds(20))
+        assertTrue(maximumHostTimeout > Duration.ofMillis(18_500))
+        assertTrue(maximumHostTimeout <= Duration.ofSeconds(30))
+    }
+
+    @Test
+    fun pythonAndKotlinNetworkHelperWallDeadlinesStayAligned() {
+        val helperSource = Files.readString(
+            repositoryRoot().resolve(
+                "debug-dashboard/dashboard-server/testResources/" +
+                    "dovecot-gate0c/network-isolation-check.py",
+            ),
+        )
+        val wallSeconds = requireNotNull(
+            Regex(
+                """(?m)^MAX_WALL_SECONDS = ([0-9]+(?:\.[0-9]+)?)$""",
+            ).find(helperSource),
+        ).groupValues[1].toDouble()
+
+        assertEquals(
+            TASK6_NETWORK_HELPER_WALL_MILLIS,
+            (wallSeconds * 1_000).toLong(),
+        )
+    }
+
+    @Test
+    fun fixedProcessRunnerAcceptsOutputAtTheConfiguredMemoryLimit() {
+        val stdout = ByteArray(8) { 'x'.code.toByte() }
+        val process = Task6ControlledProcess(
+            stdout = stdout,
+            initiallyExited = true,
+        )
+        val runner = fixedProcessRunner(process)
+
+        val result = runner.run(
+            processRequest(maximumOutputBytes = stdout.size),
+        )
+
+        assertFalse(result.timedOut)
+        assertEquals(0, result.exitCode)
+        assertEquals(stdout.toList(), result.stdout.toList())
+        assertTrue(result.stderr.isEmpty())
+    }
+
+    @Test
+    fun fixedProcessRunnerKillsAndReapsOnOutputOverflow() {
+        val process = Task6ControlledProcess(
+            stdout = ByteArray(9) { 'x'.code.toByte() },
+        )
+        val runner = fixedProcessRunner(process)
+
+        assertFailsWith<IllegalStateException> {
+            runner.run(processRequest(maximumOutputBytes = 8))
+        }
+
+        assertTrue(process.destroyed)
+        assertTrue(process.reaped)
+        assertFalse(process.isAlive)
+    }
+
+    @Test
+    fun fixedProcessRunnerKillsAndReapsOnTimeout() {
+        val process = Task6ControlledProcess(
+            stdout = ByteArray(0),
+            timeoutBeforeDestroy = true,
+        )
+        val runner = fixedProcessRunner(process)
+
+        val result = runner.run(
+            processRequest(
+                timeout = Duration.ofMillis(25),
+                maximumOutputBytes = 8,
+            ),
+        )
+
+        assertTrue(result.timedOut)
+        assertEquals(null, result.exitCode)
+        assertTrue(process.destroyed)
+        assertTrue(process.reaped)
+        assertFalse(process.isAlive)
+    }
+
+    @Test
+    fun fixedProcessRunnerRejectsOversizedInputBeforeStarting() {
+        var started = false
+        val runner = Task6FixedProcessRunner(
+            dockerRouting = DovecotDockerRouting.localDefault(),
+            isApprovedCommand = { it == FIXED_TEST_COMMAND },
+            processFactory = {
+                started = true
+                Task6ControlledProcess(ByteArray(0))
+            },
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            runner.run(
+                processRequest(
+                    stdin = ByteArray(1_025),
+                    maximumOutputBytes = 8,
+                ),
+            )
+        }
+
+        assertFalse(started)
+    }
+
+    @Test
+    fun fixedProcessRunnerReapsBeforeRestoringCallerInterruption() {
+        val waitEntered = CountDownLatch(1)
+        val process = Task6ControlledProcess(
+            stdout = ByteArray(0),
+            waitEntered = waitEntered,
+        )
+        val runner = fixedProcessRunner(process)
+        val failure = AtomicReference<Throwable?>()
+        val interruptRestored = AtomicBoolean()
+        val caller = Thread(
+            {
+                try {
+                    runner.run(
+                        processRequest(
+                            timeout = Duration.ofSeconds(5),
+                            maximumOutputBytes = 8,
+                        ),
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                    interruptRestored.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                }
+            },
+            "task6-interrupted-runner-test",
+        ).also { it.isDaemon = true }
+
+        caller.start()
+        assertTrue(waitEntered.await(1, TimeUnit.SECONDS))
+        caller.interrupt()
+        caller.join(3_000)
+
+        assertFalse(caller.isAlive)
+        assertTrue(failure.get() is IllegalStateException)
+        assertTrue(interruptRestored.get())
+        assertTrue(process.destroyed)
+        assertTrue(process.reaped)
+        assertFalse(process.isAlive)
+        assertFalse(
+            Thread.getAllStackTraces().keys.any { thread ->
+                thread.isAlive &&
+                    thread.name == "task6-fixed-process-io"
+            },
+        )
+    }
+
+    private fun fixedProcessRunner(
+        process: Task6ControlledProcess,
+    ): Task6FixedProcessRunner =
+        Task6FixedProcessRunner(
+            dockerRouting = DovecotDockerRouting.localDefault(),
+            isApprovedCommand = { it == FIXED_TEST_COMMAND },
+            processFactory = { process },
+        )
+
+    private fun processRequest(
+        stdin: ByteArray = ByteArray(0),
+        timeout: Duration = Duration.ofSeconds(1),
+        maximumOutputBytes: Int,
+    ): EligibilityProcessRequest =
+        EligibilityProcessRequest(
+            argv = FIXED_TEST_COMMAND,
+            workingDirectory = repositoryRoot(),
+            stdin = stdin,
+            timeout = timeout,
+            maximumOutputBytes = maximumOutputBytes,
+        )
+
+    private fun runtimeTopology(
+        extraPublishedService: String? = null,
+        includeUnboundPorts: Boolean = false,
+    ): Task6RuntimeTopology {
+        val ports = mapOf(
+            "dovecot" to portDocument(
+                service = "dovecot",
+                expected = listOf(
+                    "31993/tcp" to "1993",
+                    "31990/tcp" to "21995",
+                ),
+                extraPublishedService = extraPublishedService,
+                includeUnboundPorts = includeUnboundPorts,
+            ),
+            "dovecot-operator" to portDocument(
+                service = "dovecot-operator",
+                expected = listOf("31993/tcp" to "2993"),
+                extraPublishedService = extraPublishedService,
+                includeUnboundPorts = includeUnboundPorts,
+            ),
+            "postfix" to portDocument(
+                service = "postfix",
+                expected = listOf("25/tcp" to "21025"),
+                extraPublishedService = extraPublishedService,
+                includeUnboundPorts = includeUnboundPorts,
+            ),
+            "oauth2-mock" to portDocument(
+                service = "oauth2-mock",
+                expected = listOf("8080/tcp" to "28080"),
+                extraPublishedService = extraPublishedService,
+                includeUnboundPorts = includeUnboundPorts,
+            ),
+        )
+        val defaultNetwork = Json.parseToJsonElement(
+            """{"mail-sandbox-task5-proof_default":{}}""",
+        )
+        val operatorNetwork = Json.parseToJsonElement(
+            """{"mail-sandbox-task5-proof_operator-ingress":{}}""",
+        )
+        return Task6RuntimeTopology(
+            ports = ports,
+            networks = mapOf(
+                "dovecot" to defaultNetwork,
+                "dovecot-operator" to operatorNetwork,
+                "postfix" to defaultNetwork,
+                "oauth2-mock" to defaultNetwork,
+            ),
+            operatorIngressAddress = "172.31.0.5",
+        )
+    }
+
+    private fun portDocument(
+        service: String,
+        expected: List<Pair<String, String>>,
+        extraPublishedService: String?,
+        includeUnboundPorts: Boolean,
+    ): kotlinx.serialization.json.JsonElement {
+        val entries = expected.map { (containerPort, hostPort) ->
+            """"$containerPort":[{"HostIp":"127.0.0.1","HostPort":"$hostPort"}]"""
+        }.toMutableList()
+        if (includeUnboundPorts) {
+            entries += """"65534/tcp":null"""
+            entries += """"65533/tcp":[]"""
+        }
+        if (service == extraPublishedService) {
+            entries +=
+                """"65535/tcp":[{"HostIp":"127.0.0.1","HostPort":"65535"}]"""
+        }
+        return Json.parseToJsonElement("{${entries.joinToString(",")}}")
+    }
+
+    private fun repositoryRoot(): Path {
+        val workingDirectory = Path.of(System.getProperty("user.dir"))
+            .toAbsolutePath()
+            .normalize()
+        val dashboardRoot = when (workingDirectory.fileName?.toString()) {
+            "dashboard-server" -> workingDirectory.parent
+            "debug-dashboard" -> workingDirectory
+            else -> error("unexpected Kotlin test working directory")
+        }
+        return requireNotNull(dashboardRoot.parent)
+    }
+
+    private class Task6ControlledProcess(
+        stdout: ByteArray,
+        private val timeoutBeforeDestroy: Boolean = false,
+        private val waitEntered: CountDownLatch? = null,
+        initiallyExited: Boolean = false,
+    ) : Process() {
+        private val termination =
+            CountDownLatch(if (initiallyExited) 0 else 1)
+        private val stdin = ByteArrayOutputStream()
+        private val stdoutStream = ByteArrayInputStream(stdout)
+        private val stderrStream = ByteArrayInputStream(ByteArray(0))
+
+        @Volatile
+        private var alive = !initiallyExited
+
+        @Volatile
+        var destroyed = false
+            private set
+
+        @Volatile
+        var reaped = false
+            private set
+
+        override fun getOutputStream(): OutputStream = stdin
+
+        override fun getInputStream(): InputStream = stdoutStream
+
+        override fun getErrorStream(): InputStream = stderrStream
+
+        override fun waitFor(): Int {
+            termination.await()
+            reaped = true
+            return exitValue()
+        }
+
+        override fun waitFor(
+            timeout: Long,
+            unit: TimeUnit,
+        ): Boolean {
+            waitEntered?.countDown()
+            if (timeoutBeforeDestroy && alive) return false
+            val completed = termination.await(timeout, unit)
+            if (completed) reaped = true
+            return completed
+        }
+
+        override fun exitValue(): Int {
+            if (alive) throw IllegalThreadStateException()
+            return if (destroyed) 137 else 0
+        }
+
+        override fun destroy() {
+            destroyForcibly()
+        }
+
+        override fun destroyForcibly(): Process {
+            destroyed = true
+            alive = false
+            termination.countDown()
+            return this
+        }
+
+        override fun isAlive(): Boolean = alive
+    }
+
+    companion object {
+        private val FIXED_TEST_COMMAND = listOf("task6-fixed-test")
     }
 }

@@ -206,6 +206,17 @@ internal class DovecotOperatorProbe(
                             TaggedCompletion.Bad,
                             -> return DovecotOperatorProbeResult.ProtocolFailure
                         }
+                        val selectedUid = searchFirstMessageUid(
+                            input = opened.input,
+                            output = opened.outputStream,
+                            deadline = deadline,
+                        )
+                        fetchAndValidateMessageId(
+                            input = opened.input,
+                            output = opened.outputStream,
+                            uid = selectedUid,
+                            deadline = deadline,
+                        )
                     }
                     requireBeforeDeadline(deadline)
                     if (timedOut.get()) {
@@ -276,6 +287,333 @@ internal class DovecotOperatorProbe(
             }
         }
         throw DovecotOperatorProtocolException()
+    }
+
+    private fun searchFirstMessageUid(
+        input: InputStream,
+        output: OutputStream,
+        deadline: Long,
+    ): Long {
+        writeFixedCommand(
+            output = output,
+            command = UID_SEARCH_COMMAND,
+            deadline = deadline,
+        )
+        var selectedUid: Long? = null
+        repeat(MAX_RESPONSE_LINES) {
+            readLine(input, deadline).useBytes { line ->
+                if (line.startsWithToken(SEARCH_RESPONSE_PREFIX)) {
+                    if (selectedUid != null) {
+                        throw DovecotOperatorProtocolException()
+                    }
+                    selectedUid = parseSearchUids(line)
+                }
+                if (line.startsWithToken(SEARCH_TAG)) {
+                    if (
+                        taggedCompletion(line, SEARCH_TAG) !=
+                        TaggedCompletion.Ok
+                    ) {
+                        throw DovecotOperatorProtocolException()
+                    }
+                    return selectedUid ?:
+                        throw DovecotOperatorProtocolException()
+                }
+            }
+        }
+        throw DovecotOperatorProtocolException()
+    }
+
+    private fun parseSearchUids(line: ByteArray): Long {
+        var cursor = SEARCH_RESPONSE_PREFIX.size
+        var selectedUid: Long? = null
+        var previousUid = 0L
+        while (cursor < line.size) {
+            if (line[cursor] != SPACE) {
+                throw DovecotOperatorProtocolException()
+            }
+            cursor += 1
+            if (cursor == line.size || line[cursor] == SPACE) {
+                throw DovecotOperatorProtocolException()
+            }
+            val parsed = parseDecimal(
+                bytes = line,
+                offset = cursor,
+                maximum = MAX_IMAP_NUMBER,
+            )
+            val uid = parsed.value
+            if (uid <= previousUid) {
+                throw DovecotOperatorProtocolException()
+            }
+            if (selectedUid == null) {
+                selectedUid = uid
+            }
+            previousUid = uid
+            cursor = parsed.nextOffset
+        }
+        return selectedUid ?: throw DovecotOperatorProtocolException()
+    }
+
+    private fun fetchAndValidateMessageId(
+        input: InputStream,
+        output: OutputStream,
+        uid: Long,
+        deadline: Long,
+    ) {
+        writeUidFetch(
+            output = output,
+            uid = uid,
+            deadline = deadline,
+        )
+        var sawFetch = false
+        repeat(MAX_RESPONSE_LINES) {
+            readLine(input, deadline).useBytes { line ->
+                val literalSize = parseFetchMarkerOrNull(
+                    line = line,
+                    expectedUid = uid,
+                )
+                if (literalSize != null) {
+                    if (sawFetch) {
+                        throw DovecotOperatorProtocolException()
+                    }
+                    sawFetch = true
+                    readLiteral(input, literalSize, deadline).useBytes { literal ->
+                        requireValidMessageIdLiteral(literal)
+                    }
+                    readLine(input, deadline).useBytes { closingLine ->
+                        if (!closingLine.contentEquals(FETCH_CLOSING_LINE)) {
+                            throw DovecotOperatorProtocolException()
+                        }
+                    }
+                } else if (line.startsWithToken(FETCH_TAG)) {
+                    if (
+                        taggedCompletion(line, FETCH_TAG) !=
+                        TaggedCompletion.Ok ||
+                        !sawFetch
+                    ) {
+                        throw DovecotOperatorProtocolException()
+                    }
+                    return
+                }
+            }
+        }
+        throw DovecotOperatorProtocolException()
+    }
+
+    private fun parseFetchMarkerOrNull(
+        line: ByteArray,
+        expectedUid: Long,
+    ): Int? {
+        if (
+            line.size < MINIMUM_FETCH_MARKER_BYTES ||
+            line[0] != ASTERISK ||
+            line[1] != SPACE
+        ) {
+            return null
+        }
+        var cursor = 2
+        val sequence = parseDecimalOrNull(
+            bytes = line,
+            offset = cursor,
+            maximum = MAX_IMAP_NUMBER,
+        ) ?: return null
+        cursor = sequence.nextOffset
+        if (cursor >= line.size || line[cursor] != SPACE) {
+            return null
+        }
+        cursor += 1
+        if (!line.matchesAsciiIgnoreCase(cursor, FETCH_TOKEN)) {
+            return null
+        }
+        cursor += FETCH_TOKEN.size
+        if (cursor >= line.size || line[cursor] != SPACE) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor += 1
+        if (!line.matchesAsciiIgnoreCase(cursor, FETCH_UID_PREFIX)) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor += FETCH_UID_PREFIX.size
+        val uid = parseDecimal(
+            bytes = line,
+            offset = cursor,
+            maximum = MAX_IMAP_NUMBER,
+        )
+        if (uid.value != expectedUid) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor = uid.nextOffset
+        if (cursor >= line.size || line[cursor] != SPACE) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor += 1
+        if (!line.matchesAsciiIgnoreCase(cursor, FETCH_LITERAL_PREFIX)) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor += FETCH_LITERAL_PREFIX.size
+        val literalSize = parseDecimal(
+            bytes = line,
+            offset = cursor,
+            maximum = MAX_MESSAGE_ID_LITERAL_BYTES.toLong(),
+        )
+        cursor = literalSize.nextOffset
+        if (
+            cursor + 1 != line.size ||
+            line[cursor] != CLOSE_BRACE
+        ) {
+            throw DovecotOperatorProtocolException()
+        }
+        return literalSize.value.toInt()
+    }
+
+    private fun readLiteral(
+        input: InputStream,
+        size: Int,
+        deadline: Long,
+    ): ByteArray {
+        val literal = ByteArray(size)
+        try {
+            var offset = 0
+            while (offset < literal.size) {
+                requireBeforeDeadline(deadline)
+                val count = input.read(
+                    literal,
+                    offset,
+                    literal.size - offset,
+                )
+                requireBeforeDeadline(deadline)
+                if (count <= 0) {
+                    throw IOException(
+                        "Dovecot operator response was truncated",
+                    )
+                }
+                offset += count
+            }
+            return literal
+        } catch (failure: Throwable) {
+            literal.fill(0)
+            throw failure
+        }
+    }
+
+    private fun requireValidMessageIdLiteral(literal: ByteArray) {
+        if (
+            literal.size < MINIMUM_MESSAGE_ID_LITERAL_BYTES ||
+            !literal.matchesAsciiIgnoreCase(0, MESSAGE_ID_PREFIX) ||
+            !literal.endsWith(CRLF_CRLF)
+        ) {
+            throw DovecotOperatorProtocolException()
+        }
+        var cursor = MESSAGE_ID_PREFIX.size
+        while (
+            cursor < literal.size &&
+            (literal[cursor] == SPACE || literal[cursor] == HORIZONTAL_TAB)
+        ) {
+            cursor += 1
+        }
+        if (cursor >= literal.size || literal[cursor] != OPEN_ANGLE) {
+            throw DovecotOperatorProtocolException()
+        }
+        cursor += 1
+        val valueStart = cursor
+        var atOffset = -1
+        while (cursor < literal.size && literal[cursor] != CLOSE_ANGLE) {
+            val value = literal[cursor]
+            if (value == AT_SIGN) {
+                if (atOffset >= 0) {
+                    throw DovecotOperatorProtocolException()
+                }
+                atOffset = cursor
+            } else if (value != DOT && !value.isMessageIdAtext()) {
+                throw DovecotOperatorProtocolException()
+            }
+            cursor += 1
+        }
+        if (
+            atOffset <= valueStart ||
+            atOffset >= cursor - 1 ||
+            cursor >= literal.size ||
+            literal[cursor] != CLOSE_ANGLE
+        ) {
+            throw DovecotOperatorProtocolException()
+        }
+        requireMessageIdDotAtom(literal, valueStart, atOffset)
+        requireMessageIdDotAtom(literal, atOffset + 1, cursor)
+        cursor += 1
+        if (
+            cursor + CRLF_CRLF.size != literal.size ||
+            !literal.matchesBytes(cursor, CRLF_CRLF)
+        ) {
+            throw DovecotOperatorProtocolException()
+        }
+    }
+
+    private fun requireMessageIdDotAtom(
+        literal: ByteArray,
+        start: Int,
+        end: Int,
+    ) {
+        var previousWasDot = true
+        for (index in start until end) {
+            val value = literal[index]
+            if (value == DOT) {
+                if (previousWasDot) {
+                    throw DovecotOperatorProtocolException()
+                }
+                previousWasDot = true
+            } else {
+                if (!value.isMessageIdAtext()) {
+                    throw DovecotOperatorProtocolException()
+                }
+                previousWasDot = false
+            }
+        }
+        if (previousWasDot) {
+            throw DovecotOperatorProtocolException()
+        }
+    }
+
+    private fun Byte.isMessageIdAtext(): Boolean =
+        this in 'A'.code.toByte()..'Z'.code.toByte() ||
+            this in 'a'.code.toByte()..'z'.code.toByte() ||
+            this in '0'.code.toByte()..'9'.code.toByte() ||
+            this in MESSAGE_ID_ATEXT_SPECIALS
+
+    private fun writeUidFetch(
+        output: OutputStream,
+        uid: Long,
+        deadline: Long,
+    ) {
+        val uidBytes = uid.toString().toByteArray(Charsets.US_ASCII)
+        val command = ByteArray(
+            UID_FETCH_COMMAND_PREFIX.size +
+                uidBytes.size +
+                UID_FETCH_COMMAND_SUFFIX.size,
+        )
+        try {
+            var offset = command.copyAt(0, UID_FETCH_COMMAND_PREFIX)
+            offset = command.copyAt(offset, uidBytes)
+            command.copyAt(offset, UID_FETCH_COMMAND_SUFFIX)
+            writeCommand(output, command, deadline)
+        } finally {
+            uidBytes.fill(0)
+            command.fill(0)
+        }
+    }
+
+    private fun taggedCompletion(
+        line: ByteArray,
+        tag: ByteArray,
+    ): TaggedCompletion {
+        val statusOffset = tag.size + 1
+        return when {
+            line.hasTokenAt(statusOffset, STATUS_OK) ->
+                TaggedCompletion.Ok
+            line.hasTokenAt(statusOffset, STATUS_NO) ->
+                TaggedCompletion.No
+            line.hasTokenAt(statusOffset, STATUS_BAD) ->
+                TaggedCompletion.Bad
+            else -> throw DovecotOperatorProtocolException()
+        }
     }
 
     private fun readLine(
@@ -484,12 +822,35 @@ internal class DovecotOperatorProbe(
         private const val MAX_RESPONSE_LINES = 64
         private const val LINE_FEED = 0x0a
         private const val CARRIAGE_RETURN = 0x0d
+        private const val MAX_IMAP_NUMBER = 4_294_967_295L
+        private const val MAX_MESSAGE_ID_LITERAL_BYTES = 1024
+        private const val MINIMUM_FETCH_MARKER_BYTES = 10
+        private const val MINIMUM_MESSAGE_ID_LITERAL_BYTES = 20
+        private val SPACE = ' '.code.toByte()
+        private val HORIZONTAL_TAB = '\t'.code.toByte()
+        private val ASTERISK = '*'.code.toByte()
+        private val OPEN_ANGLE = '<'.code.toByte()
+        private val CLOSE_ANGLE = '>'.code.toByte()
+        private val AT_SIGN = '@'.code.toByte()
+        private val DOT = '.'.code.toByte()
+        private val CLOSE_BRACE = '}'.code.toByte()
+        private val MESSAGE_ID_ATEXT_SPECIALS =
+            "!#$%&'*+-/=?^_`{|}~".toByteArray(Charsets.US_ASCII)
 
         private val GREETING_OK = ascii("* OK")
         private val LOGIN_TAG = ascii("A001")
         private val LIST_TAG = ascii("A002")
         private val EXAMINE_TAG = ascii("A003")
+        private val SEARCH_TAG = ascii("A004")
+        private val FETCH_TAG = ascii("A005")
         private val LIST_RESPONSE_PREFIX = ascii("* LIST")
+        private val SEARCH_RESPONSE_PREFIX = ascii("* SEARCH")
+        private val FETCH_TOKEN = ascii("FETCH")
+        private val FETCH_UID_PREFIX = ascii("(UID ")
+        private val FETCH_LITERAL_PREFIX =
+            ascii("BODY[HEADER.FIELDS (MESSAGE-ID)] {")
+        private val FETCH_CLOSING_LINE = ascii(")")
+        private val MESSAGE_ID_PREFIX = ascii("Message-ID:")
         private val STATUS_OK = ascii("OK")
         private val STATUS_NO = ascii("NO")
         private val STATUS_BAD = ascii("BAD")
@@ -502,6 +863,15 @@ internal class DovecotOperatorProbe(
         private val LIST_COMMAND = ascii("A002 LIST \"\" \"INBOX\"\r\n")
         private val EXAMINE_INBOX_COMMAND =
             ascii("A003 EXAMINE \"INBOX\"\r\n")
+        private val UID_SEARCH_COMMAND =
+            ascii("A004 UID SEARCH ALL\r\n")
+        private val UID_FETCH_COMMAND_PREFIX =
+            ascii("A005 UID FETCH ")
+        private val UID_FETCH_COMMAND_SUFFIX =
+            ascii(
+                " (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])\r\n",
+            )
+        private val CRLF_CRLF = ascii("\r\n\r\n")
         private val BASE64_ENCODER = Base64.getEncoder()
         private const val MAX_AUTH_RESPONSE_BYTES = 1024
         private fun ascii(value: String): ByteArray =
@@ -645,6 +1015,88 @@ private fun ByteArray.copyAt(
     return offset + source.size
 }
 
+private data class DecimalParseResult(
+    val value: Long,
+    val nextOffset: Int,
+)
+
+private fun parseDecimalOrNull(
+    bytes: ByteArray,
+    offset: Int,
+    maximum: Long,
+): DecimalParseResult? {
+    if (
+        offset !in bytes.indices ||
+        bytes[offset] !in ASCII_ZERO..ASCII_NINE
+    ) {
+        return null
+    }
+    return parseDecimal(bytes, offset, maximum)
+}
+
+private fun parseDecimal(
+    bytes: ByteArray,
+    offset: Int,
+    maximum: Long,
+): DecimalParseResult {
+    if (
+        offset !in bytes.indices ||
+        bytes[offset] !in ASCII_ONE..ASCII_NINE
+    ) {
+        throw DovecotOperatorProtocolException()
+    }
+    var cursor = offset
+    var value = 0L
+    while (
+        cursor < bytes.size &&
+        bytes[cursor] in ASCII_ZERO..ASCII_NINE
+    ) {
+        val digit = bytes[cursor].toInt() - ASCII_ZERO.toInt()
+        if (value > (maximum - digit) / 10L) {
+            throw DovecotOperatorProtocolException()
+        }
+        value = value * 10L + digit
+        cursor += 1
+    }
+    return DecimalParseResult(value, cursor)
+}
+
+private fun ByteArray.matchesAsciiIgnoreCase(
+    offset: Int,
+    expected: ByteArray,
+): Boolean {
+    if (offset < 0 || size < offset + expected.size) {
+        return false
+    }
+    expected.indices.forEach { index ->
+        if (
+            this[offset + index].asciiUppercase() !=
+            expected[index].asciiUppercase()
+        ) {
+            return false
+        }
+    }
+    return true
+}
+
+private fun ByteArray.matchesBytes(
+    offset: Int,
+    expected: ByteArray,
+): Boolean {
+    if (offset < 0 || size < offset + expected.size) {
+        return false
+    }
+    expected.indices.forEach { index ->
+        if (this[offset + index] != expected[index]) {
+            return false
+        }
+    }
+    return true
+}
+
+private fun ByteArray.endsWith(expected: ByteArray): Boolean =
+    matchesBytes(size - expected.size, expected)
+
 private fun ByteArray.startsWithToken(token: ByteArray): Boolean =
     hasTokenAt(0, token)
 
@@ -678,6 +1130,9 @@ private fun Byte.asciiUppercase(): Byte =
     }
 
 private const val ASCII_CASE_OFFSET = 'a'.code - 'A'.code
+private val ASCII_ZERO = '0'.code.toByte()
+private val ASCII_ONE = '1'.code.toByte()
+private val ASCII_NINE = '9'.code.toByte()
 
 private fun readBoundedStableCertificate(path: Path): ByteArray {
     if (

@@ -11,9 +11,11 @@ import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.Collections
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.io.path.createDirectories
@@ -743,6 +745,292 @@ class DovecotOperatorCredentialStoreTest {
     }
 
     @Test
+    fun applicationLeaseRegistryEnforcesAFixedTrackedLeaseLimit() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val leases = (1..15).map {
+            registry.acquire(DovecotOperatorId.A) {}
+        }
+
+        assertFailsWith<IllegalStateException> {
+            registry.acquire(DovecotOperatorId.A) {}
+        }
+        val verification =
+            registry.acquireVerification(DovecotOperatorId.A) {}
+        assertFailsWith<IllegalStateException> {
+            registry.acquireVerification(DovecotOperatorId.A) {}
+        }
+        assertEquals(16, registry.openLeaseCount(DovecotOperatorId.A))
+
+        verification.close()
+        leases.forEach(AutoCloseable::close)
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun reservedVerificationCapacityLetsAFullGenerationRotateAndDrain() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val closeCount = AtomicInteger()
+        val oldLeases = (1..15).map {
+            registry.acquire(DovecotOperatorId.A) {
+                closeCount.incrementAndGet()
+            }
+        }
+        assertFailsWith<IllegalStateException> {
+            registry.acquire(DovecotOperatorId.A) {}
+        }
+        val maximumObservedLeases = AtomicInteger()
+        val runtime = DovecotOperatorLeasedRotationRuntime(
+            leases = registry,
+            prober = { _, credential ->
+                val total =
+                    registry.openLeaseCount(DovecotOperatorId.A) +
+                        registry.openLeaseCount(DovecotOperatorId.B)
+                maximumObservedLeases.accumulateAndGet(total, ::maxOf)
+                if (
+                    credential.id == DovecotOperatorId.A &&
+                    registry.activeId() == DovecotOperatorId.B
+                ) {
+                    DovecotOperatorProbeResult.AuthenticationFailure
+                } else {
+                    DovecotOperatorProbeResult.Success
+                }
+            },
+        )
+        val generated =
+            "new-secret".toByteArray(StandardCharsets.US_ASCII)
+
+        val rotated = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_B },
+            verifier = MATCHING_VERIFIER,
+        ).rotateOrRecover(
+            target =
+                DovecotOperatorTarget.create("full-capacity@local.test"),
+            runtime = runtime,
+        )
+
+        assertEquals(DovecotOperatorId.B, rotated)
+        assertEquals(16, maximumObservedLeases.get())
+        assertEquals(15, closeCount.get())
+        assertTrue(oldLeases.none { it.isOpen })
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.B))
+        assertTrue(generated.all { it == 0.toByte() })
+        runtime.close()
+    }
+
+    @Test
+    fun blockedSessionDrainHasAFixedDeadlineAndOnlyDaemonCloseWork() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val callbackEntered = CountDownLatch(3)
+        val callbackRelease = CountDownLatch(1)
+        val callbacksFinished = CountDownLatch(3)
+        val drainFinished = CountDownLatch(1)
+        val callbackThreads =
+            Collections.synchronizedList(mutableListOf<Thread>())
+        val drainFailure = AtomicReference<Throwable?>()
+        val elapsedNanos = AtomicLong()
+        val leases = (1..3).map {
+            registry.acquire(DovecotOperatorId.A) {
+                callbackThreads += Thread.currentThread()
+                callbackEntered.countDown()
+                try {
+                    while (callbackRelease.count > 0L) {
+                        try {
+                            callbackRelease.await()
+                        } catch (_: InterruptedException) {
+                            // Prove uncooperative closes cannot serialize timeouts.
+                        }
+                    }
+                } finally {
+                    callbacksFinished.countDown()
+                }
+            }
+        }
+        val started = System.nanoTime()
+        val drainCaller = thread(
+            start = true,
+            isDaemon = true,
+            name = "lease-drain-test-caller",
+        ) {
+            try {
+                registry.blockAndDrain(DovecotOperatorId.A)
+            } catch (failure: Throwable) {
+                drainFailure.set(failure)
+            } finally {
+                elapsedNanos.set(System.nanoTime() - started)
+                drainFinished.countDown()
+            }
+        }
+
+        assertTrue(callbackEntered.await(1, TimeUnit.SECONDS))
+        val returnedWithinBound =
+            drainFinished.await(2, TimeUnit.SECONDS)
+        try {
+            assertTrue(returnedWithinBound)
+            assertTrue(drainFailure.get() is IllegalStateException)
+            assertTrue(elapsedNanos.get() < TimeUnit.SECONDS.toNanos(2))
+            assertEquals(3, callbackThreads.size)
+            assertEquals(3, callbackThreads.toSet().size)
+            callbackThreads.forEach { callbackThread ->
+                assertTrue(callbackThread.isDaemon)
+                assertNotEquals(drainCaller, callbackThread)
+            }
+            assertTrue(leases.all { it.isOpen })
+            assertEquals(3, registry.openLeaseCount(DovecotOperatorId.A))
+        } finally {
+            callbackRelease.countDown()
+            assertTrue(callbacksFinished.await(1, TimeUnit.SECONDS))
+            assertTrue(drainFinished.await(1, TimeUnit.SECONDS))
+            drainCaller.join(1_000)
+        }
+        val releaseDeadline =
+            System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+        while (
+            registry.openLeaseCount(DovecotOperatorId.A) > 0 &&
+            System.nanoTime() < releaseDeadline
+        ) {
+            Thread.sleep(1)
+        }
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+        registry.blockAndDrain(DovecotOperatorId.A)
+        assertTrue(leases.none { it.isOpen })
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun drainFailureStopsBeforeRevocationAndPreservesRecoverableState() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        var closeAttempts = 0
+        val oldLease = registry.acquire(DovecotOperatorId.A) {
+            closeAttempts += 1
+            if (closeAttempts == 1) {
+                throw SimulatedStoreFailure()
+            }
+        }
+        val runtime = DovecotOperatorLeasedRotationRuntime(
+            leases = registry,
+            prober = { _, _ -> DovecotOperatorProbeResult.Success },
+        )
+        val generated =
+            "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val failure = assertFailsWith<SimulatedStoreFailure> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary { HASH_B },
+                verifier = MATCHING_VERIFIER,
+            ).rotateOrRecover(
+                target =
+                    DovecotOperatorTarget.create("drain@local.test"),
+                runtime = runtime,
+            )
+        }
+
+        assertFalse(failure.stackTraceToString().contains("new-secret"))
+        assertTrue(generated.all { it == 0.toByte() })
+        assertEquals("b", Files.readString(fixture.paths.active))
+        assertEquals("a:b", Files.readString(fixture.paths.rotationIntent))
+        assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+        assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+        assertEquals(
+            "dashboard-operator-a:$HASH_A\n" +
+                "dashboard-operator-b:$HASH_B\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+        assertTrue(oldLease.isOpen)
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+        assertFalse(oldLease.isOpen)
+        runtime.close()
+    }
+
+    @Test
+    fun drainTimeoutStopsBeforeRevocationAndPreservesRecoverableState() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val callbackEntered = CountDownLatch(1)
+        val callbackRelease = CountDownLatch(1)
+        val callbackFinished = CountDownLatch(1)
+        val oldLease = registry.acquire(DovecotOperatorId.A) {
+            callbackEntered.countDown()
+            try {
+                while (callbackRelease.count > 0L) {
+                    try {
+                        callbackRelease.await()
+                    } catch (_: InterruptedException) {
+                        // Prove cancellation cannot bypass the durable timeout state.
+                    }
+                }
+            } finally {
+                callbackFinished.countDown()
+            }
+        }
+        val runtime = DovecotOperatorLeasedRotationRuntime(
+            leases = registry,
+            prober = { _, _ -> DovecotOperatorProbeResult.Success },
+        )
+        val generated =
+            "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val started = System.nanoTime()
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary { HASH_B },
+                verifier = MATCHING_VERIFIER,
+            ).rotateOrRecover(
+                target =
+                    DovecotOperatorTarget.create("drain-timeout@local.test"),
+                runtime = runtime,
+            )
+        }
+        val elapsed = System.nanoTime() - started
+
+        try {
+            assertTrue(callbackEntered.await(1, TimeUnit.SECONDS))
+            assertTrue(elapsed < TimeUnit.SECONDS.toNanos(2))
+            assertFalse(failure.stackTraceToString().contains("new-secret"))
+            assertTrue(generated.all { it == 0.toByte() })
+            assertEquals("b", Files.readString(fixture.paths.active))
+            assertEquals("a:b", Files.readString(fixture.paths.rotationIntent))
+            assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+            assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+            assertEquals(
+                "dashboard-operator-a:$HASH_A\n" +
+                    "dashboard-operator-b:$HASH_B\n",
+                Files.readString(fixture.paths.masterUsers),
+            )
+            assertTrue(oldLease.isOpen)
+            assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+        } finally {
+            callbackRelease.countDown()
+            assertTrue(callbackFinished.await(1, TimeUnit.SECONDS))
+        }
+        registry.blockAndDrain(DovecotOperatorId.A)
+        assertFalse(oldLease.isOpen)
+        runtime.close()
+    }
+
+    @Test
     fun onlyExplicitRecoveryCleansARecognizedOwnerOnlyAbandonedTemporary() {
         val fixture = temporaryRepository()
         bootstrap(fixture, "old-secret")
@@ -851,87 +1139,67 @@ class DovecotOperatorCredentialStoreTest {
             runtime = RecordingRotationRuntime(),
         )
 
-        val expectedPoints = listOf(
-            DovecotOperatorCommitPoint.StableLockAcquired,
-            DovecotOperatorCommitPoint.BeforeIntentReplace,
-            DovecotOperatorCommitPoint.AfterIntentReplace,
-            DovecotOperatorCommitPoint.BeforeSlotReplace,
-            DovecotOperatorCommitPoint.AfterSlotReplace,
-            DovecotOperatorCommitPoint.BeforeMasterReplace,
-            DovecotOperatorCommitPoint.AfterMasterReplace,
-            DovecotOperatorCommitPoint.StagedAccepted,
-            DovecotOperatorCommitPoint.BeforeActiveReplace,
-            DovecotOperatorCommitPoint.AfterActiveReplace,
-            DovecotOperatorCommitPoint.ApplicationVerified,
-            DovecotOperatorCommitPoint.DrainCompleted,
-            DovecotOperatorCommitPoint.BeforeMasterReplace,
-            DovecotOperatorCommitPoint.AfterMasterReplace,
-            DovecotOperatorCommitPoint.OldRejected,
-            DovecotOperatorCommitPoint.NewVerified,
-            DovecotOperatorCommitPoint.BeforeSlotDelete,
-            DovecotOperatorCommitPoint.AfterSlotDelete,
-            DovecotOperatorCommitPoint.BeforeIntentDelete,
-            DovecotOperatorCommitPoint.AfterIntentDelete,
-            DovecotOperatorCommitPoint.FinalVerified,
+        assertRotationBoundarySnapshots(
+            snapshots = snapshots,
+            sourcePaths = fixture.paths,
+            old = DovecotOperatorId.A,
+            new = DovecotOperatorId.B,
+            oldSecret = "old-secret",
+            newSecret = "new-secret",
+            oldHash = HASH_A,
+            newHash = HASH_B,
         )
-        assertEquals(expectedPoints, snapshots.map { it.point })
+        assertTrue(generated.all { it == 0.toByte() })
+    }
 
-        try {
-            snapshots.forEachIndexed { index, snapshot ->
-                val recoveredFixture = temporaryRepository()
-                restore(snapshot, recoveredFixture.paths)
-                val expected = snapshot.activeId()
-                val recovered = DovecotOperatorCredentialStore(
-                    paths = recoveredFixture.paths,
-                    generator = DovecotOperatorSecretGenerator {
-                        error("snapshot recovery must not generate")
-                    },
-                    hasher = DovecotOperatorHashBoundary {
-                        error("snapshot recovery must not hash")
-                    },
-                    verifier = MATCHING_VERIFIER,
-                ).recoverRotation(
-                    target =
-                        DovecotOperatorTarget.create(
-                            "snapshot@local.test",
-                        ),
-                    runtime = RecordingRotationRuntime(),
-                )
+    @Test
+    fun freshStoreRecoveryConvergesFromEveryBoundaryBToA() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "initial-secret")
+        val middle =
+            "middle-secret".toByteArray(StandardCharsets.US_ASCII)
+        DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(middle)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_B },
+            verifier = MATCHING_VERIFIER,
+        ).rotateOrRecover(
+            target = DovecotOperatorTarget.create("snapshot@local.test"),
+            runtime = RecordingRotationRuntime(),
+        )
+        assertTrue(middle.all { it == 0.toByte() })
+        assertEquals("b", Files.readString(fixture.paths.active))
 
-                assertEquals(
-                    expected,
-                    recovered,
-                    "snapshot $index at ${snapshot.point}",
-                )
-                assertEquals(
-                    expected.reference,
-                    Files.readString(recoveredFixture.paths.active),
-                )
-                assertTrue(
-                    Files.exists(
-                        recoveredFixture.paths.slot(expected),
-                        LinkOption.NOFOLLOW_LINKS,
-                    ),
-                )
-                assertFalse(
-                    Files.exists(
-                        recoveredFixture.paths.slot(expected.otherForTest()),
-                        LinkOption.NOFOLLOW_LINKS,
-                    ),
-                )
-                assertFalse(
-                    Files.exists(
-                        recoveredFixture.paths.rotationIntent,
-                        LinkOption.NOFOLLOW_LINKS,
-                    ),
-                )
-                assertTrue(
-                    recognizedTemporaries(recoveredFixture.paths).isEmpty(),
-                )
-            }
-        } finally {
-            snapshots.forEach(OperatorStateSnapshot::close)
-        }
+        val snapshots = mutableListOf<OperatorStateSnapshot>()
+        val generated =
+            "final-secret".toByteArray(StandardCharsets.US_ASCII)
+        DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_A },
+            verifier = MATCHING_VERIFIER,
+            observer = DovecotOperatorStoreObserver { point, _ ->
+                snapshots += snapshot(point, fixture.paths)
+            },
+        ).rotateOrRecover(
+            target = DovecotOperatorTarget.create("snapshot@local.test"),
+            runtime = RecordingRotationRuntime(),
+        )
+
+        assertRotationBoundarySnapshots(
+            snapshots = snapshots,
+            sourcePaths = fixture.paths,
+            old = DovecotOperatorId.B,
+            new = DovecotOperatorId.A,
+            oldSecret = "middle-secret",
+            newSecret = "final-secret",
+            oldHash = HASH_B,
+            newHash = HASH_A,
+        )
         assertTrue(generated.all { it == 0.toByte() })
     }
 
@@ -1775,6 +2043,439 @@ class DovecotOperatorCredentialStoreTest {
                 }
             }
 
+    private fun assertRotationBoundarySnapshots(
+        snapshots: List<OperatorStateSnapshot>,
+        sourcePaths: DovecotOperatorPaths,
+        old: DovecotOperatorId,
+        new: DovecotOperatorId,
+        oldSecret: String,
+        newSecret: String,
+        oldHash: String,
+        newHash: String,
+    ) {
+        val expectations = rotationBoundaryExpectations(
+            old = old,
+            new = new,
+            oldSecret = oldSecret,
+            newSecret = newSecret,
+            oldHash = oldHash,
+            newHash = newHash,
+        )
+        val finalSecrets = mapOf(old to oldSecret, new to newSecret)
+        val finalHashes = mapOf(old to oldHash, new to newHash)
+
+        try {
+            assertEquals(
+                expectations.map { it.point },
+                snapshots.map { it.point },
+            )
+            snapshots.zip(expectations).forEachIndexed { index, pair ->
+                val (snapshot, expectation) = pair
+                val context =
+                    "snapshot $index at ${expectation.point} (${old.name}->${new.name})"
+                assertSnapshotProjection(
+                    snapshot = snapshot,
+                    paths = sourcePaths,
+                    expected = expectation,
+                    context = context,
+                )
+
+                val recoveredFixture = temporaryRepository()
+                restore(snapshot, recoveredFixture.paths)
+                val recoveryRuntime = RecordingRotationRuntime()
+                val recovered = DovecotOperatorCredentialStore(
+                    paths = recoveredFixture.paths,
+                    generator = DovecotOperatorSecretGenerator {
+                        error("snapshot recovery must not generate")
+                    },
+                    hasher = DovecotOperatorHashBoundary {
+                        error("snapshot recovery must not hash")
+                    },
+                    verifier = MATCHING_VERIFIER,
+                ).recoverRotation(
+                    target =
+                        DovecotOperatorTarget.create(
+                            "snapshot@local.test",
+                        ),
+                    runtime = recoveryRuntime,
+                )
+
+                val expectedId = expectation.recoveredId
+                assertEquals(expectedId, recovered, context)
+                assertEquals(
+                    expectedId.reference,
+                    Files.readString(recoveredFixture.paths.active),
+                    context,
+                )
+                assertEquals(
+                    finalSecrets.getValue(expectedId),
+                    Files.readString(recoveredFixture.paths.slot(expectedId)),
+                    context,
+                )
+                assertFalse(
+                    Files.exists(
+                        recoveredFixture.paths.slot(
+                            if (expectedId == DovecotOperatorId.A) {
+                                DovecotOperatorId.B
+                            } else {
+                                DovecotOperatorId.A
+                            },
+                        ),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                    context,
+                )
+                assertEquals(
+                    "${expectedId.masterUsername}:" +
+                        "${finalHashes.getValue(expectedId)}\n",
+                    Files.readString(recoveredFixture.paths.masterUsers),
+                    context,
+                )
+                assertFalse(
+                    Files.exists(
+                        recoveredFixture.paths.rotationIntent,
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                    context,
+                )
+                assertTrue(
+                    recognizedTemporaries(recoveredFixture.paths).isEmpty(),
+                    context,
+                )
+                assertEquals(
+                    expectation.recoveryEvents,
+                    recoveryRuntime.events,
+                    context,
+                )
+            }
+        } finally {
+            snapshots.forEach(OperatorStateSnapshot::close)
+        }
+    }
+
+    private fun rotationBoundaryExpectations(
+        old: DovecotOperatorId,
+        new: DovecotOperatorId,
+        oldSecret: String,
+        newSecret: String,
+        oldHash: String,
+        newHash: String,
+    ): List<RotationBoundaryExpectation> {
+        val intent = "${old.reference}:${new.reference}"
+        val oldSlots = mapOf(old to oldSecret)
+        val bothSlots = mapOf(old to oldSecret, new to newSecret)
+        val newSlots = mapOf(new to newSecret)
+        val oldMaster = "${old.masterUsername}:$oldHash\n"
+        val bothMasters =
+            oldMaster + "${new.masterUsername}:$newHash\n"
+        val newMaster = "${new.masterUsername}:$newHash\n"
+        val fullRecoveryEvents = listOf(
+            "activate-${new.reference}",
+            "application-${new.reference}",
+            "drain-${old.reference}",
+            "observe-${old.reference}",
+            "observe-${new.reference}",
+        )
+        val recoveryEventsWithoutOldRaw = listOf(
+            "activate-${new.reference}",
+            "application-${new.reference}",
+            "drain-${old.reference}",
+            "observe-${new.reference}",
+        )
+        val newSlotTarget = when (new) {
+            DovecotOperatorId.A -> SnapshotTarget.SlotA
+            DovecotOperatorId.B -> SnapshotTarget.SlotB
+        }
+
+        return listOf(
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.StableLockAcquired,
+                old,
+                null,
+                oldSlots,
+                oldMaster,
+                null,
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeIntentReplace,
+                old,
+                null,
+                oldSlots,
+                oldMaster,
+                SnapshotTemporaryExpectation(
+                    SnapshotTarget.Intent,
+                    intent,
+                ),
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterIntentReplace,
+                old,
+                intent,
+                oldSlots,
+                oldMaster,
+                null,
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeSlotReplace,
+                old,
+                intent,
+                oldSlots,
+                oldMaster,
+                SnapshotTemporaryExpectation(
+                    newSlotTarget,
+                    newSecret,
+                ),
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterSlotReplace,
+                old,
+                intent,
+                bothSlots,
+                oldMaster,
+                null,
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeMasterReplace,
+                old,
+                intent,
+                bothSlots,
+                oldMaster,
+                SnapshotTemporaryExpectation(
+                    SnapshotTarget.Master,
+                    bothMasters,
+                ),
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterMasterReplace,
+                old,
+                intent,
+                bothSlots,
+                bothMasters,
+                null,
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.StagedAccepted,
+                old,
+                intent,
+                bothSlots,
+                bothMasters,
+                null,
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeActiveReplace,
+                old,
+                intent,
+                bothSlots,
+                bothMasters,
+                SnapshotTemporaryExpectation(
+                    SnapshotTarget.Active,
+                    new.reference,
+                ),
+                old,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterActiveReplace,
+                new,
+                intent,
+                bothSlots,
+                bothMasters,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.ApplicationVerified,
+                new,
+                intent,
+                bothSlots,
+                bothMasters,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.DrainCompleted,
+                new,
+                intent,
+                bothSlots,
+                bothMasters,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeMasterReplace,
+                new,
+                intent,
+                bothSlots,
+                bothMasters,
+                SnapshotTemporaryExpectation(
+                    SnapshotTarget.Master,
+                    newMaster,
+                ),
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterMasterReplace,
+                new,
+                intent,
+                bothSlots,
+                newMaster,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.OldRejected,
+                new,
+                intent,
+                bothSlots,
+                newMaster,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.NewVerified,
+                new,
+                intent,
+                bothSlots,
+                newMaster,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeSlotDelete,
+                new,
+                intent,
+                bothSlots,
+                newMaster,
+                null,
+                new,
+                fullRecoveryEvents,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterSlotDelete,
+                new,
+                intent,
+                newSlots,
+                newMaster,
+                null,
+                new,
+                recoveryEventsWithoutOldRaw,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.BeforeIntentDelete,
+                new,
+                intent,
+                newSlots,
+                newMaster,
+                null,
+                new,
+                recoveryEventsWithoutOldRaw,
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.AfterIntentDelete,
+                new,
+                null,
+                newSlots,
+                newMaster,
+                null,
+                new,
+                emptyList(),
+            ),
+            RotationBoundaryExpectation(
+                DovecotOperatorCommitPoint.FinalVerified,
+                new,
+                null,
+                newSlots,
+                newMaster,
+                null,
+                new,
+                emptyList(),
+            ),
+        )
+    }
+
+    private fun assertSnapshotProjection(
+        snapshot: OperatorStateSnapshot,
+        paths: DovecotOperatorPaths,
+        expected: RotationBoundaryExpectation,
+        context: String,
+    ) {
+        val expectedFixed = mutableMapOf<String, String>()
+        expectedFixed[relativePath(paths, paths.lock)] = ""
+        expectedFixed[relativePath(paths, paths.active)] =
+            expected.activeId.reference
+        expected.intent?.let { intent ->
+            expectedFixed[relativePath(paths, paths.rotationIntent)] = intent
+        }
+        expected.slots.forEach { (id, secret) ->
+            expectedFixed[relativePath(paths, paths.slot(id))] = secret
+        }
+        expectedFixed[relativePath(paths, paths.masterUsers)] =
+            expected.masterContents
+
+        val temporaryFiles = snapshot.files.filterKeys { ".tmp-" in it }
+        val fixedFiles = snapshot.files.filterKeys { ".tmp-" !in it }
+        assertEquals(expectedFixed.keys, fixedFiles.keys, context)
+        expectedFixed.forEach { (relative, contents) ->
+            assertContentEquals(
+                contents.toByteArray(StandardCharsets.US_ASCII),
+                fixedFiles.getValue(relative),
+                context,
+            )
+        }
+
+        val expectedTemporary = expected.temporary
+        if (expectedTemporary == null) {
+            assertTrue(temporaryFiles.isEmpty(), context)
+        } else {
+            assertEquals(1, temporaryFiles.size, context)
+            val (relative, contents) = temporaryFiles.entries.single()
+            val target = expectedTemporary.target.path(paths)
+            val prefix = "${relativePath(paths, target)}.tmp-"
+            assertTrue(relative.startsWith(prefix), context)
+            assertTrue(
+                runCatching {
+                    UUID.fromString(relative.removePrefix(prefix))
+                }.isSuccess,
+                context,
+            )
+            assertContentEquals(
+                expectedTemporary.contents.toByteArray(
+                    StandardCharsets.US_ASCII,
+                ),
+                contents,
+                context,
+            )
+        }
+    }
+
+    private fun relativePath(
+        paths: DovecotOperatorPaths,
+        path: Path,
+    ): String = paths.runtimeRoot.relativize(path).toString()
+
     private fun snapshot(
         point: DovecotOperatorCommitPoint,
         paths: DovecotOperatorPaths,
@@ -1872,48 +2573,62 @@ class DovecotOperatorCredentialStoreTest {
         val paths: DovecotOperatorPaths,
     )
 
+    private data class RotationBoundaryExpectation(
+        val point: DovecotOperatorCommitPoint,
+        val activeId: DovecotOperatorId,
+        val intent: String?,
+        val slots: Map<DovecotOperatorId, String>,
+        val masterContents: String,
+        val temporary: SnapshotTemporaryExpectation?,
+        val recoveredId: DovecotOperatorId,
+        val recoveryEvents: List<String>,
+    )
+
+    private data class SnapshotTemporaryExpectation(
+        val target: SnapshotTarget,
+        val contents: String,
+    )
+
+    private enum class SnapshotTarget {
+        SlotA,
+        SlotB,
+        Active,
+        Intent,
+        Master,
+        ;
+
+        fun path(paths: DovecotOperatorPaths): Path = when (this) {
+            SlotA -> paths.slotA
+            SlotB -> paths.slotB
+            Active -> paths.active
+            Intent -> paths.rotationIntent
+            Master -> paths.masterUsers
+        }
+    }
+
     private class OperatorStateSnapshot(
         val point: DovecotOperatorCommitPoint,
         val files: Map<String, ByteArray>,
     ) : AutoCloseable {
-        fun activeId(): DovecotOperatorId {
-            val active = files.entries.single { (relative, _) ->
-                relative.endsWith("/dovecot-operator-active")
-            }.value
-            return DovecotOperatorId.fromReference(
-                active.toString(StandardCharsets.US_ASCII),
-            )
-        }
-
         override fun close() {
             files.values.forEach { it.fill(0) }
         }
     }
 
-    private fun DovecotOperatorId.otherForTest(): DovecotOperatorId =
-        when (this) {
-            DovecotOperatorId.A -> DovecotOperatorId.B
-            DovecotOperatorId.B -> DovecotOperatorId.A
-        }
-
     private class RecordingRotationRuntime :
         DovecotOperatorRotationRuntime {
         val events = mutableListOf<String>()
-        private var oldGenerationBlocked = false
+        private val blockedIds = mutableSetOf<DovecotOperatorId>()
 
         override fun observePasswdFile(
             target: DovecotOperatorTarget,
             credential: DovecotOperatorCredential,
         ): DovecotOperatorProbeResult {
             events += "observe-${credential.id.reference}"
-            return when (credential.id) {
-                DovecotOperatorId.A ->
-                    if (oldGenerationBlocked) {
-                        DovecotOperatorProbeResult.AuthenticationFailure
-                    } else {
-                        DovecotOperatorProbeResult.Success
-                    }
-                DovecotOperatorId.B -> DovecotOperatorProbeResult.Success
+            return if (credential.id in blockedIds) {
+                DovecotOperatorProbeResult.AuthenticationFailure
+            } else {
+                DovecotOperatorProbeResult.Success
             }
         }
 
@@ -1933,7 +2648,7 @@ class DovecotOperatorCredentialStoreTest {
 
         override fun blockAndDrain(id: DovecotOperatorId) {
             events += "drain-${id.reference}"
-            oldGenerationBlocked = true
+            blockedIds += id
         }
     }
 

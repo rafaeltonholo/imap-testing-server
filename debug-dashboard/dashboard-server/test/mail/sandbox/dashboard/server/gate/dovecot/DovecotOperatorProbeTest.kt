@@ -19,7 +19,10 @@ import kotlin.test.assertTrue
 
 class DovecotOperatorProbeTest {
     @Test
-    fun fullMailboxReadModeRequiresAReadOnlyInboxOpenBeforeSuccess() {
+    fun fullMailboxReadModeSearchesAndFetchesAMessageIdLiteral() {
+        val messageIdLiteral =
+            "Message-ID: <task6-probe@local.test>\r\n\r\n"
+        lateinit var retainingInput: RetainingBulkReadInputStream
         val fixture = probeFixture(
             response = (
                 "* OK Dovecot ready\r\n" +
@@ -29,10 +32,23 @@ class DovecotOperatorProbeTest {
                     "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
                     "A002 OK List completed\r\n" +
                     "* 0 EXISTS\r\n" +
-                    "A003 OK [READ-ONLY] Examine completed\r\n"
-                ).toByteArray(),
+                    "A003 OK [READ-ONLY] Examine completed\r\n" +
+                    "* SEARCH 7 9\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${messageIdLiteral.length}}\r\n" +
+                    messageIdLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
             secret = "read-probe-secret",
             requireMailboxRead = true,
+            inputFactory = { response ->
+                RetainingBulkReadInputStream(response).also {
+                    retainingInput = it
+                }
+            },
         )
 
         assertEquals(
@@ -40,12 +56,145 @@ class DovecotOperatorProbeTest {
             fixture.probe.probe(TARGET, fixture.credential),
         )
         assertEquals(
-            "A003 EXAMINE \"INBOX\"\r\n",
+            "A005 UID FETCH 7 " +
+                "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])\r\n",
             fixture.transport.output.snapshots.last()
                 .toString(StandardCharsets.US_ASCII),
         )
-        assertEquals(5, fixture.transport.output.snapshots.size)
+        assertEquals(7, fixture.transport.output.snapshots.size)
+        assertTrue(retainingInput.references.isNotEmpty())
+        assertTrue(
+            retainingInput.references.all { bytes ->
+                bytes.all { it == 0.toByte() }
+            },
+        )
         assertClosedAndWiped(fixture, "read-probe-secret")
+    }
+
+    @Test
+    fun fullMailboxReadModeRejectsAnEmptyOrMalformedSearchResult() {
+        listOf(
+            "* SEARCH\r\nA004 OK Search completed\r\n",
+            "* SEARCH 0\r\nA004 OK Search completed\r\n",
+            "* SEARCH 7 7\r\nA004 OK Search completed\r\n",
+            "A004 OK Search completed\r\n",
+        ).forEachIndexed { index, searchResponse ->
+            val fixture = probeFixture(
+                response = (
+                    successfulReadPrefix() + searchResponse
+                    ).toByteArray(StandardCharsets.US_ASCII),
+                secret = "empty-search-secret-$index",
+                requireMailboxRead = true,
+            )
+
+            assertEquals(
+                DovecotOperatorProbeResult.ProtocolFailure,
+                fixture.probe.probe(TARGET, fixture.credential),
+            )
+            assertEquals(
+                "A004 UID SEARCH ALL\r\n",
+                fixture.transport.output.snapshots.last()
+                    .toString(StandardCharsets.US_ASCII),
+            )
+            assertClosedAndWiped(
+                fixture,
+                "empty-search-secret-$index",
+            )
+        }
+    }
+
+    @Test
+    fun fullMailboxReadModeRejectsMissingMalformedAndOversizedFetches() {
+        val validSearch =
+            "* SEARCH 7\r\nA004 OK Search completed\r\n"
+        val malformedLiteral =
+            "Subject: not-a-message-id\r\n\r\n"
+        val validLiteral =
+            "Message-ID: <valid@local.test>\r\n\r\n"
+        val malformedMessageIds = listOf(
+            "Message-ID: <a..b@local.test>\r\n\r\n",
+            "Message-ID: <a()@local.test>\r\n\r\n",
+            "Message-ID: <.a@local.test>\r\n\r\n",
+            "Message-ID: <a@local.test.>\r\n\r\n",
+        )
+        val fetchResponses = listOf(
+            "A005 OK No fetch emitted\r\n",
+            (
+                "* 1 FETCH (UID 8 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] {42}\r\n"
+                ),
+            (
+                "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] {1025}\r\n"
+                ),
+            (
+                "* 0 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${validLiteral.length}}\r\n" +
+                    validLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ),
+            (
+                "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${malformedLiteral.length}}\r\n" +
+                    malformedLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ),
+        ) + malformedMessageIds.map { literal ->
+            (
+                "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${literal.length}}\r\n" +
+                    literal +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                )
+        }
+        fetchResponses.forEachIndexed { index, fetchResponse ->
+            val fixture = probeFixture(
+                response = (
+                    successfulReadPrefix() +
+                        validSearch +
+                        fetchResponse
+                    ).toByteArray(StandardCharsets.US_ASCII),
+                secret = "invalid-fetch-secret-$index",
+                requireMailboxRead = true,
+            )
+
+            assertEquals(
+                DovecotOperatorProbeResult.ProtocolFailure,
+                fixture.probe.probe(TARGET, fixture.credential),
+            )
+            assertClosedAndWiped(
+                fixture,
+                "invalid-fetch-secret-$index",
+            )
+        }
+    }
+
+    @Test
+    fun fullMailboxReadModeTreatsATruncatedLiteralAsTransportFailure() {
+        val fixture = probeFixture(
+            response = (
+                successfulReadPrefix() +
+                    "* SEARCH 7\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] {42}\r\n" +
+                    "Message-ID: <truncated@local.test>"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "truncated-fetch-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.TransportFailure,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertClosedAndWiped(fixture, "truncated-fetch-secret")
     }
 
     @Test
@@ -573,6 +722,21 @@ class DovecotOperatorProbeTest {
         ): Int = super.read(target, offset, minOf(length, 1))
     }
 
+    private class RetainingBulkReadInputStream(
+        bytes: ByteArray,
+    ) : ByteArrayInputStream(bytes) {
+        val references = mutableListOf<ByteArray>()
+
+        override fun read(
+            target: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int {
+            references += target
+            return super.read(target, offset, length)
+        }
+    }
+
     private class RecordingTransport(
         override val input: InputStream,
     ) : DovecotOperatorTransport {
@@ -633,5 +797,15 @@ class DovecotOperatorProbeTest {
     companion object {
         private val TARGET = DovecotOperatorTarget.create("probe-target@local.test")
         private val DEADLINE_CLOCK = AtomicLong()
+
+        private fun successfulReadPrefix(): String =
+            "* OK Dovecot ready\r\n" +
+                "+ VXNlcm5hbWU6\r\n" +
+                "+ UGFzc3dvcmQ6\r\n" +
+                "A001 OK Logged in\r\n" +
+                "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
+                "A002 OK List completed\r\n" +
+                "* 1 EXISTS\r\n" +
+                "A003 OK [READ-ONLY] Examine completed\r\n"
     }
 }

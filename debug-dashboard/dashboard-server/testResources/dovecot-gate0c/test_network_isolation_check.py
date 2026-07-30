@@ -1,8 +1,10 @@
+import errno
 import importlib.util
 import pathlib
 import socket
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -35,7 +37,11 @@ class NetworkIsolationCheckPresenceTest(unittest.TestCase):
         for name in (
             "MAX_INPUT_BYTES",
             "MAX_HOSTS",
+            "MAX_CONNECT_ATTEMPTS",
+            "MAX_CONNECT_SECONDS",
+            "MAX_WALL_SECONDS",
             "SOCKET_TIMEOUT_SECONDS",
+            "DeadlineExpired",
             "InputError",
             "parse_input",
             "network_diagnostic",
@@ -44,6 +50,9 @@ class NetworkIsolationCheckPresenceTest(unittest.TestCase):
             self.assertTrue(hasattr(module, name), name)
         self.assertEqual(1024, module.MAX_INPUT_BYTES)
         self.assertEqual(32, module.MAX_HOSTS)
+        self.assertEqual(37, module.MAX_CONNECT_ATTEMPTS)
+        self.assertEqual(18.5, module.MAX_CONNECT_SECONDS)
+        self.assertEqual(20.0, module.MAX_WALL_SECONDS)
         self.assertEqual(0.5, module.SOCKET_TIMEOUT_SECONDS)
         self.assertTrue(issubclass(module.InputError, Exception))
         self.assertTrue(callable(module.parse_input))
@@ -89,6 +98,15 @@ class NetworkIsolationInputTest(unittest.TestCase):
         _, hosts = self.helper.parse_input(data)
 
         self.assertEqual(32, len(hosts))
+
+    def test_accepts_link_local_host_ipv4(self):
+        operator, hosts = self.helper.parse_input(
+            b"operator 172.31.0.5\n"
+            b"host 169.254.23.9\n",
+        )
+
+        self.assertEqual("172.31.0.5", operator)
+        self.assertEqual(("169.254.23.9",), hosts)
 
     def test_rejects_every_noncanonical_or_unbounded_input_shape(self):
         too_many_hosts = b"operator 172.31.0.5\n" + b"".join(
@@ -141,15 +159,35 @@ class NetworkIsolationChecksTest(unittest.TestCase):
         cls.helper = load_helper()
         cls.operator = "172.31.0.5"
         cls.hosts = ("192.168.64.1", "10.0.0.8")
+        cls.resolved_ips = {
+            "host.docker.internal": "192.0.2.10",
+            "gateway.docker.internal": "192.0.2.11",
+            "task6-host-gateway": "192.0.2.12",
+            "dovecot": "172.31.0.2",
+        }
+
+    def fixed_resolution(self, host, port, **_kwargs):
+        if host == "dovecot-operator":
+            raise socket.gaierror(socket.EAI_NONAME, "not found")
+        address = self.resolved_ips[host]
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (address, port),
+            ),
+        ]
 
     def test_runs_only_the_fixed_checks_in_order(self):
         calls = []
 
         def connect(address, timeout):
             calls.append((address, timeout))
-            if address == ("dovecot", 31993):
+            if address == ("172.31.0.2", 31993):
                 return FakeConnection()
-            raise OSError("fixed negative check")
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
 
         with mock.patch.object(
             self.helper.socket,
@@ -158,7 +196,7 @@ class NetworkIsolationChecksTest(unittest.TestCase):
         ), mock.patch.object(
             self.helper.socket,
             "getaddrinfo",
-            side_effect=socket.gaierror("not found"),
+            side_effect=self.fixed_resolution,
         ) as resolve:
             diagnostic = self.helper.network_diagnostic(
                 self.operator,
@@ -166,18 +204,47 @@ class NetworkIsolationChecksTest(unittest.TestCase):
             )
 
         self.assertIsNone(diagnostic)
-        resolve.assert_called_once_with(
-            "dovecot-operator",
-            31993,
-            type=socket.SOCK_STREAM,
+        self.assertEqual(
+            [
+                mock.call(
+                    "host.docker.internal",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "gateway.docker.internal",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "task6-host-gateway",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "dovecot",
+                    31993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "dovecot-operator",
+                    31993,
+                    type=socket.SOCK_STREAM,
+                ),
+            ],
+            resolve.call_args_list,
         )
         self.assertEqual(
             [
-                (("dovecot", 31993), 0.5),
+                (("172.31.0.2", 31993), 0.5),
                 ((self.operator, 31993), 0.5),
-                (("host.docker.internal", 2993), 0.5),
-                (("gateway.docker.internal", 2993), 0.5),
-                (("task6-host-gateway", 2993), 0.5),
+                (("192.0.2.10", 2993), 0.5),
+                (("192.0.2.11", 2993), 0.5),
+                (("192.0.2.12", 2993), 0.5),
                 ((self.hosts[0], 2993), 0.5),
                 ((self.hosts[1], 2993), 0.5),
             ],
@@ -188,10 +255,14 @@ class NetworkIsolationChecksTest(unittest.TestCase):
         with mock.patch.object(
             self.helper.socket,
             "create_connection",
-            side_effect=OSError("secret transport detail"),
+            side_effect=ConnectionRefusedError(
+                errno.ECONNREFUSED,
+                "secret transport detail",
+            ),
         ), mock.patch.object(
             self.helper.socket,
             "getaddrinfo",
+            side_effect=self.fixed_resolution,
         ) as resolve:
             diagnostic = self.helper.network_diagnostic(
                 self.operator,
@@ -199,7 +270,35 @@ class NetworkIsolationChecksTest(unittest.TestCase):
             )
 
         self.assertEqual("DOVECOT_UNREACHABLE", diagnostic)
-        resolve.assert_not_called()
+        self.assertEqual(
+            [
+                mock.call(
+                    "host.docker.internal",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "gateway.docker.internal",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "task6-host-gateway",
+                    2993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+                mock.call(
+                    "dovecot",
+                    31993,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                ),
+            ],
+            resolve.call_args_list,
+        )
 
     def test_reports_a_fixed_label_when_operator_dns_resolves(self):
         with mock.patch.object(
@@ -209,7 +308,18 @@ class NetworkIsolationChecksTest(unittest.TestCase):
         ), mock.patch.object(
             self.helper.socket,
             "getaddrinfo",
-            return_value=[object()],
+            side_effect=lambda host, port, **_kwargs: [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (
+                        self.resolved_ips.get(host, "172.31.0.99"),
+                        port,
+                    ),
+                ),
+            ],
         ):
             diagnostic = self.helper.network_diagnostic(
                 self.operator,
@@ -217,6 +327,111 @@ class NetworkIsolationChecksTest(unittest.TestCase):
             )
 
         self.assertEqual("OPERATOR_DNS_RESOLVED", diagnostic)
+
+    def test_requires_every_fixed_gateway_to_resolve_before_connecting(self):
+        cases = (
+            (
+                "host.docker.internal",
+                "HOST_DOCKER_INTERNAL_UNRESOLVED",
+            ),
+            (
+                "gateway.docker.internal",
+                "GATEWAY_DOCKER_INTERNAL_UNRESOLVED",
+            ),
+            (
+                "task6-host-gateway",
+                "TASK6_HOST_GATEWAY_UNRESOLVED",
+            ),
+        )
+
+        for unresolved, expected in cases:
+            resolutions = []
+
+            def resolve(host, port, **kwargs):
+                resolutions.append((host, port, kwargs))
+                if host == unresolved:
+                    raise socket.gaierror(
+                        socket.EAI_NONAME,
+                        "not found",
+                    )
+                return self.fixed_resolution(host, port, **kwargs)
+
+            with self.subTest(expected=expected), mock.patch.object(
+                self.helper.socket,
+                "getaddrinfo",
+                side_effect=resolve,
+            ), mock.patch.object(
+                self.helper.socket,
+                "create_connection",
+            ) as connect:
+                diagnostic = self.helper.network_diagnostic(
+                    self.operator,
+                    self.hosts,
+                )
+
+            self.assertEqual(expected, diagnostic)
+            self.assertEqual(
+                [
+                    (
+                        "host.docker.internal",
+                        2993,
+                        {
+                            "family": socket.AF_INET,
+                            "type": socket.SOCK_STREAM,
+                        },
+                    ),
+                    (
+                        "gateway.docker.internal",
+                        2993,
+                        {
+                            "family": socket.AF_INET,
+                            "type": socket.SOCK_STREAM,
+                        },
+                    ),
+                    (
+                        "task6-host-gateway",
+                        2993,
+                        {
+                            "family": socket.AF_INET,
+                            "type": socket.SOCK_STREAM,
+                        },
+                    ),
+                ],
+                resolutions,
+            )
+            connect.assert_not_called()
+
+    def test_worst_case_host_inventory_has_an_explicit_duration_contract(self):
+        hosts = tuple(f"10.0.0.{index}" for index in range(1, 33))
+        calls = []
+
+        def connect(address, timeout):
+            calls.append((address, timeout))
+            if address == ("172.31.0.2", 31993):
+                return FakeConnection()
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+
+        with mock.patch.object(
+            self.helper.socket,
+            "create_connection",
+            side_effect=connect,
+        ), mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=self.fixed_resolution,
+        ):
+            diagnostic = self.helper.network_diagnostic(
+                self.operator,
+                hosts,
+            )
+
+        self.assertIsNone(diagnostic)
+        self.assertEqual(37, len(calls))
+        self.assertTrue(
+            all(timeout == self.helper.SOCKET_TIMEOUT_SECONDS for _, timeout in calls),
+        )
+        self.assertEqual(37, self.helper.MAX_CONNECT_ATTEMPTS)
+        self.assertEqual(18.5, self.helper.MAX_CONNECT_SECONDS)
 
     def test_reports_only_fixed_labels_for_every_reachable_negative_path(self):
         cases = (
@@ -232,13 +447,21 @@ class NetworkIsolationChecksTest(unittest.TestCase):
         )
 
         for reachable_host, reachable_port, expected in cases:
+            reachable_address = self.resolved_ips.get(
+                reachable_host,
+                reachable_host,
+            )
+
             def connect(address, timeout):
                 self.assertEqual(0.5, timeout)
-                if address == ("dovecot", 31993):
+                if address == ("172.31.0.2", 31993):
                     return FakeConnection()
-                if address == (reachable_host, reachable_port):
+                if address == (reachable_address, reachable_port):
                     return FakeConnection()
-                raise OSError("fixed negative check")
+                raise ConnectionRefusedError(
+                    errno.ECONNREFUSED,
+                    "refused",
+                )
 
             with self.subTest(expected=expected), mock.patch.object(
                 self.helper.socket,
@@ -247,7 +470,7 @@ class NetworkIsolationChecksTest(unittest.TestCase):
             ), mock.patch.object(
                 self.helper.socket,
                 "getaddrinfo",
-                side_effect=socket.gaierror("not found"),
+                side_effect=self.fixed_resolution,
             ):
                 diagnostic = self.helper.network_diagnostic(
                     self.operator,
@@ -255,6 +478,166 @@ class NetworkIsolationChecksTest(unittest.TestCase):
                 )
 
             self.assertEqual(expected, diagnostic)
+
+    def test_gateway_connections_use_the_resolved_numeric_ipv4_once(self):
+        gateway_ips = {
+            "host.docker.internal": "192.0.2.10",
+            "gateway.docker.internal": "192.0.2.11",
+            "task6-host-gateway": "192.0.2.12",
+            "dovecot": "172.31.0.2",
+        }
+        calls = []
+
+        def resolve(host, port, **_kwargs):
+            if host == "dovecot-operator":
+                raise socket.gaierror(socket.EAI_NONAME, "not found")
+            address = gateway_ips[host]
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (address, port),
+                ),
+            ]
+
+        def connect(address, timeout):
+            calls.append((address, timeout))
+            if address in {
+                ("dovecot", 31993),
+                ("172.31.0.2", 31993),
+            }:
+                return FakeConnection()
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+
+        with mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=resolve,
+        ), mock.patch.object(
+            self.helper.socket,
+            "create_connection",
+            side_effect=connect,
+        ):
+            diagnostic = self.helper.network_diagnostic(
+                self.operator,
+                self.hosts,
+            )
+
+        self.assertIsNone(diagnostic)
+        for hostname, address in gateway_ips.items():
+            if hostname == "dovecot":
+                continue
+            self.assertIn(((address, 2993), 0.5), calls)
+            self.assertNotIn(((hostname, 2993), 0.5), calls)
+
+    def test_transient_resolution_and_resource_exhaustion_fail_closed(self):
+        valid_input = (
+            b"operator 172.31.0.5\n"
+            b"host 192.168.64.1\n"
+        )
+
+        with mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=socket.gaierror(
+                socket.EAI_AGAIN,
+                "temporary resolver failure",
+            ),
+        ):
+            self.assertEqual(
+                (1, "CHECK_ERROR"),
+                self.helper.evaluate(valid_input, ()),
+            )
+
+        def ambiguous_resolution(host, port, **kwargs):
+            resolved = self.fixed_resolution(host, port, **kwargs)
+            if host == "gateway.docker.internal":
+                return resolved + [
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        6,
+                        "",
+                        ("192.0.2.99", port),
+                    ),
+                ]
+            return resolved
+
+        with mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=ambiguous_resolution,
+        ), mock.patch.object(
+            self.helper.socket,
+            "create_connection",
+        ) as connect:
+            self.assertEqual(
+                (1, "CHECK_ERROR"),
+                self.helper.evaluate(valid_input, ()),
+            )
+        connect.assert_not_called()
+
+        def resolve(host, port, **_kwargs):
+            address = {
+                "host.docker.internal": "192.0.2.10",
+                "gateway.docker.internal": "192.0.2.11",
+                "task6-host-gateway": "192.0.2.12",
+                "dovecot": "172.31.0.2",
+            }.get(host)
+            if address is None:
+                raise socket.gaierror(socket.EAI_NONAME, "not found")
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (address, port),
+                ),
+            ]
+
+        with mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=resolve,
+        ), mock.patch.object(
+            self.helper.socket,
+            "create_connection",
+            side_effect=OSError(errno.EMFILE, "descriptor exhaustion"),
+        ):
+            self.assertEqual(
+                (1, "CHECK_ERROR"),
+                self.helper.evaluate(valid_input, ()),
+            )
+
+    def test_blocking_resolution_has_a_process_local_wall_deadline(self):
+        valid_input = (
+            b"operator 172.31.0.5\n"
+            b"host 192.168.64.1\n"
+        )
+
+        def blocking_resolution(*_args, **_kwargs):
+            time.sleep(0.2)
+            raise socket.gaierror(socket.EAI_NONAME, "not found")
+
+        started = time.monotonic()
+        with mock.patch.object(
+            self.helper,
+            "MAX_WALL_SECONDS",
+            0.02,
+            create=True,
+        ), mock.patch.object(
+            self.helper.socket,
+            "getaddrinfo",
+            side_effect=blocking_resolution,
+        ):
+            result = self.helper.evaluate(valid_input, ())
+        elapsed = time.monotonic() - started
+
+        self.assertEqual((1, "CHECK_ERROR"), result)
+        self.assertLess(elapsed, 0.15)
 
 
 class NetworkIsolationEvaluationTest(unittest.TestCase):
