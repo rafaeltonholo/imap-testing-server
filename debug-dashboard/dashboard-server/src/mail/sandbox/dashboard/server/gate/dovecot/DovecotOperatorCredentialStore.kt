@@ -1,28 +1,14 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
-import java.io.EOFException
 import java.io.PrintStream
 import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
-import java.nio.file.StandardOpenOption
-import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.FileAttribute
-import java.nio.file.attribute.PosixFilePermission
-import java.nio.file.attribute.PosixFilePermissions
 import java.nio.file.attribute.UserPrincipal
 import java.security.SecureRandom
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 import kotlin.system.exitProcess
 
 private enum class DovecotOperatorPathPurpose {
@@ -420,6 +406,8 @@ internal enum class DovecotOperatorCommitPoint {
     DrainCompleted,
     OldRejected,
     NewVerified,
+    RollbackStagedRejected,
+    RollbackOldVerified,
     BeforeSlotDelete,
     AfterSlotDelete,
     BeforeIntentDelete,
@@ -471,6 +459,9 @@ internal class DovecotOperatorCredentialStore(
     private val rotationSleeper: DovecotOperatorRotationSleeper =
         DovecotOperatorRotationSleeper(Thread::sleep),
 ) : DovecotOperatorBootstrapper {
+    private val durableRepository =
+        DovecotOperatorDurableRepository(paths, observer)
+
     override fun bootstrap(): DovecotOperatorId = withStableLock {
         when (val current = readState()) {
             OperatorState.Empty -> bootstrapEmpty()
@@ -496,7 +487,7 @@ internal class DovecotOperatorCredentialStore(
         target: DovecotOperatorTarget,
         runtime: DovecotOperatorRotationRuntime,
     ): DovecotOperatorId = withStableLock {
-        if (fixedPathExists(paths.rotationIntent)) {
+        if (durableRepository.fixedPathExists(paths.rotationIntent)) {
             return@withStableLock recoverRotationLocked(target, runtime)
         }
         val current = when (val state = readState()) {
@@ -523,7 +514,7 @@ internal class DovecotOperatorCredentialStore(
                 after = DovecotOperatorCommitPoint.AfterIntentReplace,
             )
             staged.withBytes { bytes ->
-                writeAtomic(
+                durableRepository.writeAtomic(
                     target = paths.slot(new),
                     contents = bytes,
                     before = DovecotOperatorCommitPoint.BeforeSlotReplace,
@@ -532,8 +523,8 @@ internal class DovecotOperatorCredentialStore(
             }
             writeMaster(
                 listOf(
-                    OperatorMaster(old, oldMaster.hash),
-                    OperatorMaster(new, stagedHash),
+                    DovecotOperatorMaster(old, oldMaster.hash),
+                    DovecotOperatorMaster(new, stagedHash),
                 ),
             )
 
@@ -579,7 +570,7 @@ internal class DovecotOperatorCredentialStore(
                 DovecotOperatorCommitPoint.DrainCompleted,
                 paths.slot(old),
             )
-            writeMaster(listOf(OperatorMaster(new, stagedHash)))
+            writeMaster(listOf(DovecotOperatorMaster(new, stagedHash)))
 
             awaitProbeOutcome(
                 target = target,
@@ -607,13 +598,13 @@ internal class DovecotOperatorCredentialStore(
             )
         }
 
-        deleteDurably(
+        durableRepository.deleteDurably(
             target = paths.slot(old),
             before = DovecotOperatorCommitPoint.BeforeSlotDelete,
             after = DovecotOperatorCommitPoint.AfterSlotDelete,
         )
         requireFinalProjectionWithIntent(
-            intent = RotationIntent(old, new),
+            intent = DovecotOperatorRotationIntent(old, new),
             id = new,
             hash = stagedHash,
         )
@@ -625,7 +616,7 @@ internal class DovecotOperatorCredentialStore(
         target: DovecotOperatorTarget,
         runtime: DovecotOperatorRotationRuntime,
     ): DovecotOperatorId = withStableLock(recoverTemporaries = true) {
-        if (fixedPathExists(paths.rotationIntent)) {
+        if (durableRepository.fixedPathExists(paths.rotationIntent)) {
             recoverRotationLocked(target, runtime)
         } else {
             when (val state = readState()) {
@@ -647,102 +638,144 @@ internal class DovecotOperatorCredentialStore(
     ): DovecotOperatorId {
         val intent = readRotationIntent()
         val active = readActiveReference()
-        operatorSafetyCheck(active == intent.old || active == intent.new) {
-            "Dovecot operator rotation active reference is invalid"
-        }
         val masters = readMasters()
-        if (active == intent.old) {
-            requirePreSwitchProjection(intent, masters)
-            if (masters.size == 2) {
-                writeMaster(listOf(masters.first()))
-            }
-            if (fixedPathExists(paths.slot(intent.new))) {
-                deleteDurably(
-                    target = paths.slot(intent.new),
-                    before = DovecotOperatorCommitPoint.BeforeSlotDelete,
-                    after = DovecotOperatorCommitPoint.AfterSlotDelete,
-                )
-            }
-            requireFinalProjectionWithIntent(
+        val rawSlots = DovecotOperatorId.entries.filterTo(mutableSetOf()) { id ->
+            durableRepository.fixedPathExists(paths.slot(id))
+        }
+        when (
+            val phase = DovecotOperatorRotationProjection(
                 intent = intent,
-                id = intent.old,
-                hash = masters.first().hash,
-            )
-            finishRecoveredRotation(intent.old)
-            return intent.old
-        }
+                active = active,
+                masterIds = masters.map { it.id },
+                rawSlots = rawSlots,
+            ).phase()
+        ) {
+            is DovecotOperatorRotationPhase.Rollback -> {
+                requirePreSwitchProjection(intent, masters)
+                val oldMaster = masters.single { it.id == intent.old }
+                if (masters.size == 2) {
+                    writeMaster(listOf(oldMaster))
+                }
+                if (phase.stagedRawPresent) {
+                    awaitProbeOutcome(
+                        target = target,
+                        id = intent.new,
+                        expected =
+                            DovecotOperatorProbeResult.AuthenticationFailure,
+                        operation = runtime::observePasswdFile,
+                        failureMessage =
+                            "Rolled-back Dovecot operator credential " +
+                                "remained accepted",
+                    )
+                    observer.reached(
+                        DovecotOperatorCommitPoint.RollbackStagedRejected,
+                        paths.masterUsers,
+                    )
+                    awaitProbeOutcome(
+                        target = target,
+                        id = intent.old,
+                        expected = DovecotOperatorProbeResult.Success,
+                        operation = runtime::observePasswdFile,
+                        failureMessage =
+                            "Restored Dovecot operator credential " +
+                                "was not accepted",
+                    )
+                    observer.reached(
+                        DovecotOperatorCommitPoint.RollbackOldVerified,
+                        paths.masterUsers,
+                    )
+                    durableRepository.deleteDurably(
+                        target = paths.slot(intent.new),
+                        before = DovecotOperatorCommitPoint.BeforeSlotDelete,
+                        after = DovecotOperatorCommitPoint.AfterSlotDelete,
+                    )
+                }
+                requireFinalProjectionWithIntent(
+                    intent = intent,
+                    id = intent.old,
+                    hash = oldMaster.hash,
+                )
+                finishRecoveredRotation(intent.old)
+                return intent.old
+            }
 
-        requirePostSwitchProjection(intent, masters)
-        val newMaster = masters.single { it.id == intent.new }
-        loadCredential(intent.new).use { credential ->
-            runInterruptibly {
-                runtime.activateApplication(credential)
+            is DovecotOperatorRotationPhase.Forward -> {
+                requirePostSwitchProjection(intent, masters)
+                val newMaster = masters.single { it.id == intent.new }
+                loadCredential(intent.new).use { credential ->
+                    runInterruptibly {
+                        runtime.activateApplication(credential)
+                    }
+                }
+                awaitRuntimeOutcome(
+                    expected = DovecotOperatorProbeResult.Success,
+                    resultSupplier = {
+                        runtime.verifyApplication(target, intent.new)
+                    },
+                    failureMessage =
+                        "New Dovecot operator application generation " +
+                            "was not verified",
+                )
+                observer.reached(
+                    DovecotOperatorCommitPoint.ApplicationVerified,
+                    paths.active,
+                )
+                runInterruptibly { runtime.blockAndDrain(intent.old) }
+                observer.reached(
+                    DovecotOperatorCommitPoint.DrainCompleted,
+                    paths.slot(intent.old),
+                )
+                if (masters.size == 2) {
+                    writeMaster(listOf(newMaster))
+                }
+                if (phase.oldRawPresent) {
+                    awaitProbeOutcome(
+                        target = target,
+                        id = intent.old,
+                        expected =
+                            DovecotOperatorProbeResult.AuthenticationFailure,
+                        operation = runtime::observePasswdFile,
+                        failureMessage =
+                            "Revoked Dovecot operator credential " +
+                                "remained accepted",
+                    )
+                    observer.reached(
+                        DovecotOperatorCommitPoint.OldRejected,
+                        paths.masterUsers,
+                    )
+                }
+                awaitProbeOutcome(
+                    target = target,
+                    id = intent.new,
+                    expected = DovecotOperatorProbeResult.Success,
+                    operation = runtime::observePasswdFile,
+                    failureMessage =
+                        "Active Dovecot operator credential was not accepted",
+                )
+                observer.reached(
+                    DovecotOperatorCommitPoint.NewVerified,
+                    paths.masterUsers,
+                )
+                if (phase.oldRawPresent) {
+                    durableRepository.deleteDurably(
+                        target = paths.slot(intent.old),
+                        before = DovecotOperatorCommitPoint.BeforeSlotDelete,
+                        after = DovecotOperatorCommitPoint.AfterSlotDelete,
+                    )
+                }
+                requireFinalProjectionWithIntent(
+                    intent = intent,
+                    id = intent.new,
+                    hash = newMaster.hash,
+                )
+                finishRecoveredRotation(intent.new)
+                return intent.new
             }
         }
-        awaitRuntimeOutcome(
-            expected = DovecotOperatorProbeResult.Success,
-            resultSupplier = {
-                runtime.verifyApplication(target, intent.new)
-            },
-            failureMessage =
-                "New Dovecot operator application generation was not verified",
-        )
-        observer.reached(
-            DovecotOperatorCommitPoint.ApplicationVerified,
-            paths.active,
-        )
-        runInterruptibly { runtime.blockAndDrain(intent.old) }
-        observer.reached(
-            DovecotOperatorCommitPoint.DrainCompleted,
-            paths.slot(intent.old),
-        )
-        if (masters.size == 2) {
-            writeMaster(listOf(newMaster))
-        }
-        if (fixedPathExists(paths.slot(intent.old))) {
-            awaitProbeOutcome(
-                target = target,
-                id = intent.old,
-                expected = DovecotOperatorProbeResult.AuthenticationFailure,
-                operation = runtime::observePasswdFile,
-                failureMessage =
-                    "Revoked Dovecot operator credential remained accepted",
-            )
-            observer.reached(
-                DovecotOperatorCommitPoint.OldRejected,
-                paths.masterUsers,
-            )
-        }
-        awaitProbeOutcome(
-            target = target,
-            id = intent.new,
-            expected = DovecotOperatorProbeResult.Success,
-            operation = runtime::observePasswdFile,
-            failureMessage =
-                "Active Dovecot operator credential was not accepted",
-        )
-        observer.reached(
-            DovecotOperatorCommitPoint.NewVerified,
-            paths.masterUsers,
-        )
-        if (fixedPathExists(paths.slot(intent.old))) {
-            deleteDurably(
-                target = paths.slot(intent.old),
-                before = DovecotOperatorCommitPoint.BeforeSlotDelete,
-                after = DovecotOperatorCommitPoint.AfterSlotDelete,
-            )
-        }
-        requireFinalProjectionWithIntent(
-            intent = intent,
-            id = intent.new,
-            hash = newMaster.hash,
-        )
-        finishRecoveredRotation(intent.new)
-        return intent.new
     }
 
     private fun finishRecoveredRotation(id: DovecotOperatorId) {
-        deleteDurably(
+        durableRepository.deleteDurably(
             target = paths.rotationIntent,
             before = DovecotOperatorCommitPoint.BeforeIntentDelete,
             after = DovecotOperatorCommitPoint.AfterIntentDelete,
@@ -768,73 +801,47 @@ internal class DovecotOperatorCredentialStore(
     }
 
     private fun requirePreSwitchProjection(
-        intent: RotationIntent,
-        masters: List<OperatorMaster>,
+        intent: DovecotOperatorRotationIntent,
+        masters: List<DovecotOperatorMaster>,
     ) {
-        operatorSafetyCheck(
-            fixedPathExists(paths.slot(intent.old)) &&
-                masters.map { it.id } in listOf(
-                    listOf(intent.old),
-                    listOf(intent.old, intent.new),
-                ) &&
-                (
-                    masters.size == 1 ||
-                        fixedPathExists(paths.slot(intent.new))
-                    ),
-        ) {
-            "Dovecot operator pre-switch rotation state is invalid"
-        }
         masters.forEach(::verifyMaster)
         if (
-            fixedPathExists(paths.slot(intent.new)) &&
+            durableRepository.fixedPathExists(paths.slot(intent.new)) &&
             masters.none { it.id == intent.new }
         ) {
             requireValidRawSlot(intent.new)
         }
-        if (fixedPathExists(paths.slot(intent.new))) {
+        if (durableRepository.fixedPathExists(paths.slot(intent.new))) {
             requireDistinctRawSlots(intent.old, intent.new)
         }
     }
 
     private fun requirePostSwitchProjection(
-        intent: RotationIntent,
-        masters: List<OperatorMaster>,
+        intent: DovecotOperatorRotationIntent,
+        masters: List<DovecotOperatorMaster>,
     ) {
-        operatorSafetyCheck(
-            fixedPathExists(paths.slot(intent.new)) &&
-                masters.map { it.id } in listOf(
-                    listOf(intent.old, intent.new),
-                    listOf(intent.new),
-                ) &&
-                (
-                    masters.size == 1 ||
-                        fixedPathExists(paths.slot(intent.old))
-                    ),
-        ) {
-            "Dovecot operator post-switch rotation state is invalid"
-        }
         masters.forEach(::verifyMaster)
         if (
-            fixedPathExists(paths.slot(intent.old)) &&
+            durableRepository.fixedPathExists(paths.slot(intent.old)) &&
             masters.none { it.id == intent.old }
         ) {
             requireValidRawSlot(intent.old)
         }
-        if (fixedPathExists(paths.slot(intent.old))) {
+        if (durableRepository.fixedPathExists(paths.slot(intent.old))) {
             requireDistinctRawSlots(intent.old, intent.new)
         }
     }
 
     private fun requireFinalProjectionWithIntent(
-        intent: RotationIntent,
+        intent: DovecotOperatorRotationIntent,
         id: DovecotOperatorId,
         hash: String,
     ) {
         operatorSafetyCheck(
             readRotationIntent() == intent &&
                 readActiveReference() == id &&
-                fixedPathExists(paths.slot(id)) &&
-                !fixedPathExists(paths.slot(id.other())),
+                durableRepository.fixedPathExists(paths.slot(id)) &&
+                !durableRepository.fixedPathExists(paths.slot(id.other())),
         ) {
             "Dovecot operator recovered projection is invalid"
         }
@@ -849,11 +856,8 @@ internal class DovecotOperatorCredentialStore(
         verifyMaster(masters.single())
     }
 
-    private fun verifyMaster(master: OperatorMaster) {
-        val bytes = stableRead(
-            paths.slot(master.id),
-            MAX_SECRET_FILE_BYTES,
-        )
+    private fun verifyMaster(master: DovecotOperatorMaster) {
+        val bytes = durableRepository.readSlot(master.id)
         try {
             DovecotOperatorSecret.requireValid(bytes)
             val verified = DovecotOperatorSecret
@@ -869,7 +873,7 @@ internal class DovecotOperatorCredentialStore(
     }
 
     private fun requireValidRawSlot(id: DovecotOperatorId) {
-        val bytes = stableRead(paths.slot(id), MAX_SECRET_FILE_BYTES)
+        val bytes = durableRepository.readSlot(id)
         try {
             DovecotOperatorSecret.requireValid(bytes)
         } finally {
@@ -880,24 +884,14 @@ internal class DovecotOperatorCredentialStore(
     private fun requireDistinctRawSlots(
         first: DovecotOperatorId,
         second: DovecotOperatorId,
-    ) {
-        val firstBytes = stableRead(
-            paths.slot(first),
-            MAX_SECRET_FILE_BYTES,
-        )
-        val secondBytes = stableRead(
-            paths.slot(second),
-            MAX_SECRET_FILE_BYTES,
-        )
-        try {
-            operatorSafetyCheck(!firstBytes.contentEquals(secondBytes)) {
-                "Dovecot operator rotation credentials are duplicated"
-            }
-        } finally {
-            firstBytes.fill(0)
-            secondBytes.fill(0)
-        }
-    }
+    ) = DovecotOperatorRawSlotPair.requireDistinct(
+        readFirst = {
+            durableRepository.readSlot(first)
+        },
+        readSecond = {
+            durableRepository.readSlot(second)
+        },
+    )
 
     private fun bootstrapEmpty(): DovecotOperatorId {
         val id = DovecotOperatorId.A
@@ -911,7 +905,7 @@ internal class DovecotOperatorCredentialStore(
                 )
             }
             secret.withBytes { bytes ->
-                writeAtomic(
+                durableRepository.writeAtomic(
                     target = paths.slot(id),
                     contents = bytes,
                     before = DovecotOperatorCommitPoint.BeforeSlotReplace,
@@ -923,7 +917,7 @@ internal class DovecotOperatorCredentialStore(
                 "${id.masterUsername}:$hash\n"
                 ).toByteArray(StandardCharsets.US_ASCII)
             try {
-                writeAtomic(
+                durableRepository.writeAtomic(
                     target = paths.masterUsers,
                     contents = masterBytes,
                     before = DovecotOperatorCommitPoint.BeforeMasterReplace,
@@ -935,7 +929,7 @@ internal class DovecotOperatorCredentialStore(
 
             val referenceBytes = id.reference.toByteArray(StandardCharsets.US_ASCII)
             try {
-                writeAtomic(
+                durableRepository.writeAtomic(
                     target = paths.active,
                     contents = referenceBytes,
                     before = DovecotOperatorCommitPoint.BeforeActiveReplace,
@@ -974,53 +968,19 @@ internal class DovecotOperatorCredentialStore(
     private fun <T> withStableLock(
         recoverTemporaries: Boolean = false,
         block: () -> T,
-    ): T {
-        paths.revalidate()
-        ensureRuntimeRoot()
-        ensureOwnedDirectory(paths.secretsDirectory)
-        ensureOwnedDirectory(paths.operatorDirectory)
-        val localLock = processLocks.computeIfAbsent(paths.lock) { ReentrantLock() }
-        return localLock.withLock {
-            paths.revalidate()
-            requireRuntimeRoot()
-            requireOwnedDirectory(paths.secretsDirectory)
-            requireOwnedDirectory(paths.operatorDirectory)
-            ensureOwnedFile(paths.lock)
-            FileChannel.open(
-                paths.lock,
-                StandardOpenOption.WRITE,
-                LinkOption.NOFOLLOW_LINKS,
-            ).use { channel ->
-                channel.lock().use {
-                    observer.reached(
-                        DovecotOperatorCommitPoint.StableLockAcquired,
-                        paths.lock,
-                    )
-                    paths.revalidate()
-                    requireRuntimeRoot()
-                    requireOwnedDirectory(paths.secretsDirectory)
-                    requireOwnedDirectory(paths.operatorDirectory)
-                    requireOwnedRegularFile(paths.lock)
-                    if (recoverTemporaries) {
-                        cleanupRecognizedTemporaries()
-                    } else {
-                        requireNoTemporaryState()
-                    }
-                    block()
-                }
-            }
-        }
-    }
+    ): T = durableRepository.withStableLock(recoverTemporaries, block)
 
     private fun readState(): OperatorState {
-        requireNoTemporaryState()
-        operatorSafetyCheck(!fixedPathExists(paths.rotationIntent)) {
+        durableRepository.requireNoTemporaryState()
+        operatorSafetyCheck(
+            !durableRepository.fixedPathExists(paths.rotationIntent),
+        ) {
             "Dovecot operator rotation requires explicit recovery"
         }
-        val slotAExists = fixedPathExists(paths.slotA)
-        val slotBExists = fixedPathExists(paths.slotB)
-        val activeExists = fixedPathExists(paths.active)
-        val masterExists = fixedPathExists(paths.masterUsers)
+        val slotAExists = durableRepository.fixedPathExists(paths.slotA)
+        val slotBExists = durableRepository.fixedPathExists(paths.slotB)
+        val activeExists = durableRepository.fixedPathExists(paths.active)
+        val masterExists = durableRepository.fixedPathExists(paths.masterUsers)
         if (!slotAExists && !slotBExists && !activeExists && !masterExists) {
             return OperatorState.Empty
         }
@@ -1032,7 +992,7 @@ internal class DovecotOperatorCredentialStore(
             "Dovecot operator credential state is inconsistent"
         }
 
-        val activeBytes = stableRead(paths.active, MAX_ACTIVE_BYTES)
+        val activeBytes = durableRepository.readActiveReference()
         val id = try {
             val reference = decodeAscii(activeBytes, "active reference")
             DovecotOperatorId.fromReference(reference)
@@ -1040,13 +1000,13 @@ internal class DovecotOperatorCredentialStore(
             activeBytes.fill(0)
         }
         operatorSafetyCheck(
-            fixedPathExists(paths.slot(id)) &&
-                !fixedPathExists(paths.slot(id.other())),
+            durableRepository.fixedPathExists(paths.slot(id)) &&
+                !durableRepository.fixedPathExists(paths.slot(id.other())),
         ) {
             "Dovecot operator credential state is inconsistent"
         }
 
-        val secret = stableRead(paths.slot(id), MAX_SECRET_FILE_BYTES)
+        val secret = durableRepository.readSlot(id)
         try {
             try {
                 DovecotOperatorSecret.requireValid(secret)
@@ -1078,7 +1038,7 @@ internal class DovecotOperatorCredentialStore(
         }
     }
 
-    private fun readMaster(): OperatorMaster {
+    private fun readMaster(): DovecotOperatorMaster {
         val masters = readMasters()
         operatorSafetyCheck(masters.size == 1) {
             "Dovecot operator master file is invalid"
@@ -1086,8 +1046,8 @@ internal class DovecotOperatorCredentialStore(
         return masters.single()
     }
 
-    private fun readMasters(): List<OperatorMaster> {
-        val bytes = stableRead(paths.masterUsers, MAX_MASTER_FILE_BYTES)
+    private fun readMasters(): List<DovecotOperatorMaster> {
+        val bytes = durableRepository.readMasterUsers()
         return try {
             operatorSafetyCheck(
                 bytes.isNotEmpty() &&
@@ -1117,7 +1077,7 @@ internal class DovecotOperatorCredentialStore(
         }
     }
 
-    private fun parseMasterLine(line: String): OperatorMaster {
+    private fun parseMasterLine(line: String): DovecotOperatorMaster {
         operatorSafetyCheck(line.count { it == ':' } == 1) {
             "Dovecot operator master file is invalid"
         }
@@ -1137,14 +1097,11 @@ internal class DovecotOperatorCredentialStore(
                 failure,
             )
         }
-        return OperatorMaster(id, hash)
+        return DovecotOperatorMaster(id, hash)
     }
 
-    private fun readRotationIntent(): RotationIntent {
-        val bytes = stableRead(
-            paths.rotationIntent,
-            MAX_ROTATION_INTENT_BYTES,
-        )
+    private fun readRotationIntent(): DovecotOperatorRotationIntent {
+        val bytes = durableRepository.readRotationIntent()
         return try {
             operatorSafetyCheck(
                 bytes.size == MAX_ROTATION_INTENT_BYTES &&
@@ -1161,14 +1118,14 @@ internal class DovecotOperatorCredentialStore(
             operatorSafetyCheck(old != new && old.other() == new) {
                 "Dovecot operator rotation intent is invalid"
             }
-            RotationIntent(old, new)
+            DovecotOperatorRotationIntent(old, new)
         } finally {
             bytes.fill(0)
         }
     }
 
     private fun readActiveReference(): DovecotOperatorId {
-        val bytes = stableRead(paths.active, MAX_ACTIVE_BYTES)
+        val bytes = durableRepository.readActiveReference()
         return try {
             DovecotOperatorId.fromReference(
                 decodeAscii(bytes, "active reference"),
@@ -1191,7 +1148,7 @@ internal class DovecotOperatorCredentialStore(
         staged: DovecotOperatorSecret,
         old: DovecotOperatorId,
     ) {
-        val oldBytes = stableRead(paths.slot(old), MAX_SECRET_FILE_BYTES)
+        val oldBytes = durableRepository.readSlot(old)
         try {
             operatorSafetyCheck(
                 !staged.withBytes(oldBytes::contentEquals),
@@ -1203,7 +1160,7 @@ internal class DovecotOperatorCredentialStore(
         }
     }
 
-    private fun writeMaster(entries: List<OperatorMaster>) {
+    private fun writeMaster(entries: List<DovecotOperatorMaster>) {
         operatorSafetyCheck(
             entries.size in 1..2 &&
                 entries.map { it.id }.distinct().size == entries.size,
@@ -1217,7 +1174,7 @@ internal class DovecotOperatorCredentialStore(
             "${entry.id.masterUsername}:${entry.hash}\n"
         }.toByteArray(StandardCharsets.US_ASCII)
         try {
-            writeAtomic(
+            durableRepository.writeAtomic(
                 target = paths.masterUsers,
                 contents = contents,
                 before = DovecotOperatorCommitPoint.BeforeMasterReplace,
@@ -1236,7 +1193,7 @@ internal class DovecotOperatorCredentialStore(
     ) {
         val contents = value.toByteArray(StandardCharsets.US_ASCII)
         try {
-            writeAtomic(target, contents, before, after)
+            durableRepository.writeAtomic(target, contents, before, after)
         } finally {
             contents.fill(0)
         }
@@ -1321,7 +1278,7 @@ internal class DovecotOperatorCredentialStore(
     }
 
     private fun loadCredential(id: DovecotOperatorId): DovecotOperatorCredential {
-        val bytes = stableRead(paths.slot(id), MAX_SECRET_FILE_BYTES)
+        val bytes = durableRepository.readSlot(id)
         try {
             DovecotOperatorSecret.requireValid(bytes)
             return DovecotOperatorCredential(
@@ -1331,449 +1288,6 @@ internal class DovecotOperatorCredentialStore(
         } catch (failure: Throwable) {
             bytes.fill(0)
             throw failure
-        }
-    }
-
-    private fun deleteDurably(
-        target: Path,
-        before: DovecotOperatorCommitPoint,
-        after: DovecotOperatorCommitPoint,
-    ) {
-        operatorSafetyCheck(
-            target in setOf(paths.slotA, paths.slotB, paths.rotationIntent),
-        ) {
-            "Dovecot operator delete target is invalid"
-        }
-        requireOwnedRegularFile(target)
-        observer.reached(before, target)
-        Files.delete(target)
-        fsyncOperatorDirectory(requireNotNull(target.parent))
-        operatorSafetyCheck(
-            Files.notExists(target, LinkOption.NOFOLLOW_LINKS),
-        ) {
-            "Dovecot operator delete verification failed"
-        }
-        observer.reached(after, target)
-    }
-
-    private fun writeAtomic(
-        target: Path,
-        contents: ByteArray,
-        before: DovecotOperatorCommitPoint,
-        after: DovecotOperatorCommitPoint,
-    ) {
-        operatorSafetyCheck(
-            target in setOf(
-                paths.slotA,
-                paths.slotB,
-                paths.active,
-                paths.rotationIntent,
-                paths.masterUsers,
-            ),
-        ) {
-            "Dovecot operator write target is invalid"
-        }
-        val temporary = createTemporary(target)
-        requireOwnedRegularFile(temporary)
-        FileChannel.open(
-            temporary,
-            StandardOpenOption.WRITE,
-            LinkOption.NOFOLLOW_LINKS,
-        ).use { channel ->
-            val buffer = ByteBuffer.wrap(contents)
-            while (buffer.hasRemaining()) {
-                if (channel.write(buffer) < 0) throw EOFException()
-            }
-            channel.force(true)
-        }
-        requireOwnedRegularFile(temporary)
-        observer.reached(before, temporary)
-        try {
-            Files.move(
-                temporary,
-                target,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (unsupported: AtomicMoveNotSupportedException) {
-            throw IllegalStateException(
-                "Atomic Dovecot operator replacement is unavailable",
-                unsupported,
-            )
-        }
-        fsyncOperatorDirectory(requireNotNull(target.parent))
-        requireOwnedRegularFile(target)
-        val verified = stableRead(target, maximumBytesFor(target))
-        try {
-            operatorSafetyCheck(verified.contentEquals(contents)) {
-                "Dovecot operator write verification failed"
-            }
-        } finally {
-            verified.fill(0)
-        }
-        observer.reached(after, target)
-    }
-
-    private fun maximumBytesFor(target: Path): Int = when (target) {
-        paths.active -> MAX_ACTIVE_BYTES
-        paths.rotationIntent -> MAX_ROTATION_INTENT_BYTES
-        paths.masterUsers -> MAX_MASTER_FILE_BYTES
-        paths.slotA, paths.slotB -> MAX_SECRET_FILE_BYTES
-        else -> throw IllegalStateException("Dovecot operator write target is invalid")
-    }
-
-    private fun createTemporary(target: Path): Path {
-        repeat(MAX_TEMPORARY_ATTEMPTS) {
-            val candidate = target.resolveSibling(
-                "${target.fileName}.tmp-${UUID.randomUUID()}",
-            )
-            try {
-                createOwnerOnlyFile(candidate)
-                return candidate
-            } catch (_: FileAlreadyExistsException) {
-                // Try another restrictive UUID name.
-            }
-        }
-        throw IllegalStateException("Could not allocate a Dovecot operator temporary")
-    }
-
-    private fun requireNoTemporaryState() {
-        listOf(paths.secretsDirectory, paths.operatorDirectory).forEach { directory ->
-            Files.newDirectoryStream(directory).use { entries ->
-                entries.forEach { candidate ->
-                    operatorSafetyCheck(!isTemporaryCandidate(candidate)) {
-                        "Dovecot operator temporary state requires manual recovery"
-                    }
-                }
-            }
-        }
-    }
-
-    private fun cleanupRecognizedTemporaries() {
-        listOf(paths.secretsDirectory, paths.operatorDirectory).forEach { directory ->
-            Files.newDirectoryStream(directory).use { entries ->
-                entries.forEach { candidate ->
-                    if (!isTemporaryCandidate(candidate)) return@forEach
-                    operatorSafetyCheck(isTemporaryPath(candidate)) {
-                        "Dovecot operator temporary state is unrecognized"
-                    }
-                    val target = requireNotNull(temporaryTarget(candidate))
-                    requireOwnedRegularFile(candidate)
-                    val attributes = Files.readAttributes(
-                        candidate,
-                        BasicFileAttributes::class.java,
-                        LinkOption.NOFOLLOW_LINKS,
-                    )
-                    operatorSafetyCheck(
-                        attributes.size() in
-                            0..maximumBytesFor(target).toLong(),
-                    ) {
-                        "Dovecot operator temporary file is too large"
-                    }
-                    observer.reached(
-                        DovecotOperatorCommitPoint.BeforeTemporaryDelete,
-                        candidate,
-                    )
-                    Files.delete(candidate)
-                    fsyncOperatorDirectory(directory)
-                    observer.reached(
-                        DovecotOperatorCommitPoint.AfterTemporaryDelete,
-                        candidate,
-                    )
-                }
-            }
-        }
-        requireNoTemporaryState()
-    }
-
-    private fun isTemporaryPath(path: Path): Boolean {
-        val target = temporaryTarget(path) ?: return false
-        val prefix = "${target.fileName}.tmp-"
-        val suffix = path.fileName.toString().removePrefix(prefix)
-        return CANONICAL_TEMPORARY_UUID.matches(suffix)
-    }
-
-    private fun isTemporaryCandidate(path: Path): Boolean {
-        if (
-            path.parent !in
-            setOf(paths.secretsDirectory, paths.operatorDirectory)
-        ) {
-            return false
-        }
-        val name = path.fileName.toString()
-        return temporaryTargets().any { target ->
-            name.startsWith("${target.fileName}.tmp-")
-        }
-    }
-
-    private fun temporaryTarget(path: Path): Path? {
-        if (
-            path.parent !in
-            setOf(paths.secretsDirectory, paths.operatorDirectory)
-        ) {
-            return null
-        }
-        val name = path.fileName.toString()
-        return temporaryTargets().singleOrNull { target ->
-            name.startsWith("${target.fileName}.tmp-")
-        }
-    }
-
-    private fun temporaryTargets(): List<Path> =
-        listOf(
-            paths.slotA,
-            paths.slotB,
-            paths.active,
-            paths.rotationIntent,
-            paths.masterUsers,
-        )
-
-    private fun fixedPathExists(path: Path): Boolean = when {
-        Files.exists(path, LinkOption.NOFOLLOW_LINKS) -> true
-        Files.notExists(path, LinkOption.NOFOLLOW_LINKS) -> false
-        else -> throw IllegalStateException("Dovecot operator file state is indeterminate")
-    }
-
-    private fun stableRead(
-        path: Path,
-        maximumBytes: Int,
-    ): ByteArray {
-        requireOwnedRegularFile(path)
-        val before = Files.readAttributes(
-            path,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        operatorSafetyCheck(before.size() in 0..maximumBytes.toLong()) {
-            "Dovecot operator file is too large"
-        }
-        val bytes = ByteArray(before.size().toInt())
-        var offset = 0
-        try {
-            FileChannel.open(
-                path,
-                StandardOpenOption.READ,
-                LinkOption.NOFOLLOW_LINKS,
-            ).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) {
-                    val count = channel.read(buffer)
-                    if (count < 0) break
-                    offset += count
-                }
-                operatorSafetyCheck(offset == bytes.size && channel.read(ByteBuffer.allocate(1)) < 0) {
-                    "Dovecot operator file changed while being read"
-                }
-            }
-            val after = Files.readAttributes(
-                path,
-                BasicFileAttributes::class.java,
-                LinkOption.NOFOLLOW_LINKS,
-            )
-            operatorSafetyCheck(
-                after.isRegularFile &&
-                    before.fileKey() == after.fileKey() &&
-                    before.size() == after.size() &&
-                    before.lastModifiedTime() == after.lastModifiedTime(),
-            ) {
-                "Dovecot operator file changed while being read"
-            }
-            requireOwnedRegularFile(path)
-            return bytes
-        } catch (failure: Throwable) {
-            bytes.fill(0)
-            throw failure
-        }
-    }
-
-    private fun ensureRuntimeRoot() {
-        val runtimeBase = paths.dashboardRoot.resolve(".runtime")
-        if (Files.notExists(runtimeBase, LinkOption.NOFOLLOW_LINKS)) {
-            try {
-                createOwnerOnlyDirectory(runtimeBase)
-                fsyncOperatorDirectory(paths.dashboardRoot)
-            } catch (_: FileAlreadyExistsException) {
-                // A concurrent runtime owner created it; validate below.
-            }
-        }
-        requireRuntimeDirectory(runtimeBase)
-        if (Files.notExists(paths.runtimeRoot, LinkOption.NOFOLLOW_LINKS)) {
-            try {
-                createOwnerOnlyDirectory(paths.runtimeRoot)
-                fsyncOperatorDirectory(requireNotNull(paths.runtimeRoot.parent))
-            } catch (_: FileAlreadyExistsException) {
-                // A concurrent runtime owner created it; validate below.
-            }
-        }
-        requireRuntimeRoot()
-    }
-
-    private fun requireRuntimeRoot() {
-        requireRuntimeDirectory(paths.dashboardRoot.resolve(".runtime"))
-        requireRuntimeDirectory(paths.runtimeRoot)
-    }
-
-    private fun requireRuntimeDirectory(path: Path) {
-        operatorSafetyCheck(
-            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path) &&
-                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
-                paths.trustedOwner,
-        ) {
-            "Dovecot operator runtime root is unsafe"
-        }
-        if (supportsOperatorPosix(path)) {
-            val permissions = Files.getPosixFilePermissions(
-                path,
-                LinkOption.NOFOLLOW_LINKS,
-            )
-            operatorSafetyCheck(
-                PosixFilePermission.GROUP_WRITE !in permissions &&
-                    PosixFilePermission.OTHERS_WRITE !in permissions,
-            ) {
-                "Dovecot operator runtime root permissions are unsafe"
-            }
-        }
-    }
-
-    private fun ensureOwnedDirectory(path: Path) {
-        val parent = requireNotNull(path.parent)
-        operatorSafetyCheck(
-            Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(parent),
-        ) {
-            "Dovecot operator directory parent is unsafe"
-        }
-        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
-            try {
-                createOwnerOnlyDirectory(path)
-                fsyncOperatorDirectory(parent)
-            } catch (_: FileAlreadyExistsException) {
-                // A concurrent writer created it; validate below.
-            }
-        }
-        requireOwnedDirectory(path)
-    }
-
-    private fun requireOwnedDirectory(path: Path) {
-        operatorSafetyCheck(
-            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path) &&
-                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
-                paths.trustedOwner,
-        ) {
-            "Dovecot operator directory is unsafe"
-        }
-        if (supportsOperatorPosix(path)) {
-            operatorSafetyCheck(
-                Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS) ==
-                    DIRECTORY_PERMISSIONS,
-            ) {
-                "Dovecot operator directory permissions are unsafe"
-            }
-        }
-        operatorSafetyCheck(
-            Files.isReadable(path) &&
-                Files.isWritable(path) &&
-                Files.isExecutable(path),
-        ) {
-            "Dovecot operator directory access is unsafe"
-        }
-    }
-
-    private fun ensureOwnedFile(path: Path) {
-        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
-            try {
-                createOwnerOnlyFile(path)
-                FileChannel.open(
-                    path,
-                    StandardOpenOption.WRITE,
-                    LinkOption.NOFOLLOW_LINKS,
-                ).use { it.force(true) }
-                fsyncOperatorDirectory(requireNotNull(path.parent))
-            } catch (_: FileAlreadyExistsException) {
-                // A concurrent process created the stable lock; validate below.
-            }
-        }
-        requireOwnedRegularFile(path)
-    }
-
-    private fun requireOwnedRegularFile(path: Path) {
-        operatorSafetyCheck(
-            Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path) &&
-                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
-                paths.trustedOwner,
-        ) {
-            "Dovecot operator file is unsafe"
-        }
-        if (supportsOperatorPosix(path)) {
-            operatorSafetyCheck(
-                Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS) ==
-                    FILE_PERMISSIONS,
-            ) {
-                "Dovecot operator file permissions are unsafe"
-            }
-        }
-        operatorSafetyCheck(Files.isReadable(path) && Files.isWritable(path)) {
-            "Dovecot operator file access is unsafe"
-        }
-    }
-
-    private fun createOwnerOnlyDirectory(path: Path) {
-        if (supportsOperatorPosix(requireNotNull(path.parent))) {
-            Files.createDirectory(path, DIRECTORY_ATTRIBUTE)
-        } else {
-            Files.createDirectory(path)
-            setFallbackOwnerOnly(path, directory = true)
-        }
-    }
-
-    private fun createOwnerOnlyFile(path: Path) {
-        if (supportsOperatorPosix(requireNotNull(path.parent))) {
-            Files.createFile(path, FILE_ATTRIBUTE)
-        } else {
-            Files.createFile(path)
-            setFallbackOwnerOnly(path, directory = false)
-        }
-    }
-
-    private fun setFallbackOwnerOnly(
-        path: Path,
-        directory: Boolean,
-    ) {
-        val file = path.toFile()
-        val removedRead = file.setReadable(false, false)
-        val removedWrite = file.setWritable(false, false)
-        val removedExecute = file.setExecutable(false, false)
-        operatorSafetyCheck(
-            removedRead && removedWrite && removedExecute,
-        ) {
-            "Could not remove broad Dovecot operator permissions"
-        }
-        operatorSafetyCheck(file.setReadable(true, true) && file.setWritable(true, true)) {
-            "Could not set owner-only Dovecot operator permissions"
-        }
-        if (directory) {
-            operatorSafetyCheck(file.setExecutable(true, true)) {
-                "Could not set owner-only Dovecot operator permissions"
-            }
-        }
-    }
-
-    private fun fsyncOperatorDirectory(directory: Path) {
-        try {
-            FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
-        } catch (failure: UnsupportedOperationException) {
-            throw IllegalStateException(
-                "Could not make Dovecot operator directory durable",
-                failure,
-            )
-        } catch (failure: java.io.IOException) {
-            throw IllegalStateException(
-                "Could not make Dovecot operator directory durable",
-                failure,
-            )
         }
     }
 
@@ -1800,37 +1314,10 @@ internal class DovecotOperatorCredentialStore(
         ) : OperatorState
     }
 
-    private class OperatorMaster(
-        val id: DovecotOperatorId,
-        val hash: String,
-    )
-
-    private data class RotationIntent(
-        val old: DovecotOperatorId,
-        val new: DovecotOperatorId,
-    )
-
     companion object {
-        private const val MAX_ACTIVE_BYTES = 1
         private const val MAX_ROTATION_INTENT_BYTES = 3
-        private const val MAX_SECRET_FILE_BYTES = 256
-        private const val MAX_MASTER_FILE_BYTES = 8 * 1024
-        private const val MAX_TEMPORARY_ATTEMPTS = 16
         private const val ROTATION_OBSERVATION_ATTEMPTS = 7
         private const val ROTATION_OBSERVATION_DELAY_MILLIS = 250L
-        private val CANONICAL_TEMPORARY_UUID = Regex(
-            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
-                "[0-9a-f]{4}-[0-9a-f]{12}",
-        )
-        private val processLocks = ConcurrentHashMap<Path, ReentrantLock>()
-        private val DIRECTORY_PERMISSIONS: Set<PosixFilePermission> =
-            PosixFilePermissions.fromString("rwx------")
-        private val FILE_PERMISSIONS: Set<PosixFilePermission> =
-            PosixFilePermissions.fromString("rw-------")
-        private val DIRECTORY_ATTRIBUTE: FileAttribute<Set<PosixFilePermission>> =
-            PosixFilePermissions.asFileAttribute(DIRECTORY_PERMISSIONS)
-        private val FILE_ATTRIBUTE: FileAttribute<Set<PosixFilePermission>> =
-            PosixFilePermissions.asFileAttribute(FILE_PERMISSIONS)
         private val ASCII_DECODER = ThreadLocal.withInitial {
             StandardCharsets.US_ASCII.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)

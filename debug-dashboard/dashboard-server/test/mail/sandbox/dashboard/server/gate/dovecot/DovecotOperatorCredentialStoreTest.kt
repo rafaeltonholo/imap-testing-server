@@ -628,7 +628,9 @@ class DovecotOperatorCredentialStoreTest {
                 crashing.rotateOrRecover(target, crashRuntime)
             }
 
-            val recoveryRuntime = RecordingRotationRuntime()
+            val recoveryRuntime = RecordingRotationRuntime(
+                fixture.paths.masterUsers,
+            )
             val recovered = DovecotOperatorCredentialStore(
                 paths = fixture.paths,
                 generator = DovecotOperatorSecretGenerator {
@@ -661,7 +663,10 @@ class DovecotOperatorCredentialStoreTest {
                     "dashboard-operator-a:$HASH_A\n",
                     Files.readString(fixture.paths.masterUsers),
                 )
-                assertEquals(emptyList(), recoveryRuntime.events)
+                assertEquals(
+                    listOf("observe-b", "observe-a"),
+                    recoveryRuntime.events,
+                )
             } else {
                 assertEquals("b", Files.readString(fixture.paths.active))
                 assertEquals("new-secret", Files.readString(fixture.paths.slotB))
@@ -687,6 +692,356 @@ class DovecotOperatorCredentialStoreTest {
                 )
             }
             assertTrue(generated.all { it == 0.toByte() })
+        }
+    }
+
+    @Test
+    fun rollbackPublishesOldOnlyThenProvesInverseAuthBeforeDeletingStagedRaw() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        writeOwnerOnly(fixture.paths.rotationIntent, "a:b")
+        writeOwnerOnly(fixture.paths.slotB, "new-secret")
+        writeOwnerOnly(
+            fixture.paths.masterUsers,
+            "dashboard-operator-a:$HASH_A\n" +
+                "dashboard-operator-b:$HASH_B\n",
+        )
+        val timeline = mutableListOf<String>()
+        val stagedResults = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.Success,
+                DovecotOperatorProbeResult.AuthenticationFailure,
+            ),
+        )
+        val oldResults = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.AuthenticationFailure,
+                DovecotOperatorProbeResult.Success,
+            ),
+        )
+        val sleeps = mutableListOf<Long>()
+        val runtime = RollbackRecordingRuntime(
+            paths = fixture.paths,
+            timeline = timeline,
+            stagedResults = stagedResults,
+            oldResults = oldResults,
+        )
+        val recovered = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                error("rollback must not generate")
+            },
+            hasher = DovecotOperatorHashBoundary {
+                error("rollback must not hash")
+            },
+            verifier = MATCHING_VERIFIER,
+            observer = DovecotOperatorStoreObserver { point, _ ->
+                timeline += "observer:${point.name}"
+            },
+            rotationSleeper = DovecotOperatorRotationSleeper(sleeps::add),
+        ).recoverRotation(
+            target = DovecotOperatorTarget.create("rollback@local.test"),
+            runtime = runtime,
+        )
+
+        assertEquals(DovecotOperatorId.A, recovered)
+        assertEquals(
+            listOf(
+                "observer:StableLockAcquired",
+                "observer:BeforeMasterReplace",
+                "observer:AfterMasterReplace",
+                "runtime:observe-b",
+                "runtime:observe-b",
+                "observer:RollbackStagedRejected",
+                "runtime:observe-a",
+                "runtime:observe-a",
+                "observer:RollbackOldVerified",
+                "observer:BeforeSlotDelete",
+                "observer:AfterSlotDelete",
+                "observer:BeforeIntentDelete",
+                "observer:AfterIntentDelete",
+                "observer:FinalVerified",
+            ),
+            timeline,
+        )
+        assertEquals(List(2) { 250L }, sleeps)
+        assertTrue(stagedResults.isEmpty())
+        assertTrue(oldResults.isEmpty())
+        assertEquals("a", Files.readString(fixture.paths.active))
+        assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+        assertFalse(Files.exists(fixture.paths.slotB, LinkOption.NOFOLLOW_LINKS))
+        assertFalse(
+            Files.exists(
+                fixture.paths.rotationIntent,
+                LinkOption.NOFOLLOW_LINKS,
+            ),
+        )
+    }
+
+    @Test
+    fun rollbackRecoveryRestartsFromEverySemanticAndDurableBoundary() {
+        val fullTimeline = listOf(
+            "observer:StableLockAcquired",
+            "observer:BeforeMasterReplace",
+            "observer:AfterMasterReplace",
+            "runtime:observe-b",
+            "observer:RollbackStagedRejected",
+            "runtime:observe-a",
+            "observer:RollbackOldVerified",
+            "observer:BeforeSlotDelete",
+            "observer:AfterSlotDelete",
+            "observer:BeforeIntentDelete",
+            "observer:AfterIntentDelete",
+            "observer:FinalVerified",
+        )
+        val restartTimelines = mapOf(
+            DovecotOperatorCommitPoint.BeforeMasterReplace to
+                listOf(
+                    "observer:StableLockAcquired",
+                    "observer:BeforeTemporaryDelete",
+                    "observer:AfterTemporaryDelete",
+                    "observer:BeforeMasterReplace",
+                    "observer:AfterMasterReplace",
+                    "runtime:observe-b",
+                    "observer:RollbackStagedRejected",
+                    "runtime:observe-a",
+                    "observer:RollbackOldVerified",
+                    "observer:BeforeSlotDelete",
+                    "observer:AfterSlotDelete",
+                    "observer:BeforeIntentDelete",
+                    "observer:AfterIntentDelete",
+                    "observer:FinalVerified",
+                ),
+            DovecotOperatorCommitPoint.AfterMasterReplace to
+                fullTimeline.drop(3).let {
+                    listOf("observer:StableLockAcquired") + it
+                },
+            DovecotOperatorCommitPoint.RollbackStagedRejected to
+                fullTimeline.drop(3).let {
+                    listOf("observer:StableLockAcquired") + it
+                },
+            DovecotOperatorCommitPoint.RollbackOldVerified to
+                fullTimeline.drop(3).let {
+                    listOf("observer:StableLockAcquired") + it
+                },
+            DovecotOperatorCommitPoint.BeforeSlotDelete to
+                fullTimeline.drop(3).let {
+                    listOf("observer:StableLockAcquired") + it
+                },
+            DovecotOperatorCommitPoint.AfterSlotDelete to
+                listOf(
+                    "observer:StableLockAcquired",
+                    "observer:BeforeIntentDelete",
+                    "observer:AfterIntentDelete",
+                    "observer:FinalVerified",
+                ),
+            DovecotOperatorCommitPoint.BeforeIntentDelete to
+                listOf(
+                    "observer:StableLockAcquired",
+                    "observer:BeforeIntentDelete",
+                    "observer:AfterIntentDelete",
+                    "observer:FinalVerified",
+                ),
+            DovecotOperatorCommitPoint.AfterIntentDelete to
+                listOf("observer:StableLockAcquired"),
+            DovecotOperatorCommitPoint.FinalVerified to
+                listOf("observer:StableLockAcquired"),
+        )
+
+        restartTimelines.forEach { (crashPoint, expectedRestartTimeline) ->
+            val fixture = preSwitchRotationFixture()
+            val firstTimeline = mutableListOf<String>()
+            val firstRuntime = rollbackRuntime(fixture.paths, firstTimeline)
+            val crashing = loaderOnlyStore(
+                fixture = fixture,
+                observer = DovecotOperatorStoreObserver { point, _ ->
+                    firstTimeline += "observer:${point.name}"
+                    if (point == crashPoint) throw SimulatedStoreFailure()
+                },
+            )
+
+            assertFailsWith<SimulatedStoreFailure>(crashPoint.name) {
+                crashing.recoverRotation(
+                    DovecotOperatorTarget.create("restart@local.test"),
+                    firstRuntime,
+                )
+            }
+
+            val crashIndex = fullTimeline.indexOf("observer:${crashPoint.name}")
+            assertEquals(
+                fullTimeline.take(crashIndex + 1),
+                firstTimeline,
+                crashPoint.name,
+            )
+            val restartTimeline = mutableListOf<String>()
+            val restarted = loaderOnlyStore(
+                fixture = fixture,
+                observer = DovecotOperatorStoreObserver { point, _ ->
+                    restartTimeline += "observer:${point.name}"
+                },
+            )
+            assertEquals(
+                DovecotOperatorId.A,
+                restarted.recoverRotation(
+                    DovecotOperatorTarget.create("restart@local.test"),
+                    rollbackRuntime(fixture.paths, restartTimeline),
+                ),
+                crashPoint.name,
+            )
+            assertEquals(
+                expectedRestartTimeline,
+                restartTimeline,
+                crashPoint.name,
+            )
+            assertEquals("a", Files.readString(fixture.paths.active))
+            assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+            assertFalse(
+                Files.exists(fixture.paths.slotB, LinkOption.NOFOLLOW_LINKS),
+                crashPoint.name,
+            )
+            assertFalse(
+                Files.exists(
+                    fixture.paths.rotationIntent,
+                    LinkOption.NOFOLLOW_LINKS,
+                ),
+                crashPoint.name,
+            )
+        }
+    }
+
+    @Test
+    fun rollbackProbeFailureRetainsStagedRawAndIntentForExplicitRetry() {
+        val fixture = preSwitchRotationFixture()
+        val events = mutableListOf<String>()
+        val sleeps = mutableListOf<Long>()
+        val runtime = object : DovecotOperatorRotationRuntime {
+            override fun observePasswdFile(
+                target: DovecotOperatorTarget,
+                credential: DovecotOperatorCredential,
+            ): DovecotOperatorProbeResult {
+                events += "observe-${credential.id.reference}"
+                return DovecotOperatorProbeResult.Success
+            }
+
+            override fun activateApplication(
+                credential: DovecotOperatorCredential,
+            ) = error("rollback must not activate")
+
+            override fun verifyApplication(
+                target: DovecotOperatorTarget,
+                expectedId: DovecotOperatorId,
+            ) = error("rollback must not verify an application generation")
+
+            override fun blockAndDrain(id: DovecotOperatorId) =
+                error("rollback must not drain")
+        }
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    error("rollback must not generate")
+                },
+                hasher = DovecotOperatorHashBoundary {
+                    error("rollback must not hash")
+                },
+                verifier = MATCHING_VERIFIER,
+                rotationSleeper = DovecotOperatorRotationSleeper(sleeps::add),
+            ).recoverRotation(
+                DovecotOperatorTarget.create("retry-rollback@local.test"),
+                runtime,
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("remained accepted"))
+        assertEquals(List(7) { "observe-b" }, events)
+        assertEquals(List(6) { 250L }, sleeps)
+        assertEquals("a:b", Files.readString(fixture.paths.rotationIntent))
+        assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+        assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+        assertEquals(
+            "dashboard-operator-a:$HASH_A\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+    }
+
+    @Test
+    fun corruptOrMisroutedRecoveryVerifierFailsBeforeRuntimeOrMutation() {
+        val arrangements = listOf<Pair<String, (OperatorFixture) -> Unit>>(
+            "active-old-new-hash-misrouted" to { fixture ->
+                writeOwnerOnly(fixture.paths.rotationIntent, "a:b")
+                writeOwnerOnly(fixture.paths.slotB, "new-secret")
+                writeOwnerOnly(
+                    fixture.paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_A\n",
+                )
+            },
+            "active-new-old-raw-corrupt" to { fixture ->
+                writeOwnerOnly(fixture.paths.rotationIntent, "a:b")
+                writeOwnerOnly(fixture.paths.slotA, "corrupt-old")
+                writeOwnerOnly(fixture.paths.slotB, "new-secret")
+                writeOwnerOnly(fixture.paths.active, "b")
+                writeOwnerOnly(
+                    fixture.paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_B\n",
+                )
+            },
+        )
+
+        arrangements.forEach { (label, arrange) ->
+            val fixture = temporaryRepository()
+            bootstrap(fixture, "old-secret")
+            arrange(fixture)
+            val before = listOf(
+                fixture.paths.active,
+                fixture.paths.rotationIntent,
+                fixture.paths.slotA,
+                fixture.paths.slotB,
+                fixture.paths.masterUsers,
+            ).associateWith { path ->
+                if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.readAllBytes(path)
+                } else {
+                    null
+                }
+            }
+            val runtime = RecordingRotationRuntime()
+            try {
+                assertFailsWith<IllegalStateException>(label) {
+                    DovecotOperatorCredentialStore(
+                        paths = fixture.paths,
+                        generator = DovecotOperatorSecretGenerator {
+                            error("corrupt recovery must not generate")
+                        },
+                        hasher = DovecotOperatorHashBoundary {
+                            error("corrupt recovery must not hash")
+                        },
+                        verifier = mappingVerifier(),
+                    ).recoverRotation(
+                        DovecotOperatorTarget.create("corrupt@local.test"),
+                        runtime,
+                    )
+                }
+
+                assertTrue(runtime.events.isEmpty(), label)
+                before.forEach { (path, expected) ->
+                    if (expected == null) {
+                        assertFalse(
+                            Files.exists(path, LinkOption.NOFOLLOW_LINKS),
+                            label,
+                        )
+                    } else {
+                        assertContentEquals(
+                            expected,
+                            Files.readAllBytes(path),
+                            label,
+                        )
+                    }
+                }
+            } finally {
+                before.values.filterNotNull().forEach { it.fill(0) }
+            }
         }
     }
 
@@ -1950,7 +2305,11 @@ class DovecotOperatorCredentialStoreTest {
         assertTrue(owned.all { it == 0.toByte() })
     }
 
-    private fun loaderOnlyStore(fixture: OperatorFixture): DovecotOperatorCredentialStore =
+    private fun loaderOnlyStore(
+        fixture: OperatorFixture,
+        observer: DovecotOperatorStoreObserver =
+            DovecotOperatorStoreObserver { _, _ -> },
+    ): DovecotOperatorCredentialStore =
         DovecotOperatorCredentialStore(
             paths = fixture.paths,
             generator = DovecotOperatorSecretGenerator {
@@ -1960,7 +2319,48 @@ class DovecotOperatorCredentialStoreTest {
                 error("loader must not hash")
             },
             verifier = MATCHING_VERIFIER,
+            observer = observer,
         )
+
+    private fun preSwitchRotationFixture(): OperatorFixture =
+        temporaryRepository().also { fixture ->
+            bootstrap(fixture, "old-secret")
+            writeOwnerOnly(fixture.paths.rotationIntent, "a:b")
+            writeOwnerOnly(fixture.paths.slotB, "new-secret")
+            writeOwnerOnly(
+                fixture.paths.masterUsers,
+                "dashboard-operator-a:$HASH_A\n" +
+                    "dashboard-operator-b:$HASH_B\n",
+            )
+        }
+
+    private fun rollbackRuntime(
+        paths: DovecotOperatorPaths,
+        timeline: MutableList<String>,
+    ): DovecotOperatorRotationRuntime = RollbackRecordingRuntime(
+        paths = paths,
+        timeline = timeline,
+        stagedResults = ArrayDeque(
+            listOf(DovecotOperatorProbeResult.AuthenticationFailure),
+        ),
+        oldResults = ArrayDeque(
+            listOf(DovecotOperatorProbeResult.Success),
+        ),
+    )
+
+    private fun mappingVerifier(): DovecotOperatorHashVerifier {
+        val old = "old-secret".toByteArray(StandardCharsets.US_ASCII)
+        val new = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        return DovecotOperatorHashVerifier { secret, hash ->
+            secret.withBytes { bytes ->
+                when (hash) {
+                    HASH_A -> bytes.contentEquals(old)
+                    HASH_B -> bytes.contentEquals(new)
+                    else -> false
+                }
+            }
+        }
+    }
 
     private fun temporaryRepository(): OperatorFixture {
         val repositoryRoot = Files.createTempDirectory("operator-store-repository-")
@@ -2082,7 +2482,9 @@ class DovecotOperatorCredentialStoreTest {
 
                 val recoveredFixture = temporaryRepository()
                 restore(snapshot, recoveredFixture.paths)
-                val recoveryRuntime = RecordingRotationRuntime()
+                val recoveryRuntime = RecordingRotationRuntime(
+                    recoveredFixture.paths.masterUsers,
+                )
                 val recovered = DovecotOperatorCredentialStore(
                     paths = recoveredFixture.paths,
                     generator = DovecotOperatorSecretGenerator {
@@ -2182,6 +2584,10 @@ class DovecotOperatorCredentialStoreTest {
             "drain-${old.reference}",
             "observe-${new.reference}",
         )
+        val rollbackRecoveryEvents = listOf(
+            "observe-${new.reference}",
+            "observe-${old.reference}",
+        )
         val newSlotTarget = when (new) {
             DovecotOperatorId.A -> SnapshotTarget.SlotA
             DovecotOperatorId.B -> SnapshotTarget.SlotB
@@ -2242,7 +2648,7 @@ class DovecotOperatorCredentialStoreTest {
                 oldMaster,
                 null,
                 old,
-                emptyList(),
+                rollbackRecoveryEvents,
             ),
             RotationBoundaryExpectation(
                 DovecotOperatorCommitPoint.BeforeMasterReplace,
@@ -2255,7 +2661,7 @@ class DovecotOperatorCredentialStoreTest {
                     bothMasters,
                 ),
                 old,
-                emptyList(),
+                rollbackRecoveryEvents,
             ),
             RotationBoundaryExpectation(
                 DovecotOperatorCommitPoint.AfterMasterReplace,
@@ -2265,7 +2671,7 @@ class DovecotOperatorCredentialStoreTest {
                 bothMasters,
                 null,
                 old,
-                emptyList(),
+                rollbackRecoveryEvents,
             ),
             RotationBoundaryExpectation(
                 DovecotOperatorCommitPoint.StagedAccepted,
@@ -2275,7 +2681,7 @@ class DovecotOperatorCredentialStoreTest {
                 bothMasters,
                 null,
                 old,
-                emptyList(),
+                rollbackRecoveryEvents,
             ),
             RotationBoundaryExpectation(
                 DovecotOperatorCommitPoint.BeforeActiveReplace,
@@ -2288,7 +2694,7 @@ class DovecotOperatorCredentialStoreTest {
                     new.reference,
                 ),
                 old,
-                emptyList(),
+                rollbackRecoveryEvents,
             ),
             RotationBoundaryExpectation(
                 DovecotOperatorCommitPoint.AfterActiveReplace,
@@ -2615,7 +3021,9 @@ class DovecotOperatorCredentialStoreTest {
         }
     }
 
-    private class RecordingRotationRuntime :
+    private class RecordingRotationRuntime(
+        private val masterUsers: Path? = null,
+    ) :
         DovecotOperatorRotationRuntime {
         val events = mutableListOf<String>()
         private val blockedIds = mutableSetOf<DovecotOperatorId>()
@@ -2625,7 +3033,15 @@ class DovecotOperatorCredentialStoreTest {
             credential: DovecotOperatorCredential,
         ): DovecotOperatorProbeResult {
             events += "observe-${credential.id.reference}"
-            return if (credential.id in blockedIds) {
+            val acceptedByProjection = masterUsers?.let { path ->
+                Files.readString(path).lineSequence().any { line ->
+                    line.startsWith("${credential.id.masterUsername}:")
+                }
+            }
+            return if (
+                acceptedByProjection == false ||
+                credential.id in blockedIds
+            ) {
                 DovecotOperatorProbeResult.AuthenticationFailure
             } else {
                 DovecotOperatorProbeResult.Success
@@ -2650,6 +3066,42 @@ class DovecotOperatorCredentialStoreTest {
             events += "drain-${id.reference}"
             blockedIds += id
         }
+    }
+
+    private class RollbackRecordingRuntime(
+        private val paths: DovecotOperatorPaths,
+        private val timeline: MutableList<String>,
+        private val stagedResults: ArrayDeque<DovecotOperatorProbeResult>,
+        private val oldResults: ArrayDeque<DovecotOperatorProbeResult>,
+    ) : DovecotOperatorRotationRuntime {
+        override fun observePasswdFile(
+            target: DovecotOperatorTarget,
+            credential: DovecotOperatorCredential,
+        ): DovecotOperatorProbeResult {
+            assertEquals(
+                "dashboard-operator-a:$HASH_A\n",
+                Files.readString(paths.masterUsers),
+            )
+            assertTrue(Files.exists(paths.slotA, LinkOption.NOFOLLOW_LINKS))
+            assertTrue(Files.exists(paths.slotB, LinkOption.NOFOLLOW_LINKS))
+            timeline += "runtime:observe-${credential.id.reference}"
+            return when (credential.id) {
+                DovecotOperatorId.A -> oldResults.removeFirst()
+                DovecotOperatorId.B -> stagedResults.removeFirst()
+            }
+        }
+
+        override fun activateApplication(
+            credential: DovecotOperatorCredential,
+        ) = error("rollback must not activate an application generation")
+
+        override fun verifyApplication(
+            target: DovecotOperatorTarget,
+            expectedId: DovecotOperatorId,
+        ) = error("rollback must not verify an application generation")
+
+        override fun blockAndDrain(id: DovecotOperatorId) =
+            error("rollback must not drain an application generation")
     }
 
     private class SimulatedStoreFailure : RuntimeException()
