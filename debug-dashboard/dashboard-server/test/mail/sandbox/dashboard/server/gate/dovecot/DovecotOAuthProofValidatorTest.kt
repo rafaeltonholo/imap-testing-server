@@ -24,6 +24,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotOAuthProofValidatorTest {
@@ -424,6 +425,105 @@ class DovecotOAuthProofValidatorTest {
             caller.join(2_000)
         }
         awaitHttpWorkersReleased(workers)
+    }
+
+    @Test
+    fun throwingHttpFailureClassificationHookCannotSkipCleanup() {
+        val actorThreads = Collections.synchronizedList(
+            mutableListOf<Thread>(),
+        )
+        val retainedRequestCopies = Collections.synchronizedList(
+            mutableListOf<ByteArray>(),
+        )
+        val socket = RetainingMalformedStatusProofSocket(
+            retainedRequestCopies,
+        )
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            actorLauncher = DovecotBoundedActorLauncher { _, name, action ->
+                Thread(action, name).also { actor ->
+                    actor.isDaemon = true
+                    actorThreads += actor
+                    actor.start()
+                }
+            },
+        )
+        val classifiedFailure = AtomicReference<Throwable?>()
+        val sentinel = HttpFailureClassificationSentinel()
+
+        try {
+            val caught = assertFailsWith<HttpFailureClassificationSentinel> {
+                DovecotBoundedHttpProofClient(
+                    port = 1,
+                    timeoutMillis = 1_000,
+                    maximumResponseBytes = 1024,
+                    socketFactory = { socket },
+                    operationWorkers = workers,
+                    beforeFailureClassification = { failure ->
+                        classifiedFailure.set(failure)
+                        throw sentinel
+                    },
+                ).postForm(
+                    path = "/introspect",
+                    body = HTTP_BOUNDARY_REQUEST_BODY,
+                )
+            }
+
+            assertSame(sentinel, caught)
+            val parserFailure = classifiedFailure.get()
+            assertTrue(parserFailure is IllegalStateException)
+            assertEquals(
+                "OAuth HTTP decimal field was invalid",
+                parserFailure.message,
+            )
+            assertTrue(
+                socket.allCloseCalls.await(1, TimeUnit.SECONDS),
+                "HTTP cleanup did not run both socket close callbacks",
+            )
+            assertEquals(2, socket.closeCalls)
+
+            val requestCopies = synchronized(retainedRequestCopies) {
+                retainedRequestCopies.toList()
+            }
+            assertEquals(2, requestCopies.size)
+            assertTrue(
+                requestCopies.all { copy ->
+                    copy.all { byte -> byte == 0.toByte() }
+                },
+                "HTTP worker-owned request copies were not wiped",
+            )
+
+            val launchedActors = synchronized(actorThreads) {
+                actorThreads.toList()
+            }
+            assertEquals(3, launchedActors.size)
+            launchedActors.forEach { actor ->
+                actor.join(1_000)
+                assertFalse(
+                    actor.isAlive,
+                    "HTTP ${actor.name} actor remained alive",
+                )
+            }
+            assertEquals(
+                DovecotBoundedOperationSnapshot(peakActors = 3),
+                workers.snapshot(),
+            )
+
+            val recovered = checkNotNull(
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+            recovered.complete()
+            assertTrue(recovered.awaitRelease())
+        } finally {
+            val launchedActors = synchronized(actorThreads) {
+                actorThreads.toList()
+            }
+            launchedActors.forEach(Thread::interrupt)
+            launchedActors.forEach { actor -> actor.join(1_000) }
+            awaitHttpWorkersReleased(workers)
+        }
     }
 
     @Test
@@ -1028,6 +1128,50 @@ class DovecotOAuthProofValidatorTest {
         }
     }
 
+    private class RetainingMalformedStatusProofSocket(
+        private val retainedRequestCopies: MutableList<ByteArray>,
+    ) : Socket() {
+        val allCloseCalls = CountDownLatch(2)
+        private val closeCounter = AtomicInteger()
+        val closeCalls: Int
+            get() = closeCounter.get()
+
+        private val input = ByteArrayInputStream(
+            "HTTP/1.0 X00 Bad\r\n".toByteArray(
+                StandardCharsets.US_ASCII,
+            ),
+        )
+        private val output = object : OutputStream() {
+            override fun write(value: Int) = Unit
+
+            override fun write(
+                bytes: ByteArray,
+                offset: Int,
+                length: Int,
+            ) {
+                retainedRequestCopies += bytes
+            }
+        }
+
+        override fun connect(
+            endpoint: SocketAddress,
+            timeout: Int,
+        ) = Unit
+
+        override fun setTcpNoDelay(on: Boolean) = Unit
+
+        override fun setSoTimeout(timeout: Int) = Unit
+
+        override fun getInputStream(): InputStream = input
+
+        override fun getOutputStream(): OutputStream = output
+
+        override fun close() {
+            closeCounter.incrementAndGet()
+            allCloseCalls.countDown()
+        }
+    }
+
     private class FailingBodyProofSocket(
         private val bodyDestination: AtomicReference<ByteArray?>,
     ) : Socket() {
@@ -1241,3 +1385,6 @@ private fun CountDownLatch.awaitPreservingInterrupt() {
         Thread.currentThread().interrupt()
     }
 }
+
+private class HttpFailureClassificationSentinel :
+    RuntimeException("HTTP failure classification sentinel")

@@ -74,8 +74,14 @@ internal class DovecotBoundedHttpProofClient(
             responseBody = null
             return response
         } catch (failure: Throwable) {
-            beforeFailureClassification(failure)
-            if (abandonAndDetectInterruption(operation, failure)) {
+            if (
+                abandonAndDetectInterruption(
+                    operation = operation,
+                    failure = failure,
+                    beforeFailureClassification =
+                        beforeFailureClassification,
+                )
+            ) {
                 throwRedactedInterruption()
             }
             error("OAuth HTTP proof failed")
@@ -414,13 +420,9 @@ internal class DovecotBoundedHttpProofClient(
     private fun abandonAndDetectInterruption(
         operation: DovecotBoundedOperation?,
         failure: Throwable,
+        beforeFailureClassification: (Throwable) -> Unit,
     ): Boolean {
-        var interrupted =
-            failure is InterruptedException ||
-                Thread.currentThread().isInterrupted
-        if (Thread.interrupted()) {
-            interrupted = true
-        }
+        var interrupted = failure is InterruptedException
         operation?.abandon()
         try {
             operation?.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
@@ -428,12 +430,18 @@ internal class DovecotBoundedHttpProofClient(
             interrupted = true
             Thread.interrupted()
         }
-        if (Thread.currentThread().isInterrupted) {
+        if (Thread.interrupted()) {
             interrupted = true
-            Thread.interrupted()
         }
-        if (interrupted) {
-            Thread.currentThread().interrupt()
+        try {
+            beforeFailureClassification(failure)
+        } finally {
+            if (Thread.interrupted()) {
+                interrupted = true
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt()
+            }
         }
         return interrupted
     }
