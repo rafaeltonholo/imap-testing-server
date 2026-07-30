@@ -7,9 +7,11 @@
 - **Task 3 — Make OAuth decisions eligibility-aware:** complete.
 - **Task 4 — Make Postfix recipient routing eligibility-aware:** complete.
 - **Task 5 — Add a physically separate master-only IMAP ingress:** complete.
-- **Task 6 — Prove network isolation and credential rotation:** implementation
-  and non-live verification complete; the checked Docker Desktop lifecycle is
-  pending controller execution.
+- **Task 6 — Prove network isolation and credential rotation:** the original
+  implementation and non-live verification completed, and two checked Docker
+  Desktop lifecycles executed. The second disproved loopback-publication
+  isolation; the reviewed stdio transport implementation and rerun are
+  pending.
 - **Gate 0C:** in progress. Task 6 live isolation/rotation evidence is pending;
   Tasks 7–9 still own mail behavior, lifecycle, and the final decision. This
   document does not record a Gate 0C PASS.
@@ -407,6 +409,11 @@ empty `users.lock`, the worktree `ssl` directory remains empty, and the primary
 remained running with zero restarts.
 
 ## Task 5 isolated operator-ingress proof
+
+This section records the historical Task 5 topology and evidence. Its
+loopback publication was disproved during Task 6 and is superseded by the
+stdio transport amendment linked in the Task 6 live-evidence section below; it
+is not the active implementation contract.
 
 The operator service uses the same pinned Dovecot 2.4.1 digest as the ordinary
 service. It is profile-selected, runs IMAP only, publishes only
@@ -839,8 +846,28 @@ OAuth services; it did not select Stalwart. After the startup cleanup assertion
 above failed, the lifecycle removed every proof container, network, volume,
 proof root, and lifecycle lock, released all five fixed proof ports, and
 reported `baseline-match`. An independent check confirmed the same five
-pre-existing container IDs and statuses remained. A controller must rerun the
-same single checked lifecycle after the typed response repair:
+pre-existing container IDs and statuses remained.
+
+The second checked lifecycle passed startup, then the isolation helper returned
+exact `HOST_DOCKER_INTERNAL_REACHABLE`. Docker Desktop's backend forwarded the
+default-network container's `host.docker.internal:2993` connection to the
+operator despite the host-loopback publication. This disproved the
+loopback-publication isolation assumption. The result was not weakened or
+reclassified. Mandatory cleanup again removed the entire disposable project
+and restored the same pre-existing container/port baseline.
+
+The reviewed repair proposal is
+[`2026-07-30-dovecot-operator-stdio-transport-design.md`](../../superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md):
+remove the operator host publication, bind its listener only to container
+loopback, make the sole-member bridge internal, and use one fixed,
+TLS-verifying Docker-exec/stdio transport for readiness and every positive
+operator path. Former host port `2993` remains only a forbidden negative-probe
+target. The amendment also requires coordinator-bounded process streams,
+synchronous normal close/reap, atomic pre-reserved held-session leases, and a
+redacted fixed process-inventory proof.
+
+A controller must rerun the same single checked lifecycle after that transport
+amendment is implemented:
 
 ```bash
 debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
@@ -848,9 +875,11 @@ debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
 
 That lifecycle owns startup, runs startup then isolation then rotation live
 classes, and performs mandatory cleanup and baseline comparison. If any
-bridge, host-gateway, LAN, ordinary-protocol, SMTP, or OAuth path accepts or
-reaches the operator credential/port contrary to the matrix, Task 6 is
-`BLOCKED/STOP`; the assertion must not be weakened or skipped.
+bridge path reaches container port `31993`, any host-gateway or LAN path
+reaches forbidden port `2993`, any ordinary-protocol/SMTP/OAuth path accepts
+the operator credential, or any OpenSSL exec child survives its bounded
+lifecycle, Task 6 is `BLOCKED/STOP`; the assertion must not be weakened or
+skipped.
 
 ## Verification
 

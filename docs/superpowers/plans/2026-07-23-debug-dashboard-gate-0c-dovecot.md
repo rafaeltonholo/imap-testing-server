@@ -4,7 +4,16 @@
 
 **Goal:** Make one hashed runtime eligibility set authoritative across every Dovecot/Postfix/OAuth path and prove an isolated master/operator IMAP ingress can safely administer disposable accounts without retaining user passwords.
 
-**Architecture:** The ordinary Dovecot container never loads a master passdb. A second Dovecot instance shares the read-only eligibility directory and Maildir volume but loads a separate hashed master credential, runs IMAP only, joins its own dedicated non-internal Docker bridge whose sole service member is the operator, and publishes only a loopback operator port. The loopback bind plus exclusive bridge membership—not Docker internal mode—form this local test provider's ingress boundary. Postfix and the OAuth mock consult the same atomic eligibility file on every decision; dashboard/file tools share an OS-visible global lock.
+**Architecture:** The ordinary Dovecot container never loads a master passdb. A
+second Dovecot instance shares the read-only eligibility directory and Maildir
+volume but loads a separate hashed master credential, runs IMAP only, binds its
+IMAPS listener to container loopback, joins an internal Docker bridge whose
+sole service member is the operator, and publishes no host port. The host-native
+dashboard reaches it only through the fixed, TLS-verifying,
+Docker-exec/stdio transport in
+`docs/superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md`.
+Postfix and the OAuth mock consult the same atomic eligibility file on every
+decision; dashboard/file tools share an OS-visible global lock.
 
 **Tech Stack:** Pinned `dovecot/dovecot:2.4.1` image/digest, Dovecot 2.4 passwd-file/master auth, isolated Docker Compose network, Postfix socketmap, Python standard-library OAuth/socketmap service, Kotlin/JVM gate writer and live tests.
 
@@ -216,15 +225,57 @@ Review the bounded logs for correct lookup outcomes and no secret values.
   - additionally mounts `debug-dashboard/.runtime/dovecot-operator/` containing the ARGON2ID master passwd file;
   - starts from the standalone `config/operator/dovecot.conf`;
   - runs IMAP only;
-  - publishes only `127.0.0.1:2993:31993`;
-  - joins only a dedicated `operator-ingress` non-internal bridge with no other service;
-  - has a bounded, quiet POSIX `sh` healthcheck that requires a positive integer `process_count`, exact `throttle_secs: 0`, and exact `doveadm_stop: n` for both `auth` and `imap-login`. It captures each `doveadm service status` result before applying exact greps, so any query or grep failure fails health without relying on non-POSIX `pipefail`. It also passively matches IPv4 LISTEN state `0A` for container port `31993` (`7CF9`) in `/proc/net/tcp` without connecting. The predicate deliberately ignores the `listening` field, which reports `n` for these healthy preforked services. It generates no recurring auth/login traffic and remains bounded by the fixed three-second timeout; host JSSE readiness remains the end-to-end gate; and
+  - publishes no host port and sets exact `listen = 127.0.0.1` on its
+    container-side IMAPS listener at `31993`;
+  - joins only a dedicated internal `operator-ingress` bridge with no other
+    service;
+  - has a bounded, quiet POSIX `sh` healthcheck that requires a positive
+    integer `process_count`, exact `throttle_secs: 0`, and exact
+    `doveadm_stop: n` for both `auth` and `imap-login`. It captures each
+    `doveadm service status` result before applying exact checks, so any query
+    or check failure fails health without relying on non-POSIX `pipefail`. It
+    counts every state `0A` entry for port `7CF9` across `/proc/net/tcp` and
+    `/proc/net/tcp6`, requires exactly one, and requires exact local address
+    `0100007F:7CF9`. It generates no recurring auth/login traffic and remains
+    bounded by the fixed three-second timeout; coordinator-backed
+    Docker-exec/stdio readiness remains the end-to-end gate; and
   - is excluded from the default clean Compose model behind the explicit `dovecot-operator` profile. The fixed Task 5 proof override clears this production profile because that lifecycle selects the operator service explicitly.
 
 The ordinary `dovecot` service never mounts or loads the master credential directory/passdb.
-The non-internal bridge is a deliberate local-test relaxation required for Docker's loopback host publication; no other Compose service joins it, and the published operator port remains bound exactly to `127.0.0.1`.
+No other Compose service joins the internal operator bridge. The former host
+port `2993` is reserved only as a forbidden negative-probe target; every
+positive operator path uses the fixed transport amendment.
 
-- [ ] Configure the operator master passdb as `master = yes` with canonical `result_success = continue`, followed by the exact four-stage chain `operator-master` → `deny-direct` → `eligible-target` → `deny-missing` and then exact userdb lookup against the shared eligibility file. Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and uses `skip = authenticated`. The canonical `result_success = continue` marks the master password verified, jumps to the first non-master passdb, and does not pre-authorize the target. A verified master continuation therefore skips `deny-direct`, while a direct bare-target LOGIN remains unauthenticated and stops there. `eligible-target` uses `skip = unauthenticated`, `result_failure = continue-fail`, and `result_internalfail = return-fail`. A found target's default `return-ok` finalizes master authentication; a missing target clears any prior success and continues to `deny-missing`; an internal eligibility error fails immediately instead of being masked. Both deny passdbs set `deny = yes`, `nopassword = yes`, and `nodelay = yes`. Enable only the SASL `LOGIN` mechanism. The probe must issue `AUTHENTICATE LOGIN` and answer its username challenge with exactly `target*dashboard-operator-a` or `target*dashboard-operator-b`; it must not use the IMAP `LOGIN` command, which Dovecot implements through SASL PLAIN. SASL `LOGIN` has no separate authorization-ID field, so the combined username is the only master-login form available. Do not enable PLAIN: it would also permit the forbidden authorization-ID form `target\0dashboard-operator-a\0master-secret`. The live proof must first issue bare-target SASL LOGIN with the eligible disposable target's generated password and require a tagged `NO` within the fixed one-second JSSE read timeout. It must then require `AUTH=LOGIN`, reject `AUTH=PLAIN`, receive an immediate tagged `NO` or `BAD` for the PLAIN tuple, and prove the positive combined master form.
+- [ ] Configure the operator master passdb as `master = yes` with canonical
+  `result_success = continue`, followed by the exact four-stage chain
+  `operator-master` → `deny-direct` → `eligible-target` → `deny-missing` and
+  then exact userdb lookup against the shared eligibility file. Dovecot 2.4.1
+  `auth_preinit` silently omits a first non-master passdb with
+  `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and
+  uses `skip = authenticated`. The canonical `result_success = continue`
+  marks the master password verified, jumps to the first non-master passdb,
+  and does not pre-authorize the target. A verified master continuation
+  therefore skips `deny-direct`, while a direct bare-target LOGIN remains
+  unauthenticated and stops there. `eligible-target` uses
+  `skip = unauthenticated`, `result_failure = continue-fail`, and
+  `result_internalfail = return-fail`. A found target's default `return-ok`
+  finalizes master authentication; a missing target clears any prior success
+  and continues to `deny-missing`; an internal eligibility error fails
+  immediately instead of being masked. Both deny passdbs set `deny = yes`,
+  `nopassword = yes`, and `nodelay = yes`. Enable only the SASL `LOGIN`
+  mechanism. The probe must issue `AUTHENTICATE LOGIN` and answer its username
+  challenge with exactly `target*dashboard-operator-a` or
+  `target*dashboard-operator-b`; it must not use the IMAP `LOGIN` command,
+  which Dovecot implements through SASL PLAIN. SASL `LOGIN` has no separate
+  authorization-ID field, so the combined username is the only master-login
+  form available. Do not enable PLAIN: it would also permit the forbidden
+  authorization-ID form
+  `target\0dashboard-operator-a\0master-secret`. The live proof must first
+  issue bare-target SASL LOGIN with the eligible disposable target's generated
+  password and require a tagged `NO` within the coordinator-backed fixed
+  exchange deadline. It must then require `AUTH=LOGIN`, reject `AUTH=PLAIN`,
+  receive an immediate tagged `NO` or `BAD` for the PLAIN tuple, and prove the
+  positive combined master form.
 
   These two immutable protected master identities are not present in normal passdb/userdb and have no mailboxes. Exactly one identity is active at steady state; both may coexist only inside the locked rotation window.
 
@@ -287,9 +338,18 @@ Also configure mail/namespace/TLS/stdout logging explicitly and omit OAuth, POP3
 
 - [ ] Implement the credential store's fixed-path/mode/symlink/atomic-write checks now, with a unit test. Its initial bootstrap creates slot A, hashes through the stdin-only path, atomically writes the one-entry `master-users`, and writes the matching active reference before the operator service starts. Task 6 extends this same store with rotation; it must not introduce a second writer.
 
-- [ ] Write configuration tests that fail if the primary config contains a master passdb, the operator enables POP3/LMTP, either protected master appears in the user registry, an unknown master identity appears in the master file, the operator joins the default network, or its host bind is not exact loopback.
+- [ ] Write configuration tests that fail if the primary config contains a
+  master passdb, the operator enables POP3/LMTP, either protected master
+  appears in the user registry, an unknown master identity appears in the
+  master file, the operator joins the default network, its container listener
+  is not exact loopback, or it has any host publication.
 
-- [ ] Make every selected Dovecot `*LiveTest` use `DovecotLiveTestEnvironment`. It requires `DOVECOT_LIVE_TESTS=1` and bounded readiness of the exact fixed loopback endpoints; missing configuration or an unavailable ordinary/operator/Postfix/OAuth service fails the selected suite rather than skipping.
+- [ ] Make every selected Dovecot `*LiveTest` use
+  `DovecotLiveTestEnvironment`. It requires `DOVECOT_LIVE_TESTS=1`, bounded
+  readiness of the exact ordinary loopback endpoints, and
+  coordinator-backed exec/stdio readiness for the operator. Missing
+  configuration or an unavailable ordinary/operator/Postfix/OAuth service
+  fails the selected suite rather than skipping.
 
 - [ ] Preserve this staged activation invariant: first validate the ordinary
   Tasks 2–4 authority, eligibility file, and TLS material; next make only OAuth,
@@ -375,7 +435,9 @@ Its invariants are:
   and exact bytes for ID, `StartedAt`, status, health-or-`none`, and restart
   count are compared with the health-safe template
   `{{with (index .State "Health")}}{{.Status}}{{else}}none{{end}}`;
-- ports `1993`, `2993`, `21025`, and `28080` must be queryable and free.
+- ports `1993`, `21995`, `21025`, and `28080` must be queryable and free for
+  the proof's ordinary endpoints. Former operator host port `2993` must also be
+  queryable and free solely so every forbidden-path negative is unambiguous.
   A collision aborts without stopping its owner;
 - `debug-dashboard/.runtime` must already be an exact canonical non-symbolic
   directory and the exact proof root must be absent. The script records its
@@ -539,19 +601,29 @@ Expected final state: the fixed proof project has no containers or named volumes
   - ordinary IMAPS rejects master syntax/credential;
   - operator master succeeds only for an eligible disposable target;
   - arbitrary, protected, deleted, inactive-master, and master-as-self targets
-    fail through a fixed raw SASL LOGIN helper;
+    fail through the coordinator-backed fixed SASL LOGIN exchange;
   - a target ordinary password cannot become master authentication;
   - the master credential fails through ordinary POP3S, Postfix SMTP SASL,
     and OAuth introspection/authorization;
-  - operator runtime publication is exactly IMAPS `31993` and its only network
-    is `operator-ingress`;
-  - every discovered non-loopback host IPv4 rejects ordinary `1993` and
-    operator `2993`;
+  - operator runtime publication is empty, its sole network is the internal
+    `operator-ingress`, and the sole state `0A` port `7CF9` listener is exact
+    container-loopback `0100007F:7CF9`;
+  - every discovered non-loopback host IPv4 rejects ordinary `1993`, while
+    fixed forbidden operator host port `2993` has no listener on any host path;
   - from the existing proof `oauth2-mock` on the default network, ordinary
     Dovecot resolution/connect is a positive control, operator DNS and direct
     ingress-IP access fail, and `host.docker.internal`,
     `gateway.docker.internal`, the explicit `task6-host-gateway` alias, plus
     every host LAN IPv4 cannot reach host port `2993`.
+
+- [ ] Route operator readiness, bare-target/PLAIN rejection, every positive
+  authentication exchange, isolation, rotation, and mailbox proof through the
+  fixed Docker-exec/stdio transport. No process-pipe read is allowed outside
+  the bounded coordinator/session contract. Require synchronous normal
+  close/reap before accepting a result and use the fixed redacted
+  `docker top <validated-operator-id> -ww -eo pid,args` inventory to prove zero
+  OpenSSL children after normal close, launch/registration failure, timeout,
+  abort, and held-session close.
 
 - [ ] Reuse only the checked
   `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh`
@@ -569,10 +641,14 @@ debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
 ```
 
 Expected: all non-live checks, startup proof, isolation matrix, and rotation
-proof pass, followed by mandatory cleanup. Until a controller executes this
-Docker Desktop path, record live Task 6 evidence as pending rather than passed.
-If any direct bridge, host-gateway, or LAN path reaches operator port `2993`
-or `31993`, report `BLOCKED/STOP`; do not weaken or skip the assertion.
+proof pass, followed by mandatory cleanup. Two controller executions have
+already completed: the second exposed the loopback-publication failure and
+cleaned to the exact baseline. After the stdio transport is implemented, rerun
+this lifecycle and keep Task 6 pending until the redesigned path passes.
+If any bridge path reaches operator `31993`, if any host-gateway/LAN path
+reaches fixed forbidden port `2993`, or if an OpenSSL exec child remains after
+its bounded lifecycle, report `BLOCKED/STOP`; do not weaken or skip the
+assertion.
 
 ## Task 7: Prove operator mail behavior and shared Maildir safety
 

@@ -1,5 +1,12 @@
 # Service Map
 
+> **Target state pending confirmation and implementation.** The checked
+> `docker-compose.yml` still contains the superseded operator
+> `127.0.0.1:2993` publication and non-internal bridge. Task 6 remains pending;
+> do not treat that current topology as accepted. The operator entries below
+> are the required post-amendment state from
+> `docs/superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md`.
+
 `docker-compose.yml` defines service names but no fixed `container_name` values;
 Compose generates project-scoped container names.
 
@@ -11,7 +18,7 @@ Compose generates project-scoped container names.
 | `dovecot` | Default | `127.0.0.1:1993` → `31993` | IMAPS |
 | `dovecot` | Default | `127.0.0.1:1110` → `31110` | POP3 STARTTLS |
 | `dovecot` | Default | `127.0.0.1:1995` → `31990` | POP3S |
-| `dovecot-operator` | Explicit profile only | `127.0.0.1:2993` → `31993` | Operator-only IMAPS |
+| `dovecot-operator` | Explicit profile only | None | Container-loopback IMAPS through fixed Docker-exec/stdio |
 | `postfix` | Default | `127.0.0.1:1025` → `25` | SMTP |
 | `postfix` | Default | `127.0.0.1:1465` → `465` | SMTPS |
 | `postfix` | Default | `127.0.0.1:1587` → `587` | SMTP submission |
@@ -19,14 +26,16 @@ Compose generates project-scoped container names.
 | `stalwart` | Default | `0.0.0.0:8443` → `8443` | JMAP HTTP |
 
 `dovecot-operator` is absent from the default resolved model. Select it only
-with the explicit `dovecot-operator` profile.
+with the explicit `dovecot-operator` profile. Its listener is exact
+`127.0.0.1:31993` inside the container and is not published. Former host port
+`2993` is used only as a forbidden negative-probe target.
 
 ## Networks
 
 - Default services use the project default bridge.
 - `dovecot-operator` is the only service attached to `operator-ingress`.
-- `operator-ingress` is a dedicated non-internal bridge. Its operator port is
-  still published only on host loopback.
+- `operator-ingress` is a dedicated internal bridge. Operator access uses the
+  fixed, TLS-verifying Docker-exec/stdio transport, not a network route.
 
 ## Dependency Chain
 
@@ -44,7 +53,7 @@ stalwart         (independent)
 | Service | Method | Interval | Timeout | Start period |
 |---------|--------|----------|---------|--------------|
 | `dovecot` | `doveadm who` | 10s | 5s | 15s |
-| `dovecot-operator` | Quiet POSIX checks for healthy `auth` and `imap-login` service status plus passive `/proc/net/tcp` LISTEN state for port 31993 | 5s | 3s | 10s |
+| `dovecot-operator` | Quiet POSIX service-status checks plus exactly one state `0A` listener across `/proc/net/tcp{,6}`, at IPv4 loopback `0100007F:7CF9` | 5s | 3s | 10s |
 | `oauth2-mock` | HTTP `/health` plus an internal socketmap `NOTFOUND` query on port 10001 | 5s | 3s | 5s |
 | `stalwart` | Bash TCP open on container port 8443 | 10s | 5s | 15s |
 | `postfix` | No healthcheck defined | — | — | — |

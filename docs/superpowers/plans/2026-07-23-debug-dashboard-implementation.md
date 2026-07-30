@@ -13,6 +13,9 @@
 ## Source of truth
 
 - Approved design: `docs/superpowers/specs/2026-07-23-debug-dashboard-design.md`
+- Reviewed Dovecot operator transport amendment, awaiting written-spec
+  confirmation:
+  `docs/superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md`
 - Product contract: `PRODUCT.md`
 - Visual system: `DESIGN.md`
 - Surface brief: `.impeccable/surfaces/debug-dashboard.md`

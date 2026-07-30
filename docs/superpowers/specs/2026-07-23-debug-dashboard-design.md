@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 
-**Status:** Design approved; AppPassword amendment pending implementation-plan revision
+**Status:** Design approved; AppPassword amendment incorporated; Dovecot stdio amendment awaiting confirmation
 
 **Amended:** 2026-07-27 — direct per-account Stalwart AppPasswords and a trusted test-sandbox threat model
 
@@ -242,7 +242,12 @@ The browser never receives mail-server administration credentials, operator cred
 
 Normal browsing and mutation must not require the dashboard to persist every user's password.
 
-- Dovecot uses a dedicated master/operator identity through a loopback-only host ingress on a dedicated non-internal project bridge whose only service member is the operator; its actual Docker network path is verified.
+- Dovecot uses a dedicated master/operator identity whose IMAPS listener binds
+  only to container loopback and has no host publication. The host-native
+  backend reaches it solely through the fixed, non-shell, TLS-verifying
+  Docker-exec/stdio transport on an internal bridge whose only service member
+  is the operator. The full transport, lifecycle, and proof amendment is
+  [2026-07-30-dovecot-operator-stdio-transport-design.md](./2026-07-30-dovecot-operator-stdio-transport-design.md).
 - Stalwart authenticates directly as the selected ordinary Account with one dashboard-owned AppPassword stored by the Ktor process. There is no Stalwart mail-operator Account and no `impersonate` grant or `target%operator` authentication path.
 
 The Dovecot operator approach is a Gate 0C contract test. If the current image cannot isolate the master identity without weakening ordinary account authentication, implementation stops for a credential-strategy decision.
@@ -753,7 +758,23 @@ Before dashboard provider implementation:
 4. Make that eligibility set authoritative for PLAIN/LOGIN, mock OAuth issuance/refresh/introspection, userdb existence, LMTP lookup, allowlisted `doveadm` targets, and master-user targets. Prefix-style test tokens do not bypass eligibility.
 5. Route every account-file writer through one file-global lock and atomic writer, or retire the direct mutation path before Gate 1.
 6. Configure a dedicated hashed master credential that is neither a normal passdb identity nor a mailbox/userdb account and is unavailable through POP3, SMTP SASL, OAuth, or ordinary self-login.
-7. Establish an operator ingress on a dedicated non-internal project bridge whose only service member is the operator, publish its exact port on host loopback, and prove it is limited to the host-only dashboard path. Its bounded, quiet POSIX `sh` healthcheck requires a positive integer `process_count`, exact `throttle_secs: 0`, and exact `doveadm_stop: n` for both `auth` and `imap-login`, preserving every query and grep failure without relying on `pipefail`. It also passively matches IPv4 LISTEN state `0A` for container port `31993` (`7CF9`) in `/proc/net/tcp` without connecting; the healthy preforked services' `listening: n` field is not a readiness signal, and host JSSE readiness remains the end-to-end gate. This local-test relaxation relies on exclusive bridge membership plus the loopback bind because Docker internal mode suppresses host publication. Docker's container-observed source address must not be assumed to be `127.0.0.1`; the test uses the actual network path.
+7. Establish an unpublished operator on a dedicated internal project bridge
+   whose only service member is the operator. Its Dovecot 2.4 IMAPS listener
+   sets `listen = 127.0.0.1` for port `31993`. Its bounded, quiet POSIX `sh`
+   healthcheck requires a positive integer `process_count`, exact
+   `throttle_secs: 0`, and exact `doveadm_stop: n` for both `auth` and
+   `imap-login`, preserving every query and grep failure without relying on
+   `pipefail`. It counts every state `0A` entry for port `7CF9` across
+   `/proc/net/tcp` and `/proc/net/tcp6`, requires exactly one, and requires
+   that entry to be exact IPv4 container loopback `0100007F:7CF9`. The
+   host-native backend uses only the fixed, sanitized, non-shell
+   `docker compose exec -T` OpenSSL stdio transport, including for readiness
+   and every positive proof. TLS trusts the mounted certificate, verifies
+   `localhost`, and permits only TLS 1.2/1.3. The fixed former host port
+   `2993` remains a negative-probe target only. Exact allocation, deadline,
+   close/reap, lease-capacity, process-inventory, and cleanup requirements are
+   defined by
+   [the reviewed stdio transport amendment](./2026-07-30-dovecot-operator-stdio-transport-design.md).
 8. Require master authentication to continue into the canonical target-eligibility lookup without enabling direct ordinary-password authentication on the operator ingress. The exact chain is `operator-master` → `deny-direct` → `eligible-target` → `deny-missing`. Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and uses `skip = authenticated`. The canonical `result_success = continue` marks the master password verified, jumps to the first non-master passdb, and does not pre-authorize the target. A verified master continuation therefore skips `deny-direct`, while a direct bare-target LOGIN remains unauthenticated and stops there. `eligible-target` uses `skip = unauthenticated`, `result_failure = continue-fail`, and `result_internalfail = return-fail`. A found target's default `return-ok` finalizes success; a missing target clears any prior success and continues to `deny-missing`; an internal eligibility error fails immediately instead of being masked. Both deny passdbs set `deny = yes`, `nopassword = yes`, and `nodelay = yes`. The live proof first requires a timely tagged `NO` from bare-target SASL LOGIN with an eligible target's own generated password, then proves PLAIN rejection and combined master LOGIN success. This makes arbitrary, deleted, and protected targets fail while preserving the Dovecot 2.4 master-continuation semantics.
 9. Prove the operator can list, read, append, and mutate mail for disposable eligible users through supported IMAP paths, and prove Postfix routes only to eligible sandbox recipients and mailbox arrival is observable, while the host-command surface remains the typed `doveadm` allowlist.
 10. Delete a disposable identity and prove password login, OAuth login, refresh/introspection, operator targeting, `doveadm` targeting, and LMTP lookup fail while retained mailbox data stays inert.
@@ -871,7 +892,9 @@ These are implementation gates, not unresolved product choices:
 - Non-impersonating management revocation of one dashboard credential while preserving every unrelated credential.
 - Stable AppPassword overlap/quota, read-once capture, cache invalidation, and restart reconciliation behavior.
 - Stalwart DestroyAccount task observation when cleanup completes before the first query.
-- Dovecot eligibility migration and operator-ingress isolation across the actual Docker Desktop network path.
+- Dovecot eligibility migration and unpublished operator isolation across the
+  fixed Docker-exec/stdio control path and every rejected Docker Desktop
+  network path.
 - Provider-side local-only routing and mailbox-arrival correlation.
 - Exact import-to-submission creation-ID chaining on v0.16.14.
 - Actual server-side filters supported by `x:Log/query`.
