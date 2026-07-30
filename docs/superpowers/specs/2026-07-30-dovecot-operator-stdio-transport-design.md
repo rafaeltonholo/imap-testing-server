@@ -226,31 +226,43 @@ types.
 ### Lifecycle and cancellation
 
 Normal IMAP flows retain their existing stream-close behavior; this transport
-change does not add a new IMAP `LOGOUT` exchange. Close and abort use one
-idempotent termination state machine:
+change does not add a new IMAP `LOGOUT` exchange. Normal close and
+post-allocation registration-failure cleanup use the graceful ordering:
 
 1. close the child stdin so `-no_ign_eof` ends OpenSSL and its Docker exec;
-2. leave stdout open and allow at most 500 ms for natural child exit so EOF
-   reaches the remote exec;
-3. on natural exit, close stdout and require exit code zero for a normal
-   result;
-4. if still alive, close stdout, call `destroy()`, and wait at most 250 ms;
+2. leave stdout open and allow at most 500 ms for child exit so EOF reaches the
+   remote exec;
+3. close stdout;
+4. if still alive, issue `destroy()` once and wait at most 250 ms;
 5. if still alive, call `destroyForcibly()` and make one final reap attempt of
-   at most 250 ms;
-6. record whether the child was reaped and whether termination was required.
+   at most 250 ms.
 
-A normal probe/session close succeeds only after natural exit with code zero.
-Needing `destroy`, needing force, observing a nonzero exit, or failing to reap
-changes a pending normal result to TransportFailure. Timeout/abort and
-post-allocation registration-failure cleanup accept any exit code, but they
-must still reap the child within the same fixed one-second aggregate cleanup
-bound even when the operation deadline has already expired. That cleanup may
-outlive the cancelled caller's 100 ms wait, but not its charged cancellation
+Abort first claims a one-shot termination signal and calls `destroy()` outside
+the lifecycle lock, before attempting to close either stream. This lets the
+child signal release a protocol writer that holds the JDK process-stdin stream
+monitor, so the lifecycle owner can complete the close attempt instead of
+deadlocking behind it. The owner then closes stdin, waits at most 500 ms with
+stdout open, closes stdout, waits at most 250 ms without issuing a second
+`destroy()`, and, if needed, forces and reaps for at most 250 ms. Thus every
+mode retains the same fixed one-second aggregate wait bound and creates no
+cleanup thread.
+
+All callers share one cached terminal outcome. If abort preemption wins or
+races an unfinished normal close, that outcome records that termination was
+required, so the normal close cannot succeed even if the child then exits with
+code zero. A normal probe/session close succeeds only after natural exit with
+code zero, no termination signal, and successful close attempts for both
+mapped streams. Timeout/abort and registration-failure cleanup accept any exit
+code, but still require both successful stream-close attempts and a reaped
+child. Each terminal stream reference is cleared after its one close attempt;
+later close or abort calls reuse the cached outcome and never rerun process
+lifecycle work.
+
+Interrupted callers retain their interrupt flag. Every failure remains fixed
+and redacted, and no failed close makes a transport reusable. No unbounded
+`waitFor`, thread creation, retry loop, or stderr buffer is allowed. Cleanup
+may outlive the cancelled caller's 100 ms wait, but not its charged cancellation
 actor.
-
-Interrupted callers retain their interrupt flag. Close failures do not make a
-transport reusable. No unbounded `waitFor`, thread creation, retry loop, or
-stderr buffer is allowed.
 
 Finite probes must synchronously close and reap the process inside their
 existing five-second operation deadline before returning any Success,

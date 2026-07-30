@@ -210,29 +210,37 @@ git commit -m "test: define fixed Dovecot operator process launch"
 - [ ] Implement process start/wrap/register and the bounded pre-registration
   failure cleanup. Re-run that class and require the new cases GREEN.
 
-- [ ] Add natural-close tests: stdin closes first, stdout stays open during the
-  at-most-500-ms wait, stdout then closes, exit zero succeeds, and nonzero exit
-  fails. Run the class and preserve RED.
+- [ ] Add graceful natural-close and registration-cleanup tests: stdin closes
+  first, stdout stays open during the at-most-500-ms wait, stdout then closes,
+  exit zero succeeds only for normal close, and nonzero normal exit fails. Run
+  the class and preserve RED.
 
 - [ ] Implement only the natural-close branch and re-run those cases GREEN.
 
-- [ ] Add termination tests: an alive child gets stdout close, `destroy()`, a
-  250-ms wait, `destroyForcibly()`, and one final 250-ms reap attempt; abort and
-  registration cleanup accept nonzero exit but still require reap. Preserve
-  RED.
+- [ ] Add termination tests: normal close and registration cleanup close stdout
+  before `destroy()` and its 250-ms wait; abort claims one process signal and
+  calls `destroy()` outside the lifecycle lock before either stream-close
+  attempt, then performs the 500/250/250-ms bounded reap sequence without a
+  second `destroy()`. Force once if still alive. Every mode requires successful
+  close attempts for both mapped streams and a reaped child; abort and
+  registration cleanup may accept a nonzero exit. Preserve RED.
 
 - [ ] Implement the bounded destroy/force/reap branch and re-run those cases
   GREEN.
 
-- [ ] Add state tests for concurrent idempotent close/abort and permanent
-  non-reusability after any failed close. Preserve RED.
+- [ ] Add state tests for concurrent idempotent close/abort, abort preemption of
+  a protocol writer holding the process-stdin monitor, a racing abort making a
+  normal outcome termination-required, cached registration-cleanup failure,
+  and permanent non-reusability after any failed close. Repeated callers must
+  not rerun stream or process lifecycle work. Preserve RED.
 
-- [ ] Implement the synchronized idempotent terminal state and re-run those
-  cases GREEN.
+- [ ] Implement the synchronized idempotent terminal outcome plus the one-shot
+  lock-independent abort signal, clear each terminal stream reference after its
+  sole close attempt, and re-run those cases GREEN.
 
 - [ ] Add tests for caller-interrupt preservation, no new worker/thread,
-  discarded stderr, and fixed/redacted `toString()` and exceptions. Preserve
-  RED.
+  failed stream-close acceptance, discarded stderr, and fixed/redacted
+  `toString()` and exceptions. Preserve RED.
 
 - [ ] Implement interrupt/redaction details and re-run
   `DovecotOperatorProcessTransportTest` GREEN.

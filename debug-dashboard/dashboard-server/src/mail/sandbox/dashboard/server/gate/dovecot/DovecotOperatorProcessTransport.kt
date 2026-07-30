@@ -8,6 +8,7 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 internal class DovecotOperatorLaunchProfile(
     val dockerCli: Path,
@@ -183,6 +184,8 @@ private class ManagedDovecotOperatorProcessTransport(
     private var childStdin: OutputStream? = null
     private var childStdout: InputStream? = null
     private var terminationOutcome: TerminationOutcome? = null
+    private val terminationSignal =
+        AtomicReference(TerminationSignal.Available)
 
     @Volatile
     private var terminal = false
@@ -213,11 +216,31 @@ private class ManagedDovecotOperatorProcessTransport(
         }
 
     override fun abort() {
-        terminate(
-            mode = TerminationMode.Abort,
-            failureMessage =
-                "Dovecot operator process transport abort failed",
-        )
+        terminal = true
+        var restoreInterrupt = false
+        if (
+            terminationSignal.compareAndSet(
+                TerminationSignal.Available,
+                TerminationSignal.AbortPreempted,
+            )
+        ) {
+            try {
+                process.destroy()
+            } catch (failure: Throwable) {
+                restoreInterrupt = failure is InterruptedException
+            }
+        }
+        try {
+            terminate(
+                mode = TerminationMode.Abort,
+                failureMessage =
+                    "Dovecot operator process transport abort failed",
+            )
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt()
+            }
+        }
     }
 
     override fun close() {
@@ -250,7 +273,16 @@ private class ManagedDovecotOperatorProcessTransport(
         val outcome = synchronized(lifecycleLock) {
             terminationOutcome ?: run {
                 terminal = true
-                performTermination(mode).also { completed ->
+                val performed = performTermination(mode)
+                val signal = terminationSignal.getAndSet(
+                    TerminationSignal.Completed,
+                )
+                performed.copy(
+                    terminationRequired =
+                        performed.terminationRequired ||
+                            signal == TerminationSignal.AbortPreempted ||
+                            signal == TerminationSignal.LifecycleDestroy,
+                ).also { completed ->
                     terminationOutcome = completed
                 }
             }
@@ -259,11 +291,12 @@ private class ManagedDovecotOperatorProcessTransport(
             TerminationMode.NormalClose ->
                 outcome.reaped &&
                     outcome.naturalExit &&
+                    !outcome.terminationRequired &&
                     outcome.streamsClosed &&
                     outcome.exitCode == 0
             TerminationMode.Abort,
             TerminationMode.RegistrationCleanup,
-            -> outcome.reaped
+            -> outcome.reaped && outcome.streamsClosed
         }
         if (!accepted) {
             throw IOException(failureMessage)
@@ -301,17 +334,32 @@ private class ManagedDovecotOperatorProcessTransport(
             }
 
         return try {
-            val stdinClosed = closeQuietly(childStdin)
+            val stdinClosed = try {
+                closeQuietly(childStdin)
+            } finally {
+                childStdin = null
+            }
             val naturalExit = awaitProcess(NATURAL_EXIT_WAIT_MILLIS)
-            val stdoutClosed = closeQuietly(childStdout)
+            val stdoutClosed = try {
+                closeQuietly(childStdout)
+            } finally {
+                childStdout = null
+            }
 
             var reaped = naturalExit
             if (!reaped) {
-                try {
-                    process.destroy()
-                } catch (failure: Throwable) {
-                    rememberInterruption(failure)
-                    // Continue to the bounded force/reap sequence.
+                if (
+                    terminationSignal.compareAndSet(
+                        TerminationSignal.Available,
+                        TerminationSignal.LifecycleDestroy,
+                    )
+                ) {
+                    try {
+                        process.destroy()
+                    } catch (failure: Throwable) {
+                        rememberInterruption(failure)
+                        // Continue to the bounded force/reap sequence.
+                    }
                 }
                 reaped = awaitProcess(DESTROY_WAIT_MILLIS)
             }
@@ -343,6 +391,7 @@ private class ManagedDovecotOperatorProcessTransport(
             TerminationOutcome(
                 reaped = reaped,
                 naturalExit = naturalExit,
+                terminationRequired = !naturalExit,
                 streamsClosed = stdinClosed && stdoutClosed,
                 exitCode = exitCode,
             )
@@ -367,9 +416,17 @@ private class ManagedDovecotOperatorProcessTransport(
         RegistrationCleanup,
     }
 
+    private enum class TerminationSignal {
+        Available,
+        AbortPreempted,
+        LifecycleDestroy,
+        Completed,
+    }
+
     private data class TerminationOutcome(
         val reaped: Boolean,
         val naturalExit: Boolean,
+        val terminationRequired: Boolean,
         val streamsClosed: Boolean,
         val exitCode: Int?,
     )
