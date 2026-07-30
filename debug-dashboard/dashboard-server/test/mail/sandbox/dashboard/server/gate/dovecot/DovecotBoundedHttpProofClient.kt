@@ -1,6 +1,5 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
-import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -13,6 +12,11 @@ internal class DovecotBoundedHttpProofClient(
     private val timeoutMillis: Int,
     private val maximumResponseBytes: Int,
     private val socketFactory: () -> Socket = { Socket() },
+    private val operationWorkers: DovecotBoundedOperationWorkers =
+        DovecotBoundedOperationWorkers.processWide,
+    private val responseBufferFactory: (Int) -> ByteArray =
+        { size -> ByteArray(size) },
+    private val beforeFailureClassification: (Throwable) -> Unit = {},
 ) {
     init {
         require(port in 1..65_535)
@@ -24,45 +28,42 @@ internal class DovecotBoundedHttpProofClient(
         path: String,
         body: ByteArray,
     ): DovecotBoundedHttpResponse {
-        requireCallerNotInterrupted()
+        val deadline = DovecotTask6ProofDeadline(
+            timeout = Duration.ofMillis(timeoutMillis.toLong()),
+            onDeadline = {},
+        )
         require(path in ALLOWED_PATHS) {
             "OAuth proof path was invalid"
         }
-        val socket = socketFactory()
-        val deadline = DovecotTask6ProofDeadline(
-            timeout = Duration.ofMillis(timeoutMillis.toLong()),
-            onDeadline = {
-                runCatching(socket::close)
-            },
-        )
+        var operation: DovecotBoundedOperation? = null
         var requestHeaders = ByteArray(0)
         var responseBody: ByteArray? = null
         try {
-            socket.tcpNoDelay = true
-            socket.soTimeout = timeoutMillis
-            socket.connect(
-                InetSocketAddress(LOOPBACK, port),
-                deadline.remainingMillis(),
+            val acquired = operationWorkers.tryAcquire(
+                deadline.deadlineNanos,
+            ) ?: error("OAuth HTTP proof capacity was exhausted")
+            operation = acquired
+            val socket = openSocket(acquired)
+            val io = HttpIo(
+                operation = acquired,
+                socket = socket,
+                port = port,
+                responseBufferFactory = responseBufferFactory,
             )
-            deadline.requireRemaining()
+            io.configureAndConnect(deadline)
 
             requestHeaders = requestHeaders(path, body.size)
-            socket.outputStream.write(requestHeaders)
-            deadline.requireRemaining()
-            socket.outputStream.write(body)
-            deadline.requireRemaining()
-            socket.outputStream.flush()
-            deadline.requireRemaining()
+            io.write(requestHeaders)
+            io.write(body, flush = true)
 
-            val input = socket.inputStream
-            val status = readStatus(input, deadline)
-            val headers = readHeaders(input, deadline)
+            val status = readStatus(io)
+            val headers = readHeaders(io)
             responseBody = readBody(
-                input = input,
+                io = io,
                 contentLength = headers.contentLength,
-                deadline = deadline,
             )
-            deadline.complete()
+            io.closeSocket()
+            completeOperation(acquired, deadline)
 
             val ownedBody = requireNotNull(responseBody)
             val response = DovecotBoundedHttpResponse(
@@ -72,17 +73,29 @@ internal class DovecotBoundedHttpProofClient(
             )
             responseBody = null
             return response
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw interrupted
-        } catch (_: Exception) {
+        } catch (failure: Throwable) {
+            beforeFailureClassification(failure)
+            if (abandonAndDetectInterruption(operation, failure)) {
+                throwRedactedInterruption()
+            }
             error("OAuth HTTP proof failed")
         } finally {
             responseBody?.fill(0)
             requestHeaders.fill(0)
             deadline.close()
-            runCatching(socket::close)
         }
+    }
+
+    private fun openSocket(
+        operation: DovecotBoundedOperation,
+    ): Socket = operation.execute {
+        val socket = socketFactory()
+        registerCancellationTarget(
+            identity = socket,
+            abort = socket::close,
+            close = socket::close,
+        )
+        socket
     }
 
     private fun requestHeaders(
@@ -99,12 +112,9 @@ internal class DovecotBoundedHttpProofClient(
             ).toByteArray(StandardCharsets.US_ASCII)
 
     private fun readStatus(
-        input: InputStream,
-        deadline: DovecotTask6ProofDeadline,
-    ): Int = readLine(
-        input = input,
+        io: HttpIo,
+    ): Int = io.readLine(
         maximumBytes = MAX_STATUS_LINE_BYTES,
-        deadline = deadline,
     ).useWiped { line ->
         check(
             line.size >= MINIMUM_STATUS_LINE_BYTES &&
@@ -128,18 +138,15 @@ internal class DovecotBoundedHttpProofClient(
     }
 
     private fun readHeaders(
-        input: InputStream,
-        deadline: DovecotTask6ProofDeadline,
+        io: HttpIo,
     ): ParsedHeaders {
         var totalBytes = 0
         var count = 0
         var location: String? = null
         var contentLength: Int? = null
         while (true) {
-            val line = readLine(
-                input = input,
+            val line = io.readLine(
                 maximumBytes = MAX_HEADER_LINE_BYTES,
-                deadline = deadline,
             )
             line.useWiped {
                 totalBytes += line.size + CRLF_BYTES
@@ -233,116 +240,209 @@ internal class DovecotBoundedHttpProofClient(
     }
 
     private fun readBody(
-        input: InputStream,
+        io: HttpIo,
         contentLength: Int?,
-        deadline: DovecotTask6ProofDeadline,
     ): ByteArray =
         if (contentLength != null) {
-            readExactBody(input, contentLength, deadline)
+            io.readExactBody(contentLength)
         } else {
-            readCloseDelimitedBody(input, deadline)
+            io.readCloseDelimitedBody(maximumResponseBytes)
         }
 
-    private fun readExactBody(
-        input: InputStream,
-        contentLength: Int,
-        deadline: DovecotTask6ProofDeadline,
-    ): ByteArray {
-        val body = ByteArray(contentLength)
-        var offset = 0
-        try {
-            while (offset < body.size) {
-                deadline.requireRemaining()
-                val count = input.read(body, offset, body.size - offset)
-                deadline.requireRemaining()
-                check(count > 0) {
-                    "OAuth HTTP response body ended early"
-                }
-                offset += count
+    private class HttpIo(
+        private val operation: DovecotBoundedOperation,
+        private val socket: Socket,
+        private val port: Int,
+        private val responseBufferFactory: (Int) -> ByteArray,
+    ) {
+        fun configureAndConnect(
+            deadline: DovecotTask6ProofDeadline,
+        ) {
+            operation.execute {
+                socket.tcpNoDelay = true
+                socket.soTimeout = deadline.remainingMillis()
+                socket.connect(
+                    InetSocketAddress(LOOPBACK, port),
+                    deadline.remainingMillis(),
+                )
             }
-            return body
-        } catch (failure: Throwable) {
-            body.fill(0)
-            throw failure
         }
-    }
 
-    private fun readCloseDelimitedBody(
-        input: InputStream,
-        deadline: DovecotTask6ProofDeadline,
-    ): ByteArray {
-        val buffer = ByteArray(maximumResponseBytes)
-        var size = 0
-        try {
-            while (true) {
-                deadline.requireRemaining()
-                val value = input.read()
-                deadline.requireRemaining()
-                if (value < 0) {
-                    return buffer.copyOf(size)
+        fun write(
+            source: ByteArray,
+            flush: Boolean = false,
+        ) {
+            operation.executeWithCopiedBytes<Unit>(source) { owned ->
+                socket.outputStream.write(
+                    owned,
+                    0,
+                    owned.size,
+                )
+                if (flush) {
+                    socket.outputStream.flush()
                 }
-                check(size < buffer.size) {
-                    "OAuth HTTP response body exceeded its bound"
-                }
-                buffer[size] = value.toByte()
-                size += 1
             }
-        } finally {
-            buffer.fill(0)
         }
-    }
 
-    private fun readLine(
-        input: InputStream,
-        maximumBytes: Int,
-        deadline: DovecotTask6ProofDeadline,
-    ): ByteArray {
-        val buffer = ByteArray(maximumBytes + 1)
-        var size = 0
-        try {
-            while (true) {
-                deadline.requireRemaining()
-                val value = input.read()
-                deadline.requireRemaining()
-                check(value >= 0) {
-                    "OAuth HTTP response ended early"
-                }
-                if (value == LINE_FEED.toInt()) {
-                    check(
-                        size > 0 &&
-                            buffer[size - 1] == CARRIAGE_RETURN,
-                    ) {
-                        "OAuth HTTP response line was invalid"
+        fun readLine(maximumBytes: Int): ByteArray = operation.execute(
+            disposeLate = { bytes: ByteArray -> bytes.fill(0) },
+        ) {
+            val buffer = ByteArray(maximumBytes + 1)
+            var size = 0
+            try {
+                val input = socket.inputStream
+                while (true) {
+                    val value = input.read()
+                    check(value >= 0) {
+                        "OAuth HTTP response ended early"
                     }
-                    return buffer.copyOf(size - 1)
+                    if (value == LINE_FEED.toInt()) {
+                        check(
+                            size > 0 &&
+                                buffer[size - 1] == CARRIAGE_RETURN,
+                        ) {
+                            "OAuth HTTP response line was invalid"
+                        }
+                        return@execute buffer.copyOf(size - 1)
+                    }
+                    check(size < buffer.size) {
+                        "OAuth HTTP response line exceeded its bound"
+                    }
+                    buffer[size] = value.toByte()
+                    size += 1
                 }
-                check(size < buffer.size) {
-                    "OAuth HTTP response line exceeded its bound"
-                }
-                buffer[size] = value.toByte()
-                size += 1
+                @Suppress("UNREACHABLE_CODE")
+                ByteArray(0)
+            } finally {
+                buffer.fill(0)
             }
-        } finally {
-            buffer.fill(0)
         }
-    }
 
-    private fun DovecotTask6ProofDeadline.remainingMillis(): Int {
-        val nanos = remainingNanos()
-        return maxOf(
-            1,
-            TimeUnit.NANOSECONDS.toMillis(
-                nanos + TimeUnit.MILLISECONDS.toNanos(1) - 1,
-            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-        )
-    }
+        fun readExactBody(contentLength: Int): ByteArray =
+            operation.execute(
+                disposeLate = { bytes: ByteArray -> bytes.fill(0) },
+            ) {
+                val body = allocateResponseBuffer(contentLength)
+                var offset = 0
+                try {
+                    val input = socket.inputStream
+                    while (offset < body.size) {
+                        val count = input.read(
+                            body,
+                            offset,
+                            body.size - offset,
+                        )
+                        check(count > 0) {
+                            "OAuth HTTP response body ended early"
+                        }
+                        offset += count
+                    }
+                    body
+                } catch (failure: Throwable) {
+                    body.fill(0)
+                    throw failure
+                }
+            }
 
-    private fun requireCallerNotInterrupted() {
-        if (Thread.currentThread().isInterrupted) {
-            throw InterruptedException(
-                "OAuth HTTP proof operation was interrupted",
+        fun readCloseDelimitedBody(maximumBytes: Int): ByteArray =
+            operation.execute(
+                disposeLate = { bytes: ByteArray -> bytes.fill(0) },
+            ) {
+                val buffer = allocateResponseBuffer(maximumBytes)
+                var size = 0
+                try {
+                    val input = socket.inputStream
+                    while (true) {
+                        val value = input.read()
+                        if (value < 0) {
+                            return@execute buffer.copyOf(size)
+                        }
+                        check(size < buffer.size) {
+                            "OAuth HTTP response body exceeded its bound"
+                        }
+                        buffer[size] = value.toByte()
+                        size += 1
+                    }
+                    @Suppress("UNREACHABLE_CODE")
+                    ByteArray(0)
+                } finally {
+                    buffer.fill(0)
+                }
+            }
+
+        fun closeSocket() {
+            operation.execute {
+                socket.close()
+            }
+        }
+
+        private fun allocateResponseBuffer(size: Int): ByteArray {
+            val allocated = responseBufferFactory(size)
+            try {
+                check(allocated.size == size) {
+                    "OAuth HTTP response buffer size was invalid"
+                }
+                return allocated
+            } catch (failure: Throwable) {
+                allocated.fill(0)
+                throw failure
+            }
+        }
+
+        private fun DovecotTask6ProofDeadline.remainingMillis(): Int {
+            val nanos = remainingNanos()
+            return maxOf(
+                1,
+                TimeUnit.NANOSECONDS.toMillis(
+                    nanos + TimeUnit.MILLISECONDS.toNanos(1) - 1,
+                ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             )
         }
+    }
+
+    private fun completeOperation(
+        operation: DovecotBoundedOperation,
+        deadline: DovecotTask6ProofDeadline,
+    ) {
+        deadline.complete()
+        operation.complete()
+        check(operation.awaitRelease()) {
+            "OAuth HTTP proof operation exceeded its deadline"
+        }
+    }
+
+    private fun abandonAndDetectInterruption(
+        operation: DovecotBoundedOperation?,
+        failure: Throwable,
+    ): Boolean {
+        var interrupted =
+            failure is InterruptedException ||
+                Thread.currentThread().isInterrupted
+        if (Thread.interrupted()) {
+            interrupted = true
+        }
+        operation?.abandon()
+        try {
+            operation?.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
+        } catch (_: InterruptedException) {
+            interrupted = true
+            Thread.interrupted()
+        }
+        if (Thread.currentThread().isInterrupted) {
+            interrupted = true
+            Thread.interrupted()
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt()
+        }
+        return interrupted
+    }
+
+    private fun throwRedactedInterruption(): Nothing {
+        Thread.currentThread().interrupt()
+        throw InterruptedException(
+            "OAuth HTTP proof operation was interrupted",
+        )
     }
 
     private fun Byte.asciiDigit(): Int {
@@ -403,6 +503,8 @@ internal class DovecotBoundedHttpProofClient(
         private const val MAX_LOCATION_BYTES = 1024
         private const val MAX_CONTENT_LENGTH_DIGITS = 10
         private const val CRLF_BYTES = 2
+        private val CANCELLATION_WAIT_NANOS =
+            TimeUnit.MILLISECONDS.toNanos(100)
         private const val STATUS_CODE_OFFSET = 9
         private const val STATUS_REASON_SEPARATOR = 12
         private const val ASCII_CASE_OFFSET = 32

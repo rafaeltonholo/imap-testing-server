@@ -118,17 +118,3 @@ internal object DovecotOAuthProofValidator {
     private const val CALLBACK_STATE = "task6"
     private const val JSON_ESCAPE: Byte = 0x5c
 }
-
-internal fun task6RequireBoundedHttpBody(
-    body: ByteArray,
-    maximumBytes: Int,
-): ByteArray {
-    require(maximumBytes >= 0) {
-        "OAuth response bound was invalid"
-    }
-    if (body.size > maximumBytes) {
-        body.fill(0)
-        error("OAuth response exceeded its bound")
-    }
-    return body
-}
