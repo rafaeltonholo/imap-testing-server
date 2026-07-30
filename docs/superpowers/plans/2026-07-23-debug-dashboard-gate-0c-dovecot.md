@@ -427,7 +427,10 @@ Pinned Dovecot 2.4.1 source establishes that `passwd_file_sync()` stats a
 passwd file at most once per `ioloop_time` wall-clock second and detects a
 change through second-resolution modification time or file size. An immediate
 post-delete operator probe can therefore observe the prior valid snapshot.
-Cleanup accepts only `AuthenticationFailure`; `Success` alone is retryable.
+Cleanup accepts only the exact typed `AuthorizationFailure` emitted after the
+valid master credential succeeds but the removed target is denied;
+`AuthenticationFailure` instead means the active master credential was
+rejected and fails immediately. `Success` alone is retryable.
 Persistent `Success` schedules exactly six conditional 250-millisecond
 inter-attempt delays (1.5 seconds of scheduled delay) across seven
 fresh-credential probes. This is sufficient to place a later request beyond

@@ -17,7 +17,12 @@ internal fun awaitDovecotOperatorTargetRejection(
 ) {
     repeat(REMOVAL_REJECTION_ATTEMPTS) { attempt ->
         when (resultSupplier()) {
-            DovecotOperatorProbeResult.AuthenticationFailure -> return
+            DovecotOperatorProbeResult.AuthorizationFailure -> return
+            DovecotOperatorProbeResult.AuthenticationFailure ->
+                throw IllegalStateException(
+                    "Removed operator target rejection probe rejected the " +
+                        "active operator credential",
+                )
             DovecotOperatorProbeResult.Success -> {
                 if (attempt + 1 == REMOVAL_REJECTION_ATTEMPTS) {
                     throw IllegalStateException(
@@ -51,14 +56,14 @@ private const val REMOVAL_REJECTION_DELAY_MILLIS = 250L
 
 class DovecotOperatorRemovalRejectionPolicyTest {
     @Test
-    fun authenticationFailureCompletesImmediately() {
+    fun authorizationFailureCompletesImmediately() {
         var supplierCalls = 0
         val sleeps = mutableListOf<Long>()
 
         awaitDovecotOperatorTargetRejection(
             resultSupplier = {
                 supplierCalls += 1
-                DovecotOperatorProbeResult.AuthenticationFailure
+                DovecotOperatorProbeResult.AuthorizationFailure
             },
             sleeper =
                 DovecotOperatorRemovalRejectionSleeper(sleeps::add),
@@ -69,7 +74,7 @@ class DovecotOperatorRemovalRejectionPolicyTest {
     }
 
     @Test
-    fun successIsRetriedUntilAuthenticationFailure() {
+    fun successIsRetriedUntilAuthorizationFailure() {
         var supplierCalls = 0
         val sleeps = mutableListOf<Long>()
 
@@ -79,7 +84,7 @@ class DovecotOperatorRemovalRejectionPolicyTest {
                 if (supplierCalls < 3) {
                     DovecotOperatorProbeResult.Success
                 } else {
-                    DovecotOperatorProbeResult.AuthenticationFailure
+                    DovecotOperatorProbeResult.AuthorizationFailure
                 }
             },
             sleeper =
@@ -88,6 +93,31 @@ class DovecotOperatorRemovalRejectionPolicyTest {
 
         assertEquals(3, supplierCalls)
         assertEquals(listOf(250L, 250L), sleeps)
+    }
+
+    @Test
+    fun authenticationFailureDoesNotProveTargetRemoval() {
+        var supplierCalls = 0
+        val sleeps = mutableListOf<Long>()
+
+        val failure = assertFailsWith<IllegalStateException> {
+            awaitDovecotOperatorTargetRejection(
+                resultSupplier = {
+                    supplierCalls += 1
+                    DovecotOperatorProbeResult.AuthenticationFailure
+                },
+                sleeper =
+                    DovecotOperatorRemovalRejectionSleeper(sleeps::add),
+            )
+        }
+
+        assertEquals(1, supplierCalls)
+        assertEquals(emptyList(), sleeps)
+        assertEquals(
+            "Removed operator target rejection probe rejected the active " +
+                "operator credential",
+            failure.message,
+        )
     }
 
     @Test

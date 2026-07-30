@@ -3,6 +3,7 @@ package mail.sandbox.dashboard.server.gate.dovecot
 internal enum class DovecotAuthenticationResponse {
     Success,
     PermanentFailure,
+    AuthorizationFailure,
     Indeterminate,
 }
 
@@ -31,6 +32,11 @@ internal object DovecotAuthenticationResponseClassifier {
                 status = IMAP_NO,
                 responseCode = IMAP_PERMANENT_FAILURE_CODE,
             ) -> DovecotAuthenticationResponse.PermanentFailure
+            line.hasExactResponse(
+                offset = statusOffset,
+                status = IMAP_NO,
+                responseCode = IMAP_AUTHORIZATION_FAILURE_CODE,
+            ) -> DovecotAuthenticationResponse.AuthorizationFailure
             else -> DovecotAuthenticationResponse.Indeterminate
         }
     }
@@ -96,6 +102,30 @@ internal object DovecotAuthenticationResponseClassifier {
             'T'.code.toByte(),
             'I'.code.toByte(),
             'C'.code.toByte(),
+            'A'.code.toByte(),
+            'T'.code.toByte(),
+            'I'.code.toByte(),
+            'O'.code.toByte(),
+            'N'.code.toByte(),
+            'F'.code.toByte(),
+            'A'.code.toByte(),
+            'I'.code.toByte(),
+            'L'.code.toByte(),
+            'E'.code.toByte(),
+            'D'.code.toByte(),
+            ']'.code.toByte(),
+        )
+    private val IMAP_AUTHORIZATION_FAILURE_CODE =
+        byteArrayOf(
+            '['.code.toByte(),
+            'A'.code.toByte(),
+            'U'.code.toByte(),
+            'T'.code.toByte(),
+            'H'.code.toByte(),
+            'O'.code.toByte(),
+            'R'.code.toByte(),
+            'I'.code.toByte(),
+            'Z'.code.toByte(),
             'A'.code.toByte(),
             'T'.code.toByte(),
             'I'.code.toByte(),

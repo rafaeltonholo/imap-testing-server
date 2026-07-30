@@ -34,6 +34,7 @@ internal class DovecotOperatorTarget private constructor(
 internal enum class DovecotOperatorProbeResult {
     Success,
     AuthenticationFailure,
+    AuthorizationFailure,
     ProtocolFailure,
     TransportFailure,
 }
@@ -122,6 +123,8 @@ internal class DovecotOperatorProbe(
                 DovecotAuthenticationResponse.Success -> Unit
                 DovecotAuthenticationResponse.PermanentFailure ->
                     return DovecotOperatorProbeResult.AuthenticationFailure
+                DovecotAuthenticationResponse.AuthorizationFailure ->
+                    return DovecotOperatorProbeResult.AuthorizationFailure
                 DovecotAuthenticationResponse.Indeterminate ->
                     return DovecotOperatorProbeResult.ProtocolFailure
             }

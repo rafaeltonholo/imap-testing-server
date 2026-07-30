@@ -705,9 +705,17 @@ absent-master, master-as-self, and revoked-old rows. SMTP rejection requires
 one terminal `535 <text>` line whose text is HTAB or printable US-ASCII;
 `5350...`, `535-...`, empty text, and control-byte lookalikes are
 indeterminate rather than accepted rejection evidence.
-IMAP and POP3 rejection count as permanent only for their exact tagged
-`[AUTHENTICATIONFAILED]` and `-ERR [AUTH]` response forms; unavailable,
-temporary, server, bare, malformed, and misleading responses are indeterminate.
+IMAP credential rejection and POP3 rejection count as permanent only for their
+exact tagged `[AUTHENTICATIONFAILED]` and `-ERR [AUTH]` response forms. An IMAP
+operator login made with the valid active master credential against a
+forbidden, protected, or removed target is a distinct exact tagged
+`[AUTHORIZATIONFAILED]` result. The active master identity used as its own
+target is the deliberate exception: Dovecot treats `master*master` as an
+ordinary login and returns `[AUTHENTICATIONFAILED]`. Target-removal and
+distinct forbidden-target proofs accept only the authorization result;
+master-as-self, credential revocation, and rotation proofs continue to require
+`[AUTHENTICATIONFAILED]`. Unavailable, temporary, server, bare, malformed, and
+misleading responses are indeterminate.
 OAuth introspection requires one actual JSON boolean `"active": false`;
 authorization denial requires the exact fixed
 `http://127.0.0.1/callback` origin and path without a port, user information, or
@@ -787,7 +795,7 @@ Fresh post-fix non-live evidence passed:
 - the exact reported five-class order: `95/95` on each of five consecutive,
   uninterrupted, identical runs with zero failures.
 
-The current 13-class reciprocal run passed `186/186`:
+The pre-live-attempt 13-class reciprocal run passed `186/186`:
 
 - the bounded operation coordinator: `32/32`;
 - credential recovery, rotation projection, durable repository, and
@@ -797,6 +805,26 @@ The current 13-class reciprocal run passed `186/186`:
 - held-session, deadline, and mailbox contracts: `44/44`; and
 - bounded process and topology proofs: `11/11`.
 
+The first checked live lifecycle then reached the startup proof and exposed a
+missing Dovecot response class during its mandatory removed-target cleanup.
+Pinned Dovecot 2.4.1 returns the exact tagged
+`NO [AUTHORIZATIONFAILED] Authorization failed` response after the master
+credential succeeds but the removed target is no longer authorized. The
+strict classifier recognized only `[AUTHENTICATIONFAILED]`, converted the
+valid denial to `ProtocolFailure`, and made cleanup fail immediately. The
+two results are now separately typed. Removed-target and distinct
+forbidden-target proofs require `AuthorizationFailure`; the active
+master-as-self row and old or invalid master credential proofs require
+`AuthenticationFailure`, so authorization denial cannot falsely prove
+credential revocation.
+
+Post-diagnosis TDD evidence passed:
+
+- the classifier, Probe, removal-policy, and isolation-contract focused
+  selection: `42/42`; and
+- the expanded 14-class Task 6 reciprocal selection, including the removal
+  policy: `195/195`.
+
 Under the no-Docker verification boundary, the non-live Dovecot class run
 passed `263/263` and the 13 non-daemon static/config selectors passed `13/13`,
 for `276/276` with zero skips. All `*LiveTest` classes and the mixed
@@ -805,9 +833,14 @@ methods that invoke `docker run` were not executed. The independent Python
 helper passed `21/21`, and `./kotlin build --module dashboard-server`
 completed successfully.
 
-Task 6 live evidence is **pending**, not passed. No Docker daemon or live
-service operation was performed while implementing this task. A controller
-must run the single checked lifecycle:
+Task 6 live evidence is **pending**, not passed. The first single checked
+lifecycle attempt started only its isolated Dovecot, operator, Postfix, and
+OAuth services; it did not select Stalwart. After the startup cleanup assertion
+above failed, the lifecycle removed every proof container, network, volume,
+proof root, and lifecycle lock, released all five fixed proof ports, and
+reported `baseline-match`. An independent check confirmed the same five
+pre-existing container IDs and statuses remained. A controller must rerun the
+same single checked lifecycle after the typed response repair:
 
 ```bash
 debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh

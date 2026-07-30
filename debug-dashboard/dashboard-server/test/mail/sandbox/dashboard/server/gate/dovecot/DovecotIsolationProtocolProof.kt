@@ -20,6 +20,22 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 
+internal fun requireDovecotOperatorTargetRejected(
+    target: String,
+    activeMasterId: DovecotOperatorId,
+    response: DovecotAuthenticationResponse,
+) {
+    val expected =
+        if (target == activeMasterId.masterUsername) {
+            DovecotAuthenticationResponse.PermanentFailure
+        } else {
+            DovecotAuthenticationResponse.AuthorizationFailure
+        }
+    check(response == expected) {
+        "Operator forbidden target rejection had the wrong failure class"
+    }
+}
+
 internal class DovecotIsolationProtocolProof private constructor(
     private val sslContext: SSLContext,
 ) {
@@ -59,15 +75,15 @@ internal class DovecotIsolationProtocolProof private constructor(
         credential: DovecotOperatorCredential,
     ) {
         credential.withSecretBytes { bytes ->
-            check(
-                rawImapLogin(
+            requireDovecotOperatorTargetRejected(
+                target = target,
+                activeMasterId = credential.id,
+                response = rawImapLogin(
                     port = port,
                     username = task6MasterLogin(target, credential.id),
                     password = bytes,
-                ) == DovecotAuthenticationResponse.PermanentFailure,
-            ) {
-                "Operator accepted forbidden raw target"
-            }
+                ),
+            )
         }
     }
 
@@ -94,6 +110,7 @@ internal class DovecotIsolationProtocolProof private constructor(
             when (userResponse) {
                 DovecotAuthenticationResponse.Success -> Unit
                 DovecotAuthenticationResponse.PermanentFailure -> return
+                DovecotAuthenticationResponse.AuthorizationFailure,
                 DovecotAuthenticationResponse.Indeterminate ->
                     error("POP3 USER rejection was indeterminate")
             }

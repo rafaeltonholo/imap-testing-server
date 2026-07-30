@@ -23,6 +23,60 @@ import kotlin.test.assertTrue
 
 class DovecotIsolationMailboxContractTest {
     @Test
+    fun forbiddenOperatorTargetsRequireAnExactAuthorizationFailure() {
+        listOf(
+            "absent@local.test",
+            "dashboard-management@local.test",
+            DovecotOperatorId.B.masterUsername,
+        ).forEach { target ->
+            requireDovecotOperatorTargetRejected(
+                target = target,
+                activeMasterId = DovecotOperatorId.A,
+                response = DovecotAuthenticationResponse.AuthorizationFailure,
+            )
+        }
+
+        listOf(
+            DovecotAuthenticationResponse.Success,
+            DovecotAuthenticationResponse.PermanentFailure,
+            DovecotAuthenticationResponse.Indeterminate,
+        ).forEach { result ->
+            assertFailsWith<IllegalStateException>(result.name) {
+                requireDovecotOperatorTargetRejected(
+                    target = "absent@local.test",
+                    activeMasterId = DovecotOperatorId.A,
+                    response = result,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun activeMasterAsTargetRequiresAnExactAuthenticationFailure() {
+        DovecotOperatorId.entries.forEach { activeId ->
+            requireDovecotOperatorTargetRejected(
+                target = activeId.masterUsername,
+                activeMasterId = activeId,
+                response = DovecotAuthenticationResponse.PermanentFailure,
+            )
+        }
+
+        listOf(
+            DovecotAuthenticationResponse.Success,
+            DovecotAuthenticationResponse.AuthorizationFailure,
+            DovecotAuthenticationResponse.Indeterminate,
+        ).forEach { result ->
+            assertFailsWith<IllegalStateException>(result.name) {
+                requireDovecotOperatorTargetRejected(
+                    target = DovecotOperatorId.A.masterUsername,
+                    activeMasterId = DovecotOperatorId.A,
+                    response = result,
+                )
+            }
+        }
+    }
+
+    @Test
     fun isolationMailboxProofSeedsBeforeStrictReadAndConsumesFreshCredentials() {
         val target = DovecotOperatorTarget.create(
             "task6-isolation-seed@local.test",

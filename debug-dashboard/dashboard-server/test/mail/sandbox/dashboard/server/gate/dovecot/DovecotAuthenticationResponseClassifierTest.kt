@@ -6,12 +6,14 @@ import kotlin.test.assertEquals
 
 class DovecotAuthenticationResponseClassifierTest {
     @Test
-    fun imapRequiresTheExactTaggedPermanentAuthenticationFailureCode() {
+    fun imapRequiresAnExactTaggedPermanentAuthenticationOrAuthorizationFailureCode() {
         val cases = mapOf(
             "A601 OK authenticated" to
                 DovecotAuthenticationResponse.Success,
             "A601 NO [AUTHENTICATIONFAILED] Authentication failed." to
                 DovecotAuthenticationResponse.PermanentFailure,
+            "A601 NO [AUTHORIZATIONFAILED] Authorization failed." to
+                DovecotAuthenticationResponse.AuthorizationFailure,
             "A601 NO [UNAVAILABLE] Authentication service unavailable." to
                 DovecotAuthenticationResponse.Indeterminate,
             "A601 NO [SERVERBUG] Internal error." to
@@ -24,7 +26,15 @@ class DovecotAuthenticationResponseClassifierTest {
                 DovecotAuthenticationResponse.Indeterminate,
             "A601 NO [AUTHENTICATIONFAILED]Authentication failed." to
                 DovecotAuthenticationResponse.Indeterminate,
+            "A601 NO [AUTHORIZATIONFAILED]" to
+                DovecotAuthenticationResponse.Indeterminate,
+            "A601 NO [AUTHORIZATIONFAILED extra] Authorization failed." to
+                DovecotAuthenticationResponse.Indeterminate,
+            "A601 NO [AUTHORIZATIONFAILED]Authorization failed." to
+                DovecotAuthenticationResponse.Indeterminate,
             "A601 BAD [AUTHENTICATIONFAILED] malformed command" to
+                DovecotAuthenticationResponse.Indeterminate,
+            "A601 BAD [AUTHORIZATIONFAILED] malformed command" to
                 DovecotAuthenticationResponse.Indeterminate,
             "A6010 NO [AUTHENTICATIONFAILED] wrong tag" to
                 DovecotAuthenticationResponse.Indeterminate,

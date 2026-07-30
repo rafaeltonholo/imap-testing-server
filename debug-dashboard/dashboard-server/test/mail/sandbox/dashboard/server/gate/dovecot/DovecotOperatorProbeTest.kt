@@ -400,10 +400,12 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
-    fun authenticateLoginClassifiesOnlyExactPermanentFailureAsAuthenticationFailure() {
+    fun authenticateLoginClassifiesExactPermanentFailuresByKind() {
         listOf(
             "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n" to
                 DovecotOperatorProbeResult.AuthenticationFailure,
+            "A001 NO [AUTHORIZATIONFAILED] Authorization failed\r\n" to
+                DovecotOperatorProbeResult.AuthorizationFailure,
             "A001 NO Authentication failed\r\n" to
                 DovecotOperatorProbeResult.ProtocolFailure,
             "A001 NO [UNAVAILABLE] Authentication unavailable\r\n" to
