@@ -47,6 +47,7 @@ internal class DovecotBoundedOperationWorkers(
     private val beforeTaskSubmission: () -> Unit = {},
     private val beforeTaskClaim: () -> Unit = {},
     private val afterWorkerDispositionInterrupt: () -> Unit = {},
+    private val beforeOwnershipCommit: () -> Unit = {},
     private val nanoTime: () -> Long = System::nanoTime,
     private val copyBytes: (ByteArray) -> ByteArray = ByteArray::copyOf,
     private val wipeBytes: (ByteArray) -> Unit = { bytes -> bytes.fill(0) },
@@ -83,6 +84,7 @@ internal class DovecotBoundedOperationWorkers(
                 beforeTaskClaim = beforeTaskClaim,
                 afterWorkerDispositionInterrupt =
                     afterWorkerDispositionInterrupt,
+                beforeOwnershipCommit = beforeOwnershipCommit,
                 nanoTime = nanoTime,
                 copyBytes = copyBytes,
                 wipeBytes = wipeBytes,
@@ -168,6 +170,7 @@ internal class DovecotBoundedOperation internal constructor(
     private val beforeTaskSubmission: () -> Unit,
     private val beforeTaskClaim: () -> Unit,
     private val afterWorkerDispositionInterrupt: () -> Unit,
+    private val beforeOwnershipCommit: () -> Unit,
     private val nanoTime: () -> Long,
     private val copyBytes: (ByteArray) -> ByteArray,
     private val wipeBytes: (ByteArray) -> Unit,
@@ -186,6 +189,9 @@ internal class DovecotBoundedOperation internal constructor(
     private var ioActorExited = false
     private var ioActorThread: Thread? = null
     private var cancellationActors = 0
+    private var commitInProgress = false
+    private var handoffCommitted = false
+    private var releaseWithoutHandoff = false
     private var reservationReleased = false
 
     internal fun start() {
@@ -211,6 +217,7 @@ internal class DovecotBoundedOperation internal constructor(
             if (registrationSealed) return
             registrationSealed = true
             ioActorExited = true
+            releaseWithoutHandoff = true
             maybeReleaseLocked()
         }
     }
@@ -299,30 +306,84 @@ internal class DovecotBoundedOperation internal constructor(
 
     fun abandon() {
         val launches = lock.withLock {
-            if (!abandoned && !reservationReleased) {
-                abandoned = true
-                finishRequested = true
-                owner.markAbandoned()
-                pendingTask?.cancelBeforeRun()
-                pendingTask = null
-                inFlightTask?.decline()
-                workAvailable.signalAll()
-            }
-            cancellationLaunchesLocked()
+            abandonLocked()
         }
         launchCancellationActors(launches)
     }
 
-    fun complete() {
-        lock.withLock {
-            if (finishRequested) return
-            finishRequested = true
-            workAvailable.signalAll()
+    fun commitHandoff(): Boolean {
+        when (requestWorkerExit()) {
+            HandoffState.Committed -> return true
+            HandoffState.Unavailable -> return false
+            HandoffState.Pending -> Unit
+        }
+        val waitDecision = awaitIoActorExit()
+        if (waitDecision != null) {
+            return resolveHandoffDecision(waitDecision)
+        }
+        try {
+            beforeOwnershipCommit()
+        } catch (interrupted: InterruptedException) {
+            abandon()
+            Thread.currentThread().interrupt()
+            throw InterruptedException(
+                "Dovecot operation was interrupted",
+            )
+        } catch (failure: Throwable) {
+            abandon()
+            throw failure
+        }
+
+        val decision = lock.withLock {
+            when {
+                handoffCommitted -> HandoffDecision.Committed
+                abandoned || releaseWithoutHandoff ->
+                    HandoffDecision.Unavailable
+                else -> {
+                    val finalRemaining =
+                        remainingNanos(deadlineNanos, nanoTime)
+                    when {
+                        Thread.currentThread().isInterrupted -> {
+                            HandoffDecision.Interrupted(abandonLocked())
+                        }
+                        finalRemaining <= 0L -> {
+                            HandoffDecision.Expired(abandonLocked())
+                        }
+                        else -> {
+                            commitInProgress = false
+                            handoffCommitted = true
+                            maybeReleaseLocked()
+                            HandoffDecision.Committed
+                        }
+                    }
+                }
+            }
+        }
+        return resolveHandoffDecision(decision)
+    }
+
+    private fun resolveHandoffDecision(
+        decision: HandoffDecision,
+    ): Boolean {
+        when (decision) {
+            HandoffDecision.Committed -> return true
+            HandoffDecision.Unavailable -> return false
+            is HandoffDecision.Expired -> {
+                launchCancellationActors(decision.launches)
+                return false
+            }
+            is HandoffDecision.Interrupted -> {
+                launchCancellationActors(decision.launches)
+                Thread.currentThread().interrupt()
+                throw InterruptedException(
+                    "Dovecot operation was interrupted",
+                )
+            }
         }
     }
 
     override fun close() {
-        complete()
+        abandon()
     }
 
     fun awaitRelease(): Boolean {
@@ -368,6 +429,11 @@ internal class DovecotBoundedOperation internal constructor(
             return true
         }
     }
+
+    internal fun isReleased(): Boolean =
+        lock.withLock {
+            reservationReleased
+        }
 
     internal fun registerCancellationTarget(
         identity: Any,
@@ -493,6 +559,7 @@ internal class DovecotBoundedOperation internal constructor(
             if (ioActorExited) return
             registrationSealed = true
             ioActorExited = true
+            releaseWithoutHandoff = true
             if (ioActorCharged) {
                 ioActorCharged = false
                 owner.finishActor()
@@ -514,6 +581,61 @@ internal class DovecotBoundedOperation internal constructor(
             workAvailable.signalAll()
             maybeReleaseLocked()
         }
+    }
+
+    private fun requestWorkerExit(): HandoffState = lock.withLock {
+        when {
+            handoffCommitted -> HandoffState.Committed
+            abandoned || releaseWithoutHandoff || reservationReleased ->
+                HandoffState.Unavailable
+            else -> {
+                check(!commitInProgress) {
+                    "Dovecot operation handoff is already being committed"
+                }
+                commitInProgress = true
+                finishRequested = true
+                workAvailable.signalAll()
+                HandoffState.Pending
+            }
+        }
+    }
+
+    private fun awaitIoActorExit(): HandoffDecision? = lock.withLock {
+        while (!ioActorExited) {
+            val remaining = remainingNanos(deadlineNanos, nanoTime)
+            if (remaining <= 0L) {
+                return@withLock HandoffDecision.Expired(abandonLocked())
+            }
+            try {
+                workAvailable.awaitNanos(remaining)
+            } catch (interrupted: InterruptedException) {
+                val launches = abandonLocked()
+                Thread.currentThread().interrupt()
+                return@withLock HandoffDecision.Interrupted(launches)
+            }
+        }
+        null
+    }
+
+    private fun abandonLocked(): List<CancellationLaunch> {
+        if (
+            !abandoned &&
+            !handoffCommitted &&
+            !releaseWithoutHandoff &&
+            !reservationReleased
+        ) {
+            commitInProgress = false
+            abandoned = true
+            finishRequested = true
+            owner.markAbandoned()
+            pendingTask?.cancelBeforeRun()
+            pendingTask = null
+            inFlightTask?.decline()
+            workAvailable.signalAll()
+        }
+        val launches = cancellationLaunchesLocked()
+        maybeReleaseLocked()
+        return launches
     }
 
     private fun cancellationLaunchesLocked(): List<CancellationLaunch> {
@@ -594,7 +716,12 @@ internal class DovecotBoundedOperation internal constructor(
             reservationReleased ||
             !registrationSealed ||
             !ioActorExited ||
-            cancellationActors != 0
+            cancellationActors != 0 ||
+            (
+                !abandoned &&
+                    !handoffCommitted &&
+                    !releaseWithoutHandoff
+                )
         ) {
             return
         }
@@ -616,6 +743,26 @@ internal class DovecotBoundedOperation internal constructor(
         val name: String,
         val action: () -> Unit,
     )
+
+    private enum class HandoffState {
+        Pending,
+        Committed,
+        Unavailable,
+    }
+
+    private sealed interface HandoffDecision {
+        data object Committed : HandoffDecision
+
+        data object Unavailable : HandoffDecision
+
+        data class Expired(
+            val launches: List<CancellationLaunch>,
+        ) : HandoffDecision
+
+        data class Interrupted(
+            val launches: List<CancellationLaunch>,
+        ) : HandoffDecision
+    }
 
     private companion object {
         private const val MAX_TARGETS = 2

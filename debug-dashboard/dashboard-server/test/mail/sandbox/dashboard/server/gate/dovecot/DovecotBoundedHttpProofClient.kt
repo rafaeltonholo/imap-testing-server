@@ -17,6 +17,7 @@ internal class DovecotBoundedHttpProofClient(
     private val responseBufferFactory: (Int) -> ByteArray =
         { size -> ByteArray(size) },
     private val beforeFailureClassification: (Throwable) -> Unit = {},
+    private val afterResponseConstruction: () -> Unit = {},
 ) {
     init {
         require(port in 1..65_535)
@@ -63,7 +64,6 @@ internal class DovecotBoundedHttpProofClient(
                 contentLength = headers.contentLength,
             )
             io.closeSocket()
-            completeOperation(acquired, deadline)
 
             val ownedBody = requireNotNull(responseBody)
             val response = DovecotBoundedHttpResponse(
@@ -71,6 +71,8 @@ internal class DovecotBoundedHttpProofClient(
                 location = headers.location,
                 body = ownedBody,
             )
+            afterResponseConstruction()
+            completeOperation(acquired, deadline)
             responseBody = null
             return response
         } catch (failure: Throwable) {
@@ -411,8 +413,7 @@ internal class DovecotBoundedHttpProofClient(
         deadline: DovecotTask6ProofDeadline,
     ) {
         deadline.complete()
-        operation.complete()
-        check(operation.awaitRelease()) {
+        check(operation.commitHandoff()) {
             "OAuth HTTP proof operation exceeded its deadline"
         }
     }

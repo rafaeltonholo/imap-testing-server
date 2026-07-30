@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -285,6 +286,205 @@ class DovecotHeldOperatorImapDeadlineTest {
         Thread.sleep(100)
         assertTrue(interruptPreserved)
         assertEquals(0, openCalls.get())
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+    }
+
+    @Test
+    fun interruptedSeedHandoffReturnsNoSessionAndRetainsCleanupAuthority() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val candidateConstructed = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                assertTrue(candidateConstructed.get())
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockAbort = true,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("interrupted-handoff-secret")
+        val returned = AtomicReference<HeldDovecotOperatorImapSession?>()
+        val failure = AtomicReference<Throwable?>()
+        val interruptPreserved = AtomicBoolean()
+        val caller = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeed(
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterSessionConstruction = {
+                                candidateConstructed.set(true)
+                            },
+                        ),
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                    interruptPreserved.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                } finally {
+                    Thread.interrupted()
+                }
+            },
+            "task6-interrupted-seed-handoff-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    activeOperations = 1,
+                    peakActors = 1,
+                ),
+                workers.snapshot(),
+            )
+
+            caller.interrupt()
+            releaseCommit.countDown()
+
+            assertTrue(transport.awaitAbortStarted())
+            assertTrue(transport.awaitCloseStarted())
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertEquals(null, returned.get())
+            assertRedactedInterruption(
+                failure.get(),
+                "Held Dovecot operator seed proof was interrupted",
+            )
+            assertTrue(interruptPreserved.get())
+            assertEquals(1, transport.abortCalls)
+            assertEquals(1, transport.closeCalls)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            releaseCommit.countDown()
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            caller.join(2_000)
+        }
+
+        assertTrue(transport.awaitAbortCompleted())
+        assertTrue(transport.awaitCloseCompleted())
+        awaitWorkersReleased(workers)
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+    }
+
+    @Test
+    fun expiredSeedHandoffReturnsNoSessionAndRetainsCleanupAuthority() {
+        val clock = AtomicLong(System.nanoTime())
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val candidateConstructed = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+            beforeOwnershipCommit = {
+                assertTrue(candidateConstructed.get())
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockAbort = true,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("expired-handoff-secret")
+        val returned = AtomicReference<HeldDovecotOperatorImapSession?>()
+        val failure = AtomicReference<Throwable?>()
+        val caller = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeed(
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterSessionConstruction = {
+                                candidateConstructed.set(true)
+                            },
+                        ),
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            },
+            "task6-expired-seed-handoff-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(1, workers.snapshot().activeOperations)
+            assertEquals(0, workers.snapshot().activeActors)
+
+            clock.set(Long.MAX_VALUE)
+            releaseCommit.countDown()
+
+            assertTrue(transport.awaitAbortStarted())
+            assertTrue(transport.awaitCloseStarted())
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertEquals(null, returned.get())
+            assertTrue(failure.get() is IllegalStateException)
+            assertEquals(
+                "Held Dovecot operator seed proof failed",
+                failure.get()?.message,
+            )
+            assertEquals(null, failure.get()?.cause)
+            assertFalse(
+                failure.get().toString().contains(
+                    "expired-handoff-secret",
+                ),
+            )
+            assertEquals(1, transport.abortCalls)
+            assertEquals(1, transport.closeCalls)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            releaseCommit.countDown()
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            caller.join(2_000)
+        }
+
+        assertTrue(transport.awaitAbortCompleted())
+        assertTrue(transport.awaitCloseCompleted())
+        awaitWorkersReleased(workers)
         assertTrue(message.all { it == 0.toByte() })
         assertCredentialClosed(credential)
     }
@@ -669,7 +869,7 @@ class DovecotHeldOperatorImapDeadlineTest {
 
     @Test
     fun blockedNoopAbortAndCloseCannotKeepCurrentCallerBlocked() {
-        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 2)
         val transport = DeadlineTestTransport(
             transcript = SEED_TRANSCRIPT,
             blockAbort = true,
@@ -718,11 +918,24 @@ class DovecotHeldOperatorImapDeadlineTest {
                 ),
                 workers.snapshot(),
             )
+            val writeCalls = transport.writeCalls
+            val abortCalls = transport.abortCalls
+            val closeCalls = transport.closeCalls
+
+            assertFailsWith<IllegalStateException> {
+                session.requireUsable(SHORT_TIMEOUT)
+            }
+
+            assertEquals(writeCalls, transport.writeCalls)
+            assertEquals(abortCalls, transport.abortCalls)
+            assertEquals(closeCalls, transport.closeCalls)
             assertEquals(
-                null,
-                workers.tryAcquire(
-                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
                 ),
+                workers.snapshot(),
             )
         } finally {
             transport.releaseBlockedAbort()
@@ -904,8 +1117,7 @@ class DovecotHeldOperatorImapDeadlineTest {
                     System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
                 ),
             )
-            recovered.complete()
-            assertTrue(recovered.awaitRelease())
+            assertTrue(recovered.commitHandoff())
         } finally {
             releaseOpen.countDown()
             transport.releaseBlockedAbort()
@@ -981,8 +1193,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     }
 
     @Test
-    fun blockedExplicitCloseReturnsBoundedAndPublishesLateSuccess() {
-        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+    fun blockedExplicitCloseRetainsSerializationAndPublishesLateTransportClose() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 2)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
@@ -1027,6 +1239,23 @@ class DovecotHeldOperatorImapDeadlineTest {
             )
             assertTrue(failure.get() is IllegalStateException)
             assertFalse(session.isClosed)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            val abortCalls = transport.abortCalls
+            val closeCalls = transport.closeCalls
+
+            assertFailsWith<IllegalStateException> {
+                session.close(SHORT_TIMEOUT)
+            }
+
+            assertEquals(abortCalls, transport.abortCalls)
+            assertEquals(closeCalls, transport.closeCalls)
             assertEquals(
                 DovecotBoundedOperationSnapshot(
                     abandonedOperations = 1,
@@ -1462,11 +1691,13 @@ class DovecotHeldOperatorImapDeadlineTest {
 
     @Test
     fun failedDeadlineAbortAndCloseLeaveTheSessionOpenForRetry() {
-        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 2)
         val transport = DeadlineTestTransport(
             transcript = SEED_TRANSCRIPT,
             failedAbortAttempts = 2,
             failedCloseAttempts = 2,
+            blockAbort = true,
+            blockClose = true,
         )
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
@@ -1482,6 +1713,23 @@ class DovecotHeldOperatorImapDeadlineTest {
             session.requireUsable(SHORT_TIMEOUT)
         }
 
+        assertTrue(transport.awaitAbortStarted())
+        assertTrue(transport.awaitCloseStarted())
+        assertFalse(session.isClosed)
+        assertFalse(transport.closed)
+        val liveAbortCalls = transport.abortCalls
+        val liveCloseCalls = transport.closeCalls
+
+        assertFailsWith<IllegalStateException> {
+            session.close(SHORT_TIMEOUT)
+        }
+
+        assertEquals(liveAbortCalls, transport.abortCalls)
+        assertEquals(liveCloseCalls, transport.closeCalls)
+
+        transport.releaseBlockedAbort()
+        transport.releaseBlockedClose()
+        transport.releaseBlockedIo()
         assertTrue(transport.awaitAbortCompleted())
         assertTrue(transport.awaitCloseCompleted())
         awaitWorkersReleased(workers)
@@ -1489,14 +1737,28 @@ class DovecotHeldOperatorImapDeadlineTest {
         assertFalse(transport.closed)
         assertTrue(transport.abortCalls >= 1)
         assertTrue(transport.closeCalls >= 1)
+        val releasedAbortCalls = transport.abortCalls
+        val releasedCloseCalls = transport.closeCalls
+        val releasedWriteCalls = transport.writeCalls
+
+        assertFailsWith<IllegalStateException> {
+            session.requireUsable(SHORT_TIMEOUT)
+        }
+
+        assertEquals(releasedAbortCalls, transport.abortCalls)
+        assertEquals(releasedCloseCalls, transport.closeCalls)
+        assertEquals(releasedWriteCalls, transport.writeCalls)
+
         assertFailsWith<IllegalStateException> {
             session.close()
         }
+        assertFalse(session.isClosed)
+        assertFalse(transport.closed)
+
         session.close()
         awaitWorkersReleased(workers)
         assertTrue(session.isClosed)
         assertTrue(transport.closed)
-        assertTrue(transport.abortCalls >= 1)
         assertTrue(transport.closeCalls >= 3)
     }
 

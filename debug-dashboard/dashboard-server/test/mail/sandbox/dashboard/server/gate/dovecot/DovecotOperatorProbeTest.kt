@@ -1285,6 +1285,7 @@ class DovecotOperatorProbeTest {
         fixture: ProbeFixture,
         canary: String,
     ) {
+        assertProbeReleased(fixture)
         assertTrue(fixture.transport.closed)
         assertTrue(fixture.secretBytes.all { it == 0.toByte() })
         assertTrue(

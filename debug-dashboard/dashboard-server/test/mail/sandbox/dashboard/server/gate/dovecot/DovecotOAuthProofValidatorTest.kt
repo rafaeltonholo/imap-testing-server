@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.Test
@@ -89,6 +90,200 @@ class DovecotOAuthProofValidatorTest {
         }
 
         assertTrue(interruptPreserved)
+    }
+
+    @Test
+    fun interruptedHttpHandoffReturnsNoResponseAndWipesOwnedBody() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val responseConstructed = AtomicBoolean()
+        val bodyBuffer = AtomicReference<ByteArray?>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                assertTrue(responseConstructed.get())
+                commitReached.countDown()
+                releaseCommit.awaitPreservingInterrupt()
+            },
+        )
+        val socket = HandoffProofSocket(
+            FIXED_BODY_RESPONSE_PREFIX + FIXED_BODY_BYTES,
+        )
+        val returned = AtomicReference<DovecotBoundedHttpResponse?>()
+        val failure = AtomicReference<Throwable?>()
+        val interruptPreserved = AtomicBoolean()
+        val caller = Thread(
+            {
+                try {
+                    returned.set(
+                        DovecotBoundedHttpProofClient(
+                            port = 1,
+                            timeoutMillis = 5_000,
+                            maximumResponseBytes = 1024,
+                            socketFactory = { socket },
+                            operationWorkers = workers,
+                            responseBufferFactory = { size ->
+                                ByteArray(size).also { allocated ->
+                                    if (size == FIXED_BODY_SIZE) {
+                                        bodyBuffer.set(allocated)
+                                    }
+                                }
+                            },
+                            afterResponseConstruction = {
+                                responseConstructed.set(true)
+                            },
+                        ).postForm("/introspect", ByteArray(0)),
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                    interruptPreserved.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                } finally {
+                    Thread.interrupted()
+                }
+            },
+            "task6-interrupted-http-handoff-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    activeOperations = 1,
+                    peakActors = 1,
+                ),
+                workers.snapshot(),
+            )
+
+            caller.interrupt()
+            releaseCommit.countDown()
+
+            assertTrue(socket.cleanupCloseStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertNull(returned.get())
+            assertTrue(failure.get() is InterruptedException)
+            assertEquals(
+                "OAuth HTTP proof operation was interrupted",
+                failure.get()?.message,
+            )
+            assertTrue(interruptPreserved.get())
+            assertTrue(
+                checkNotNull(bodyBuffer.get()).all { byte ->
+                    byte == 0.toByte()
+                },
+            )
+            assertEquals(3, socket.closeCalls)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            releaseCommit.countDown()
+            socket.releaseCleanup()
+            caller.join(2_000)
+        }
+
+        awaitHttpWorkersReleased(workers)
+    }
+
+    @Test
+    fun expiredHttpHandoffReturnsNoResponseAndWipesOwnedBody() {
+        val clock = AtomicLong(System.nanoTime())
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val responseConstructed = AtomicBoolean()
+        val bodyBuffer = AtomicReference<ByteArray?>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+            beforeOwnershipCommit = {
+                assertTrue(responseConstructed.get())
+                commitReached.countDown()
+                releaseCommit.awaitPreservingInterrupt()
+            },
+        )
+        val socket = HandoffProofSocket(
+            FIXED_BODY_RESPONSE_PREFIX + FIXED_BODY_BYTES,
+        )
+        val returned = AtomicReference<DovecotBoundedHttpResponse?>()
+        val failure = AtomicReference<Throwable?>()
+        val caller = Thread(
+            {
+                try {
+                    returned.set(
+                        DovecotBoundedHttpProofClient(
+                            port = 1,
+                            timeoutMillis = 5_000,
+                            maximumResponseBytes = 1024,
+                            socketFactory = { socket },
+                            operationWorkers = workers,
+                            responseBufferFactory = { size ->
+                                ByteArray(size).also { allocated ->
+                                    if (size == FIXED_BODY_SIZE) {
+                                        bodyBuffer.set(allocated)
+                                    }
+                                }
+                            },
+                            afterResponseConstruction = {
+                                responseConstructed.set(true)
+                            },
+                        ).postForm("/introspect", ByteArray(0)),
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            },
+            "task6-expired-http-handoff-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(1, workers.snapshot().activeOperations)
+            assertEquals(0, workers.snapshot().activeActors)
+
+            clock.set(Long.MAX_VALUE)
+            releaseCommit.countDown()
+
+            assertTrue(socket.cleanupCloseStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertNull(returned.get())
+            assertTrue(failure.get() is IllegalStateException)
+            assertEquals("OAuth HTTP proof failed", failure.get()?.message)
+            assertEquals(null, failure.get()?.cause)
+            assertTrue(
+                checkNotNull(bodyBuffer.get()).all { byte ->
+                    byte == 0.toByte()
+                },
+            )
+            assertEquals(3, socket.closeCalls)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            releaseCommit.countDown()
+            socket.releaseCleanup()
+            caller.join(2_000)
+        }
+
+        awaitHttpWorkersReleased(workers)
     }
 
     @Test
@@ -343,9 +538,8 @@ class DovecotOAuthProofValidatorTest {
             assertCredentialClosed(probeCredential)
             assertCredentialClosed(heldCredential)
         } finally {
-            reservations.forEach(DovecotBoundedOperation::complete)
             reservations.forEach { operation ->
-                assertTrue(operation.awaitRelease())
+                assertTrue(operation.commitHandoff())
             }
         }
         awaitHttpWorkersReleased(workers)
@@ -514,8 +708,7 @@ class DovecotOAuthProofValidatorTest {
                     System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
                 ),
             )
-            recovered.complete()
-            assertTrue(recovered.awaitRelease())
+            assertTrue(recovered.commitHandoff())
         } finally {
             val launchedActors = synchronized(actorThreads) {
                 actorThreads.toList()
@@ -1125,6 +1318,44 @@ class DovecotOAuthProofValidatorTest {
 
         override fun close() {
             closed.countDown()
+        }
+    }
+
+    private class HandoffProofSocket(
+        response: ByteArray,
+    ) : Socket() {
+        private val input = ByteArrayInputStream(response)
+        private val output = ByteArrayOutputStream()
+        private val closeCounter = AtomicInteger()
+        private val cleanupRelease = CountDownLatch(1)
+
+        val cleanupCloseStarted = CountDownLatch(2)
+
+        val closeCalls: Int
+            get() = closeCounter.get()
+
+        override fun connect(
+            endpoint: SocketAddress,
+            timeout: Int,
+        ) = Unit
+
+        override fun setTcpNoDelay(on: Boolean) = Unit
+
+        override fun setSoTimeout(timeout: Int) = Unit
+
+        override fun getInputStream(): InputStream = input
+
+        override fun getOutputStream(): OutputStream = output
+
+        override fun close() {
+            if (closeCounter.incrementAndGet() > 1) {
+                cleanupCloseStarted.countDown()
+                cleanupRelease.awaitPreservingInterrupt()
+            }
+        }
+
+        fun releaseCleanup() {
+            cleanupRelease.countDown()
         }
     }
 

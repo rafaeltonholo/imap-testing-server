@@ -31,7 +31,7 @@ class DovecotBoundedOperationWorkersTest {
 
         assertEquals(listOf<Byte>(1, 2, 3), result.toList())
         result.fill(0)
-        operation.complete()
+        assertTrue(operation.commitHandoff())
         assertEventually {
             workers.snapshot().let {
                 it.activeOperations == 0 &&
@@ -40,6 +40,490 @@ class DovecotBoundedOperationWorkersTest {
                     it.peakActors == 1
             }
         }
+    }
+
+    @Test
+    fun workerExitRetainsReservationUntilCallerCommitsHandoff() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val committed = AtomicBoolean()
+        val callerFailure = AtomicReference<Throwable?>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {}
+        val caller = Thread {
+            try {
+                committed.set(operation.commitHandoff())
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    activeOperations = 1,
+                    peakActors = 1,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+        } finally {
+            releaseCommit.countDown()
+            caller.join(1_000)
+        }
+
+        assertFalse(caller.isAlive)
+        assertEquals(null, callerFailure.get())
+        assertTrue(committed.get())
+        assertEquals(
+            DovecotBoundedOperationSnapshot(peakActors = 1),
+            workers.snapshot(),
+        )
+    }
+
+    @Test
+    fun callerInterruptedAfterWorkerExitAbandonsWhileLedgerIsAuthoritative() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val abortStarted = CountDownLatch(1)
+        val closeStarted = CountDownLatch(1)
+        val releaseCancellation = CountDownLatch(1)
+        val callerFailure = AtomicReference<Throwable?>()
+        val interruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    abortStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    closeStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+        val caller = Thread {
+            try {
+                operation.commitHandoff()
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(1, workers.snapshot().activeOperations)
+            assertEquals(0, workers.snapshot().activeActors)
+
+            caller.interrupt()
+            releaseCommit.countDown()
+
+            assertTrue(abortStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(closeStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertTrue(callerFailure.get() is InterruptedException)
+            assertEquals(
+                "Dovecot operation was interrupted",
+                callerFailure.get()?.message,
+            )
+            assertTrue(interruptRestored.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+        } finally {
+            releaseCommit.countDown()
+            releaseCancellation.countDown()
+            caller.join(1_000)
+        }
+
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
+    fun interruptionDuringFinalClockSampleCannotEscapeWithCommittedOwnership() {
+        val interruptOnFinalClock = AtomicBoolean()
+        val cancellationCalls = AtomicInteger()
+        val callerFailure = AtomicReference<Throwable?>()
+        val committed = AtomicBoolean()
+        val interruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                interruptOnFinalClock.set(true)
+            },
+            nanoTime = {
+                val sampled = System.nanoTime()
+                if (interruptOnFinalClock.compareAndSet(true, false)) {
+                    Thread.currentThread().interrupt()
+                }
+                sampled
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = cancellationCalls::incrementAndGet,
+                close = cancellationCalls::incrementAndGet,
+            )
+        }
+        val caller = Thread {
+            try {
+                committed.set(operation.commitHandoff())
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        caller.join(1_000)
+
+        assertFalse(caller.isAlive)
+        assertFalse(committed.get())
+        assertTrue(callerFailure.get() is InterruptedException)
+        assertEquals(
+            "Dovecot operation was interrupted",
+            callerFailure.get()?.message,
+        )
+        assertTrue(interruptRestored.get())
+        assertEventually {
+            cancellationCalls.get() == 2 &&
+                workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
+    fun deadlineAfterWorkerExitAbandonsBeforeHandoffCommit() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val committed = AtomicBoolean(true)
+        val callerFailure = AtomicReference<Throwable?>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+        val caller = Thread {
+            try {
+                committed.set(operation.commitHandoff())
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            assertEquals(1, workers.snapshot().activeOperations)
+            assertEquals(0, workers.snapshot().activeActors)
+
+            clock.set(deadline)
+            releaseCommit.countDown()
+
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+            assertFalse(caller.isAlive)
+            assertEquals(null, callerFailure.get())
+            assertFalse(committed.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 2,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            releaseCommit.countDown()
+            releaseCancellation.countDown()
+            caller.join(1_000)
+        }
+
+        assertEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
+    fun callerFailureAfterWorkerExitAbandonsAndPreservesTheExactFailure() {
+        val failure = IllegalStateException("ownership commit sentinel")
+        val cancellationCalls = AtomicInteger()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = { throw failure },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = cancellationCalls::incrementAndGet,
+                close = cancellationCalls::incrementAndGet,
+            )
+        }
+
+        assertSame(
+            failure,
+            assertFailsWith<IllegalStateException> {
+                operation.commitHandoff()
+            },
+        )
+
+        assertEventually {
+            cancellationCalls.get() == 2 &&
+                workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 2)
+        }
+    }
+
+    @Test
+    fun postExitHookFailureWithoutTargetsReleasesItsReservation() {
+        val failure = IllegalStateException("zero-target commit sentinel")
+        val failFirstCommit = AtomicBoolean(true)
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                if (failFirstCommit.compareAndSet(true, false)) {
+                    throw failure
+                }
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {}
+
+        assertSame(
+            failure,
+            assertFailsWith<IllegalStateException> {
+                operation.commitHandoff()
+            },
+        )
+
+        assertZeroTargetCapacityRecovered(workers)
+    }
+
+    @Test
+    fun postExitInterruptionWithoutTargetsReleasesItsReservation() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val callerFailure = AtomicReference<Throwable?>()
+        val interruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {}
+        val caller = Thread {
+            try {
+                operation.commitHandoff()
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            caller.interrupt()
+            releaseCommit.countDown()
+            caller.join(1_000)
+        } finally {
+            releaseCommit.countDown()
+            caller.join(1_000)
+        }
+
+        assertFalse(caller.isAlive)
+        assertTrue(callerFailure.get() is InterruptedException)
+        assertTrue(interruptRestored.get())
+        assertZeroTargetCapacityRecovered(workers)
+    }
+
+    @Test
+    fun postExitExpiryWithoutTargetsReleasesItsReservation() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val committed = AtomicBoolean(true)
+        val callerFailure = AtomicReference<Throwable?>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadline)!!
+        operation.execute<Unit> {}
+        val caller = Thread {
+            try {
+                committed.set(operation.commitHandoff())
+            } catch (failure: Throwable) {
+                callerFailure.set(failure)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+            clock.set(deadline)
+            releaseCommit.countDown()
+            caller.join(1_000)
+        } finally {
+            releaseCommit.countDown()
+            caller.join(1_000)
+        }
+
+        assertFalse(caller.isAlive)
+        assertEquals(null, callerFailure.get())
+        assertFalse(committed.get())
+        assertZeroTargetCapacityRecovered(workers)
+    }
+
+    @Test
+    fun concurrentHandoffCommitIsRejectedBeforeItCanRaceTheOwner() {
+        val commitReached = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            beforeOwnershipCommit = {
+                commitReached.countDown()
+                awaitUninterruptibly(releaseCommit)
+            },
+        )
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {}
+        val firstCommitted = AtomicBoolean()
+        val firstFailure = AtomicReference<Throwable?>()
+        val first = Thread {
+            try {
+                firstCommitted.set(operation.commitHandoff())
+            } catch (failure: Throwable) {
+                firstFailure.set(failure)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        assertTrue(commitReached.await(1, TimeUnit.SECONDS))
+        val secondStarted = CountDownLatch(1)
+        val secondFailure = AtomicReference<Throwable?>()
+        val second = Thread {
+            secondStarted.countDown()
+            try {
+                operation.commitHandoff()
+            } catch (failure: Throwable) {
+                secondFailure.set(failure)
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(secondStarted.await(1, TimeUnit.SECONDS))
+            second.join(500)
+            assertFalse(
+                second.isAlive,
+                "A second handoff caller entered the ownership seam",
+            )
+            assertTrue(secondFailure.get() is IllegalStateException)
+            assertEquals(
+                "Dovecot operation handoff is already being committed",
+                secondFailure.get()?.message,
+            )
+            assertEquals(1, workers.snapshot().activeOperations)
+        } finally {
+            releaseCommit.countDown()
+            first.join(1_000)
+            second.join(1_000)
+        }
+
+        assertFalse(first.isAlive)
+        assertFalse(second.isAlive)
+        assertEquals(null, firstFailure.get())
+        assertTrue(firstCommitted.get())
+        assertEquals(
+            DovecotBoundedOperationSnapshot(peakActors = 1),
+            workers.snapshot(),
+        )
     }
 
     @Test
@@ -98,7 +582,9 @@ class DovecotBoundedOperationWorkersTest {
                     it.activeActors == 0
             }
         }
-        workers.tryAcquire(deadlineAfter())!!.complete()
+        assertTrue(
+            workers.tryAcquire(deadlineAfter())!!.commitHandoff(),
+        )
     }
 
     @Test
@@ -135,7 +621,7 @@ class DovecotBoundedOperationWorkersTest {
             val rejected = workers.tryAcquire(deadlineAfter())
             if (rejected != null) {
                 allocated.set(true)
-                rejected.complete()
+                rejected.commitHandoff()
             }
 
             assertNull(rejected)
@@ -245,7 +731,9 @@ class DovecotBoundedOperationWorkersTest {
             DovecotBoundedOperationSnapshot(peakActors = 1),
             actorWorkers.snapshot(),
         )
-        actorWorkers.tryAcquire(deadlineAfter())!!.complete()
+        assertTrue(
+            actorWorkers.tryAcquire(deadlineAfter())!!.commitHandoff(),
+        )
         assertEventually {
             actorWorkers.snapshot().let {
                 it.activeOperations == 0 && it.activeActors == 0
@@ -675,7 +1163,9 @@ class DovecotBoundedOperationWorkersTest {
                     it.peakActors == 20
             }
         }
-        workers.tryAcquire(deadlineAfter())!!.complete()
+        assertTrue(
+            workers.tryAcquire(deadlineAfter())!!.commitHandoff(),
+        )
     }
 
     @Test
@@ -850,7 +1340,7 @@ class DovecotBoundedOperationWorkersTest {
         assertFailsWith<IllegalStateException> {
             context.registerCancellationTarget(Any(), abort = {}, close = {})
         }
-        operation.complete()
+        assertTrue(operation.commitHandoff())
         assertEventually {
             workers.snapshot().activeActors == 0
         }
@@ -867,7 +1357,7 @@ class DovecotBoundedOperationWorkersTest {
     fun abandoningAnAlreadyReleasedOperationCannotUnderflowAccounting() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val operation = workers.tryAcquire(deadlineAfter())!!
-        operation.complete()
+        assertTrue(operation.commitHandoff())
         assertEventually {
             workers.snapshot().activeOperations == 0
         }
@@ -917,6 +1407,36 @@ class DovecotBoundedOperationWorkersTest {
             Thread.sleep(5)
         }
         assertTrue(assertion())
+    }
+
+    private fun assertZeroTargetCapacityRecovered(
+        workers: DovecotBoundedOperationWorkers,
+    ) {
+        assertEventually {
+            workers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
+        assertTrue(
+            workers.tryAcquire(deadlineAfter())!!.commitHandoff(),
+        )
+    }
+
+    private fun awaitUninterruptibly(latch: CountDownLatch) {
+        var interrupted = false
+        while (true) {
+            try {
+                latch.await()
+                break
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun startDaemon(

@@ -5,31 +5,45 @@ import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Base64
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 internal class HeldDovecotOperatorImapSession private constructor(
     private val transport: DovecotOperatorTransport,
     private val operationWorkers: DovecotBoundedOperationWorkers,
     private val beforeFailureClassification: (Throwable) -> Unit,
+    private val afterSessionLockContention: () -> Unit,
 ) : AutoCloseable {
-    private val closed = AtomicBoolean()
+    private val state = AtomicReference(SessionState.Open)
+    private val sessionLock = ReentrantLock()
+    private var pendingOperation: DovecotBoundedOperation? = null
 
     val isClosed: Boolean
-        get() = closed.get()
+        get() = state.get() == SessionState.Closed
 
-    fun requireUsable(timeout: Duration = SESSION_TIMEOUT) {
-        check(!closed.get()) {
-            "Held Dovecot operator session is closed"
+    fun requireUsable(timeout: Duration = SESSION_TIMEOUT) =
+        withSessionLock(
+            timeout = timeout,
+            interruptionMessage =
+                "Held Dovecot operator usability proof was interrupted",
+            timeoutMessage =
+                "Held Dovecot operator usability proof exceeded its deadline",
+            action = ::requireUsableSerialized,
+        )
+
+    private fun requireUsableSerialized(
+        operationDeadline: DovecotTask6ProofDeadline,
+    ) {
+        check(state.get() == SessionState.Open) {
+            "Held Dovecot operator session is not usable"
         }
         var operation: DovecotBoundedOperation? = null
-        var deadline: DovecotTask6ProofDeadline? = null
         try {
-            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
-            deadline = operationDeadline
             val acquired = acquireOperation(
                 operationDeadline.deadlineNanos,
             )
             operation = acquired
+            trackOperation(acquired)
             registerTransport(acquired)
             val io = HeldIo(acquired, transport)
             writeFixed(io, USABILITY_NOOP_COMMAND)
@@ -38,13 +52,13 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 USABILITY_NOOP_TAG,
             )
             completeOperation(acquired, operationDeadline)
+            clearCompletedOperation(acquired)
         } catch (failure: Throwable) {
+            markNeedsCloseIfAllocated(operation)
             if (
-                abandonAndDetectInterruption(
+                abandonPendingAndDetectInterruption(
                     operation = operation,
                     failure = failure,
-                    beforeFailureClassification =
-                        beforeFailureClassification,
                 )
             ) {
                 throwRedactedInterruption(
@@ -52,84 +66,92 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 )
             }
             error("Held Dovecot operator usability proof failed")
-        } finally {
-            deadline?.close()
         }
     }
 
-    fun requireClosedAndUnusable(timeout: Duration = SESSION_TIMEOUT) {
-        check(closed.get()) {
+    fun requireClosedAndUnusable(timeout: Duration = SESSION_TIMEOUT) =
+        withSessionLock(
+            timeout = timeout,
+            interruptionMessage =
+                "Held Dovecot operator post-close proof was interrupted",
+            timeoutMessage =
+                "Held Dovecot operator post-close proof exceeded its deadline",
+            action = ::requireClosedAndUnusableSerialized,
+        )
+
+    private fun requireClosedAndUnusableSerialized(
+        operationDeadline: DovecotTask6ProofDeadline,
+    ) {
+        check(state.get() == SessionState.Closed) {
             "Held Dovecot operator session remains open"
         }
         var operation: DovecotBoundedOperation? = null
-        var deadline: DovecotTask6ProofDeadline? = null
-        try {
-            val operationDeadline = try {
-                DovecotTask6ProofDeadline(timeout) {}
-            } catch (failure: Throwable) {
-                throwPostCloseProofFailure(operation, failure)
-            }
-            deadline = operationDeadline
-            val acquired = try {
-                acquireOperation(
-                    operationDeadline.deadlineNanos,
-                )
-            } catch (failure: Throwable) {
-                throwPostCloseProofFailure(operation, failure)
-            }
-            operation = acquired
-            try {
-                registerTransport(acquired)
-            } catch (failure: Throwable) {
-                throwPostCloseProofFailure(operation, failure)
-            }
-            val io = HeldIo(acquired, transport)
-            val writeFailure = try {
-                writeFixed(io, CLOSED_SESSION_NOOP_COMMAND)
-                null
-            } catch (failure: Throwable) {
-                failure
-            }
-            if (writeFailure != null) {
-                if (
-                    abandonAndDetectInterruption(
-                        operation = acquired,
-                        failure = writeFailure,
-                        beforeFailureClassification =
-                            beforeFailureClassification,
-                    )
-                ) {
-                    throwRedactedInterruption(
-                        "Held Dovecot operator post-close proof " +
-                            "was interrupted",
-                    )
-                }
-                return
-            }
-            try {
-                completeOperation(acquired, operationDeadline)
-                error("Closed Dovecot operator transport remained usable")
-            } catch (failure: Throwable) {
-                throwPostCloseProofFailure(operation, failure)
-            }
-        } finally {
-            deadline?.close()
+        val acquired = try {
+            acquireOperation(
+                operationDeadline.deadlineNanos,
+            )
+        } catch (failure: Throwable) {
+            throwPostCloseProofFailure(operation, failure)
         }
+        operation = acquired
+        trackOperation(acquired)
+        try {
+            registerTransport(acquired)
+        } catch (failure: Throwable) {
+            throwPostCloseProofFailure(operation, failure)
+        }
+        val io = HeldIo(acquired, transport)
+        val writeFailure = try {
+            writeFixed(io, CLOSED_SESSION_NOOP_COMMAND)
+            null
+        } catch (failure: Throwable) {
+            failure
+        }
+        if (writeFailure != null) {
+            if (
+                abandonPendingAndDetectInterruption(
+                    operation = acquired,
+                    failure = writeFailure,
+                )
+            ) {
+                throwRedactedInterruption(
+                    "Held Dovecot operator post-close proof " +
+                        "was interrupted",
+                )
+            }
+            return
+        }
+        throwPostCloseProofFailure(
+            operation,
+            IllegalStateException(
+                "Closed Dovecot operator transport remained usable",
+            ),
+        )
     }
 
     override fun close() = close(SESSION_TIMEOUT)
 
-    fun close(timeout: Duration) {
-        if (closed.get()) return
+    fun close(timeout: Duration) =
+        withSessionLock(
+            timeout = timeout,
+            interruptionMessage =
+                "Held Dovecot operator close was interrupted",
+            timeoutMessage =
+                "Held Dovecot operator close exceeded its deadline",
+            action = ::closeSerialized,
+        )
+
+    private fun closeSerialized(
+        operationDeadline: DovecotTask6ProofDeadline,
+    ) {
+        if (state.get() == SessionState.Closed) return
         var operation: DovecotBoundedOperation? = null
-        var deadline: DovecotTask6ProofDeadline? = null
         val succeeded = try {
-            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
-            deadline = operationDeadline
             val acquired = acquireOperation(
                 operationDeadline.deadlineNanos,
             )
             operation = acquired
+            trackOperation(acquired)
             val closeSucceeded = acquired.execute {
                 registerCancellationTarget(
                     identity = transport,
@@ -146,14 +168,14 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 }
             }
             completeOperation(acquired, operationDeadline)
+            clearCompletedOperation(acquired)
             closeSucceeded
         } catch (failure: Throwable) {
+            markNeedsCloseIfAllocated(operation)
             if (
-                abandonAndDetectInterruption(
+                abandonPendingAndDetectInterruption(
                     operation = operation,
                     failure = failure,
-                    beforeFailureClassification =
-                        beforeFailureClassification,
                 )
             ) {
                 throwRedactedInterruption(
@@ -161,11 +183,49 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 )
             }
             error("Held Dovecot operator close failed")
-        } finally {
-            deadline?.close()
+        }
+        if (!succeeded) {
+            markNeedsClose()
         }
         check(succeeded) {
             "Held Dovecot operator close failed"
+        }
+    }
+
+    private fun <T> withSessionLock(
+        timeout: Duration,
+        interruptionMessage: String,
+        timeoutMessage: String,
+        action: (DovecotTask6ProofDeadline) -> T,
+    ): T {
+        var acquired = false
+        var serializationDeadline: DovecotTask6ProofDeadline? = null
+        try {
+            val deadline = DovecotTask6ProofDeadline(timeout) {}
+            serializationDeadline = deadline
+            deadline.requireRemaining()
+            acquired = sessionLock.tryLock()
+            if (!acquired) {
+                afterSessionLockContention()
+                acquired = sessionLock.tryLock(
+                    deadline.remainingNanos(),
+                    TimeUnit.NANOSECONDS,
+                )
+            }
+            check(acquired) {
+                timeoutMessage
+            }
+            deadline.requireRemaining()
+            rejectLivePendingOperation()
+            return action(deadline)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throwRedactedInterruption(interruptionMessage)
+        } finally {
+            if (acquired) {
+                sessionLock.unlock()
+            }
+            serializationDeadline?.close()
         }
     }
 
@@ -180,11 +240,9 @@ internal class HeldDovecotOperatorImapSession private constructor(
         failure: Throwable,
     ): Nothing {
         if (
-            abandonAndDetectInterruption(
+            abandonPendingAndDetectInterruption(
                 operation = operation,
                 failure = failure,
-                beforeFailureClassification =
-                    beforeFailureClassification,
             )
         ) {
             throwRedactedInterruption(
@@ -206,14 +264,90 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
     }
 
+    private fun rejectLivePendingOperation() {
+        val pending = pendingOperation ?: return
+        if (pending.isReleased()) {
+            pendingOperation = null
+            return
+        }
+        error(
+            "Held Dovecot operator previous operation cleanup is still active",
+        )
+    }
+
+    private fun trackOperation(operation: DovecotBoundedOperation) {
+        check(pendingOperation == null) {
+            "Held Dovecot operator previous operation cleanup is still active"
+        }
+        pendingOperation = operation
+    }
+
+    private fun clearCompletedOperation(
+        operation: DovecotBoundedOperation,
+    ) {
+        check(operation.isReleased()) {
+            "Held Dovecot operator operation handoff remained active"
+        }
+        if (pendingOperation === operation) {
+            pendingOperation = null
+        }
+    }
+
+    private fun abandonPendingAndDetectInterruption(
+        operation: DovecotBoundedOperation?,
+        failure: Throwable,
+    ): Boolean {
+        try {
+            return abandonAndDetectInterruption(
+                operation = operation,
+                failure = failure,
+                beforeFailureClassification =
+                    beforeFailureClassification,
+            )
+        } finally {
+            if (
+                operation != null &&
+                operation.isReleased() &&
+                pendingOperation === operation
+            ) {
+                pendingOperation = null
+            }
+        }
+    }
+
     private fun abortTransport() {
         transport.abort()
-        closed.set(true)
+        markClosed()
     }
 
     private fun closeTransport() {
         transport.close()
-        closed.set(true)
+        markClosed()
+    }
+
+    private fun markNeedsCloseIfAllocated(
+        operation: DovecotBoundedOperation?,
+    ) {
+        if (operation != null) {
+            markNeedsClose()
+        }
+    }
+
+    private fun markNeedsClose() {
+        state.compareAndSet(
+            SessionState.Open,
+            SessionState.NeedsClose,
+        )
+    }
+
+    private fun markClosed() {
+        state.set(SessionState.Closed)
+    }
+
+    private enum class SessionState {
+        Open,
+        NeedsClose,
+        Closed,
     }
 
     companion object {
@@ -226,6 +360,8 @@ internal class HeldDovecotOperatorImapSession private constructor(
             operationWorkers: DovecotBoundedOperationWorkers =
                 DovecotBoundedOperationWorkers.processWide,
             beforeFailureClassification: (Throwable) -> Unit = {},
+            afterSessionConstruction: () -> Unit = {},
+            afterSessionLockContention: () -> Unit = {},
         ): HeldDovecotOperatorImapSession {
             var operation: DovecotBoundedOperation? = null
             var deadline: DovecotTask6ProofDeadline? = null
@@ -251,13 +387,17 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     credential = credential,
                 )
                 appendMessage(io, message)
-                completeOperation(acquired, operationDeadline)
-                return HeldDovecotOperatorImapSession(
+                val session = HeldDovecotOperatorImapSession(
                     transport = opened,
                     operationWorkers = operationWorkers,
                     beforeFailureClassification =
                         beforeFailureClassification,
+                    afterSessionLockContention =
+                        afterSessionLockContention,
                 )
+                afterSessionConstruction()
+                completeOperation(acquired, operationDeadline)
+                return session
             } catch (failure: Throwable) {
                 if (
                     abandonAndDetectInterruption(
@@ -573,8 +713,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
             deadline: DovecotTask6ProofDeadline,
         ) {
             deadline.complete()
-            operation.complete()
-            check(operation.awaitRelease()) {
+            check(operation.commitHandoff()) {
                 "Held Dovecot operator operation exceeded its deadline"
             }
         }

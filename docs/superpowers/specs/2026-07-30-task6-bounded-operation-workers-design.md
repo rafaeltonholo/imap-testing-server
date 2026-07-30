@@ -66,10 +66,13 @@ ledger, so an identity can start only one abort/close pair. Target registration
 is sealed by the I/O worker in its `finally`.
 Cancellation actors are charged under the same lock before they start.
 Release is linearized under that lock and is possible only when registration is
-sealed and the I/O plus all charged cancellation actors have actually exited.
-Successful completion, abandonment, actor-start failure, task-submission
-failure, and operation initialization failure all use this one release
-predicate. A future's cancelled/done state never drives accounting.
+sealed, the I/O plus all charged cancellation actors have actually exited, and
+the operation has committed ownership, been abandoned, or entered the
+exceptional no-handoff path. I/O worker exit alone retains the reservation and
+cancellation ledger for the caller's final handoff decision. Successful
+completion, abandonment, actor-start failure, task-submission failure, and
+operation initialization failure all use this one release predicate. A
+future's cancelled/done state never drives accounting.
 
 The coordinator starts the I/O worker before the operation can allocate a
 resource or accept a task. If initialization or worker start fails, a
@@ -128,6 +131,19 @@ and the disposition wait restores the recorded flag as it returns. The worker
 run loop immediately records and clears that flag before another task can
 start, then restores it after operation accounting and actor exit.
 
+Successful operation completion has a second, explicit ownership handoff.
+`commitHandoff()` requests worker exit and waits only to the original absolute
+deadline. After the worker seals target registration and exits, the reservation
+remains charged. Under the operation lock, the caller samples the final
+monotonic time first, then samples interruption, then applies expiry at
+equality before it may commit. An interruption raised during the time sample
+therefore wins; success commits ownership and releases the reservation, while
+interruption, expiry, or a caller-side construction failure abandons while the
+ledger is still authoritative and starts cancellation.
+Concurrent commit callers are rejected. Empty-ledger abandonment still
+releases immediately after the worker exits, so the two-phase rule cannot leak
+zero-target capacity.
+
 ## Cancellation and interruption
 
 Timeout, caller interruption, or generic failure marks the operation
@@ -152,7 +168,10 @@ a redacted interruption through the hook again.
 The raw HTTP client acquires coordinator capacity before socket allocation and
 registers the socket before connect. Connect, request writes, response reads,
 and socket cancellation use the same bounded operation. Socket ownership
-includes deadline construction and every failure path.
+includes deadline construction and every failure path. It constructs the
+caller-owned response before the final operation commit; if that boundary is
+interrupted, expires, or throws, no response is returned and the retained body
+is wiped after cancellation ownership is established.
 
 ## Held and probe integration
 
@@ -168,10 +187,11 @@ If the caller flag is set there, it remains set and the probe returns the
 secret-free `TransportFailure`; success, authentication failure, and protocol
 failure cannot escape with a flagged caller.
 
-Held open/seed acquires one operation. A successfully returned held session
-stores the coordinator, not the completed operation. Each later usability or
-post-close check acquires a fresh operation, so a poisoned operation cannot be
-reused by another check.
+Held open/seed acquires one operation and constructs the candidate session
+before the final handoff commit. A successfully returned held session stores
+the coordinator, not the completed operation. A failed final boundary returns
+no session and abandons the authenticated transport while the operation ledger
+still owns cancellation.
 
 `HeldDovecotOperatorImapSession.close()` also acquires a fresh coordinator
 operation and dispatches transport close through its private I/O worker. The
@@ -183,6 +203,17 @@ attempts and terminal outcome replay; routing its callback through the
 coordinator does not change leader/follower or same-failure semantics. The
 global cap therefore covers probe, Held open/seed, Held NOOP, Held close, Held
 post-close validation, and raw HTTP.
+
+Every method on one Held session is serialized by one deadline-bounded session
+lock. An abandoned operation remains recorded after its caller returns; later
+methods fail before worker acquisition or transport I/O until the coordinator
+reports that the I/O and all cancellation actors have exited. Held state is
+`Open`, `NeedsClose`, or `Closed`. `isClosed` is true only after a transport
+abort or close actually succeeds. A failed usability operation moves to
+`NeedsClose`, which rejects further usability I/O but permits explicit close
+retry. A synchronously failed, committed close also moves from `Open` to
+`NeedsClose`: `isClosed` remains false, usability fails before transport I/O,
+and explicit close remains retryable.
 
 ## Focused review repairs
 
@@ -219,6 +250,13 @@ disposal, generic-failure timeout, and interruption precedence. A worker-side
 failure test interrupts the publishing worker while the caller is held before
 claim and proves that self-interruption cannot demote the failure.
 
+Operation-handoff tests hold the caller after worker exit and prove that the
+reservation remains charged until commit. Separate barriers inject
+interruption, expiry, caller failure, and interruption during the final clock
+sample. Targeted and zero-target variants prove cancellation, exact failure
+propagation, capacity recovery, final interrupt precedence, and
+concurrent-commit rejection.
+
 Integration tests exercise the same dual-block behavior through production
 probe, Held open/seed, Held NOOP, Held post-close, and raw HTTP. Held tests
 release an injected generic I/O failure before interrupting the caller at the
@@ -229,10 +267,14 @@ failure and a throwing classification hook to prove copied-request wiping,
 both close callbacks, actor exit, and capacity recovery. Held close tests
 additionally prove bounded direct and lease-owned close, late state
 publication, retry semantics, and unchanged joinable terminal replay at the
-registry boundary.
+registry boundary. Candidate-session and HTTP-response barriers prove objects
+are constructed before final commit but never returned after interruption or
+expiry. Per-session contention barriers fire only after a nonblocking lock
+attempt proves real contention; no negative sleep manufactures the
+serialization result. A committed close-failure regression proves the session
+becomes unusable without transport I/O while explicit close remains retryable.
 
-After focused green runs, rerun the reciprocal Task 6 classes, the exact
-non-live Dovecot selection plus static selectors, the wider non-live
-dashboard-server selection plus static selectors, the Python network helper,
-and the dashboard-server build. Docker, live-service, and Stalwart operations
-remain out of scope.
+After focused green runs, repeat the reported five-class order, rerun the
+reciprocal Task 6 classes, the exact non-live Dovecot selection plus static
+selectors, the Python network helper, and the dashboard-server build. Docker,
+live-service, and Stalwart operations remain out of scope.

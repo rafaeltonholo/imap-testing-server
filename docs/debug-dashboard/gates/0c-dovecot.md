@@ -617,6 +617,14 @@ thread. Worker-owned request copies are wiped whether a task runs or is
 declined. Read results use a one-winner handoff; a declined or late result is
 wiped on its worker before the operation can release.
 
+Successful completion is also two-phase. Worker exit seals registration but
+retains the reservation and cancellation ledger. The caller constructs the
+Held session or HTTP response, then the coordinator samples final monotonic
+time, caller interruption, and expiry under the operation lock. It either
+commits ownership and releases, or abandons and cancels while the ledger
+remains authoritative. No candidate session or response is returned after a
+failed final boundary, and response bytes remain wipe-owned until commit.
+
 Probe and Held cancellation dispatch `abort` and `close` independently and
 wait only within the original deadline and a smaller fixed cleanup budget.
 Blocked original I/O plus blocked abort and close can consume a charged
@@ -630,6 +638,14 @@ caller flag set becomes a new redacted `InterruptedException` with the flag
 restored after bounded cleanup; it cannot be mistaken for proof failure or
 closed-transport evidence. The production probe instead restores the caller
 flag and returns its typed `TransportFailure`.
+
+Methods on one Held session are deadline-serialized. If an abandoned operation
+still has live I/O or cancellation actors, a later call fails before acquiring
+another worker or touching the transport. Once cleanup releases, `isClosed`
+reflects only an actual successful abort/close. Failed cleanup or a committed
+transport-close failure leaves the session not closed but in `NeedsClose`:
+usability stays rejected without transport I/O and explicit close remains
+retryable.
 
 The rotation proof holds an actual authenticated old-ID IMAP session rather
 than a callback-only stand-in. It appends the deterministic read fixture,
@@ -746,46 +762,48 @@ characterization. The repairs now:
 - prove registered open, abort, and close actors retain capacity through the
   deterministic `3 -> 2 -> 1 -> 0` release sequence.
 
-Independent state-machine and code-quality reviews approved the final
-coordinator, Probe, Held, HTTP, ownership, and cleanup behavior with no
-remaining production Important finding. A subsequent external spec review
-found one Important test-proof issue: the Held deadline test read transport
-cleanup state after caller completion but before the independent close actor
-had necessarily completed. The reviewer reproduced `77/78` twice in the exact
-five-class order, invalidating the earlier three-run "no flake" claim.
+Later state-machine reviews found that successful worker exit released
+cancellation authority before a candidate Held session or HTTP response was
+irrevocably returned. The two-phase ownership repair now holds the ledger
+through final object construction and the ordered
+time-sample/interruption/expiry decision. Targeted and zero-target losers
+abandon through the same accounting path.
 
-The test-only repair now waits on exact abort/close completion events before
-reading actor-owned cleanup state, gives the affected cases owned
-coordinators, and proves final coordinator accounting returns to zero during
-cleanup. A follow-up read-only review found no remaining Important proof
-finding. Post-repair non-live evidence passed:
+The reviews also restored deterministic per-session serialization and
+physically accurate Held state. An abandoned operation with live actors
+remains pending until coordinator release. Failed cleanup and a committed
+transport-close failure move the session to `NeedsClose`: `isClosed` remains
+false, usability is rejected before transport I/O, and explicit close remains
+retryable. A Probe fake-clock assertion now waits for the coordinator's zero
+snapshot before reading asynchronous close state. The final independent spec
+and quality reviews both reported READY with no Critical, Important, or Minor
+finding.
 
-- the Held deadline class: `28/28`;
-- the combined coordinator, Probe, Held, and HTTP selection: `99/99`; and
-- the exact reported five-class order: `78/78` on each of five consecutive,
-  uninterrupted, identical post-repair runs, including all `33` Held
-  deadline and session tests each time.
+Fresh post-fix non-live evidence passed:
 
-The current 13-class reciprocal run passed `169/169`:
+- the bounded operation coordinator: `32/32`;
+- the Held deadline and session classes: `30/30` and `9/9`;
+- the combined coordinator, Probe, Held, and HTTP selection: `116/116`; and
+- the exact reported five-class order: `95/95` on each of five consecutive,
+  uninterrupted, identical runs with zero failures.
 
-- the bounded operation coordinator: `23/23`;
+The current 13-class reciprocal run passed `186/186`:
+
+- the bounded operation coordinator: `32/32`;
 - credential recovery, rotation projection, durable repository, and
   application leases: `52/52`;
 - exact auth classification and the fixed operator probe: `28/28`;
-- OAuth redirect/JSON validation and bounded HTTP transport: `17/17`;
-- held-session, deadline, and mailbox contracts: `38/38`; and
+- OAuth redirect/JSON validation and bounded HTTP transport: `19/19`;
+- held-session, deadline, and mailbox contracts: `44/44`; and
 - bounded process and topology proofs: `11/11`.
 
 Under the no-Docker verification boundary, the non-live Dovecot class run
-passed `246/246` and the 13 non-daemon static/config selectors passed `13/13`,
-for `259/259` with zero skips. The four effective-configuration selectors
-that invoke `docker run` were not executed. The wider `dashboard-server`
-non-live run passed `511/511`, plus a second `13/13` run of those same
-selectors, for `524/524`; it excluded all `*LiveTest` classes, the production
-browser gate that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed
-Docker-backed config class from the broad scan. The independent Python helper
-passed `21/21`, and `./kotlin build --module dashboard-server` completed
-successfully.
+passed `263/263` and the 13 non-daemon static/config selectors passed `13/13`,
+for `276/276` with zero skips. All `*LiveTest` classes and the mixed
+Docker-backed config class were excluded; its four effective-configuration
+methods that invoke `docker run` were not executed. The independent Python
+helper passed `21/21`, and `./kotlin build --module dashboard-server`
+completed successfully.
 
 Task 6 live evidence is **pending**, not passed. No Docker daemon or live
 service operation was performed while implementing this task. A controller
