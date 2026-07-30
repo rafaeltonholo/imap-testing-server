@@ -9,8 +9,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -19,6 +17,8 @@ import javax.net.ssl.SSLContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotIsolationMailboxContractTest {
@@ -142,70 +142,112 @@ class DovecotIsolationMailboxContractTest {
     }
 
     @Test
-    fun inactiveMasterLoginUsesTheOtherFixedIdentity() {
-        listOf(DovecotOperatorId.A, DovecotOperatorId.B)
-            .forEach { activeId ->
+    fun inactiveMasterRejectionPairsTheOtherFixedIdentityWithTheActiveCredential() {
+        DovecotOperatorId.entries.forEach { activeId ->
+            val credential = DovecotOperatorCredential(
+                id = activeId,
+                secret = DovecotOperatorSecret.takeOwnership(
+                    "active-master-$activeId"
+                        .toByteArray(StandardCharsets.US_ASCII),
+                ),
+            )
+            var observedPort: Int? = null
+            var observedLogin: String? = null
+            var observedCredential: DovecotOperatorCredential? = null
+            try {
+                task6RequireInactiveMasterRejected(
+                    port = 19_993,
+                    targetAddress = "target@local.test",
+                    activeCredential = credential,
+                    requireRejected = { port, combinedLogin, suppliedCredential ->
+                        observedPort = port
+                        observedLogin = combinedLogin
+                        observedCredential = suppliedCredential
+                    },
+                )
+
                 val inactiveId = DovecotOperatorId.entries.single {
                     it != activeId
                 }
-                assertTrue(
-                    task6MasterLogin(
-                        "target@local.test",
-                        inactiveId,
-                    ).endsWith("*${inactiveId.masterUsername}"),
+                assertEquals(19_993, observedPort)
+                assertEquals(
+                    "target@local.test*${inactiveId.masterUsername}",
+                    observedLogin,
                 )
+                assertSame(credential, observedCredential)
+            } finally {
+                credential.close()
             }
-
-        val source = task6LiveSource("DovecotIsolationLiveTest.kt")
-            .replace(Regex("\\s+"), " ")
-        assertTrue(
-            "protocol.requireImapRejected( " +
-                "live.operatorImapsPort, " +
-                "task6InactiveMasterLogin(address, master.id), " +
-                "master, )" in source,
-            "Isolation live proof must submit the active secret " +
-                "against the inactive fixed master suffix",
-        )
+        }
     }
 
     @Test
-    fun task6LiveProofCleanupCoversAddsThatMutateBeforeReturningFailure() {
-        listOf(
-            "DovecotIsolationLiveTest.kt",
-            "DovecotOperatorRotationLiveTest.kt",
-        ).forEach { fileName ->
-            val source = task6LiveSource(fileName)
-            val declaration = source.indexOf("var addAttempted = false")
-            val attempted = source.indexOf(
-                "addAttempted = true",
-                startIndex = declaration.coerceAtLeast(0),
-            )
-            val add = source.indexOf(
-                "addEligibleTarget(",
-                startIndex = attempted.coerceAtLeast(0),
-            )
-            val membership = source.lastIndexOf(
-                "address in EligibilityFile(eligibilityPaths).list()",
-            )
-            val removal = source.indexOf(
-                "removeEligibleTarget(",
-                startIndex = membership.coerceAtLeast(0),
-            )
+    fun disposableEligibilityFixtureCleansUpAnAddThatMutatesBeforeFailure() {
+        val address = "task6-fixture@local.test"
+        val events = mutableListOf<String>()
+        var eligible = false
+        val passwordBytes =
+            "task6-fixture-password".toByteArray(StandardCharsets.US_ASCII)
+        lateinit var fixture: Task6DisposableEligibilityFixture
+        val gateway = object : Task6DisposableEligibilityGateway {
+            override fun contains(candidate: String): Boolean {
+                assertEquals(address, candidate)
+                events += "contains:$eligible"
+                return eligible
+            }
 
-            assertTrue(declaration >= 0, "$fileName lacks add-attempt state")
-            assertTrue(
-                attempted in (declaration + 1)..<add,
-                "$fileName must mark the add attempt before mutation",
-            )
-            assertTrue(
-                membership > add,
-                "$fileName cleanup must inspect landed membership",
-            )
-            assertTrue(
-                removal > membership,
-                "$fileName cleanup must remove a landed target",
-            )
+            override fun add(
+                candidate: String,
+                password: EligibilityPassword,
+            ): Int {
+                assertEquals(address, candidate)
+                assertTrue(fixture.addAttempted)
+                password.withBytes { supplied ->
+                    assertTrue(supplied.contentEquals(passwordBytes))
+                }
+                events += "add"
+                eligible = true
+                return 2
+            }
+
+            override fun remove(candidate: String): Int {
+                assertEquals(address, candidate)
+                events += "remove"
+                eligible = false
+                return 0
+            }
         }
+        fixture = Task6DisposableEligibilityFixture(
+            address = address,
+            passwordFactory = {
+                EligibilityPassword.takeOwnership(passwordBytes)
+            },
+            gateway = gateway,
+            rejectionProof = {
+                events += "rejection"
+                assertFalse(eligible)
+            },
+        )
+
+        assertFailsWith<IllegalStateException> {
+            fixture.run {
+                events += "body"
+            }
+        }
+
+        assertTrue(fixture.addAttempted)
+        assertFalse(eligible)
+        assertEquals(
+            listOf(
+                "contains:false",
+                "add",
+                "contains:true",
+                "remove",
+                "rejection",
+            ),
+            events,
+        )
+        assertTrue(passwordBytes.all { it == 0.toByte() })
     }
 
     @Test
@@ -323,24 +365,6 @@ class DovecotIsolationMailboxContractTest {
             serverFailure.get()?.let { throw it }
             worker.join(2_000)
         }
-    }
-
-    private fun task6LiveSource(fileName: String): String {
-        val working = Path.of(System.getProperty("user.dir"))
-            .toAbsolutePath()
-            .normalize()
-        val dashboardRoot =
-            if (working.fileName?.toString() == "dashboard-server") {
-                requireNotNull(working.parent)
-            } else {
-                working
-            }
-        return Files.readString(
-            dashboardRoot.resolve(
-                "dashboard-server/test/mail/sandbox/dashboard/server/" +
-                    "gate/dovecot/$fileName",
-            ),
-        )
     }
 
     private fun task6TestCredential(

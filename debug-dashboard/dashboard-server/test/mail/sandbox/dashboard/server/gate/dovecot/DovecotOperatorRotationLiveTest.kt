@@ -1,12 +1,8 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
-import java.io.ByteArrayInputStream
-import java.io.OutputStream
-import java.io.PrintStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.security.SecureRandom
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -70,229 +66,140 @@ class DovecotOperatorRotationLiveTest {
             transportFactory = transportFactory,
             requireMailboxRead = true,
         )
-        val oldId = store.loadActive().use { it.id }
-        val leases = DovecotOperatorApplicationLeaseRegistry(oldId)
-        val runtime = DovecotOperatorLeasedRotationRuntime(
-            leases = leases,
-            prober = probe::probe,
-        )
-        var oldLease: DovecotOperatorApplicationLease? = null
-        var heldOldSession: HeldDovecotOperatorImapSession? = null
-        var addAttempted = false
-        var primaryFailure: Throwable? = null
-        try {
-            require(address !in EligibilityFile(eligibilityPaths).list()) {
-                "Disposable rotation target unexpectedly exists"
-            }
-            generateTargetPassword().use { password ->
-                addAttempted = true
-                addEligibleTarget(eligibilityCli, address, password)
-            }
-
-            val oldCredential = store.loadActive()
-            val seedMessage = deterministicRotationMessage(target)
-            val oldSession = try {
-                check(oldCredential.id == oldId) {
-                    "Dovecot operator active ID changed before session hold"
-                }
-                HeldDovecotOperatorImapSession.openAndSeed(
-                    transportFactory = transportFactory,
-                    target = target,
-                    credential = oldCredential,
-                    message = seedMessage,
+        task6DisposableEligibilityFixture(
+            address = address,
+            paths = eligibilityPaths,
+            executor = eligibilityCli,
+            rejectionProof = {
+                awaitDovecotOperatorTargetRejection(
+                    resultSupplier = {
+                        probe.probe(target, store.loadActive())
+                    },
                 )
-            } catch (failure: Throwable) {
-                oldCredential.close()
-                seedMessage.fill(0)
-                throw failure
-            }
-            heldOldSession = oldSession
-            val lease = try {
-                leases.acquire(oldId, oldSession::close)
-            } catch (failure: Throwable) {
-                oldSession.close()
-                throw failure
-            }
-            oldLease = lease
-            oldSession.requireUsable()
-
-            val newId = store.rotateOrRecover(target, runtime)
-
-            assertNotEquals(oldId, newId)
-            assertFalse(lease.isOpen)
-            assertTrue(oldSession.isClosed)
-            oldSession.requireClosedAndUnusable()
-            assertEquals(0, leases.openLeaseCount(oldId))
-            assertEquals(newId, store.loadActive().use { it.id })
-            assertEquals(
-                DovecotOperatorProbeResult.Success,
-                probe.probe(target, store.loadActive()),
+            },
+        ).run {
+            val oldId = store.loadActive().use { it.id }
+            val leases = DovecotOperatorApplicationLeaseRegistry(oldId)
+            val runtime = DovecotOperatorLeasedRotationRuntime(
+                leases = leases,
+                prober = probe::probe,
             )
-            assertFalse(
-                Files.exists(
-                    operatorPaths.slot(oldId),
-                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
-                ),
-            )
-            assertFalse(
-                Files.exists(
-                    operatorPaths.rotationIntent,
-                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
-                ),
-            )
-            assertTrue(
-                Files.exists(
-                    operatorPaths.slot(newId),
-                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
-                ),
-            )
-            val masterLines = Files.readAllLines(
-                operatorPaths.masterUsers,
-                StandardCharsets.US_ASCII,
-            )
-            assertEquals(1, masterLines.size)
-            assertTrue(
-                masterLines.single().startsWith(
-                    "${newId.masterUsername}:",
-                ),
-            )
-        } catch (failure: Throwable) {
-            primaryFailure = failure
-            throw failure
-        } finally {
-            var cleanupFailure: Throwable? = null
-            fun attemptCleanup(block: () -> Unit) {
-                try {
-                    block()
-                } catch (failure: Throwable) {
-                    val existing = cleanupFailure
-                    if (existing == null) {
-                        cleanupFailure = failure
-                    } else if (existing !== failure) {
-                        existing.addSuppressed(failure)
+            var oldLease: DovecotOperatorApplicationLease? = null
+            var heldOldSession: HeldDovecotOperatorImapSession? = null
+            var primaryFailure: Throwable? = null
+            try {
+                val oldCredential = store.loadActive()
+                val seedMessage = deterministicRotationMessage(target)
+                val oldSession = try {
+                    check(oldCredential.id == oldId) {
+                        "Dovecot operator active ID changed before session hold"
                     }
+                    HeldDovecotOperatorImapSession.openAndSeed(
+                        transportFactory = transportFactory,
+                        target = target,
+                        credential = oldCredential,
+                        message = seedMessage,
+                    )
+                } catch (failure: Throwable) {
+                    oldCredential.close()
+                    seedMessage.fill(0)
+                    throw failure
                 }
-            }
-            attemptCleanup {
-                if (
+                heldOldSession = oldSession
+                val lease = try {
+                    leases.acquire(oldId, oldSession::close)
+                } catch (failure: Throwable) {
+                    oldSession.close()
+                    throw failure
+                }
+                oldLease = lease
+                oldSession.requireUsable()
+
+                val newId = store.rotateOrRecover(target, runtime)
+
+                assertNotEquals(oldId, newId)
+                assertFalse(lease.isOpen)
+                assertTrue(oldSession.isClosed)
+                oldSession.requireClosedAndUnusable()
+                assertEquals(0, leases.openLeaseCount(oldId))
+                assertEquals(newId, store.loadActive().use { it.id })
+                assertEquals(
+                    DovecotOperatorProbeResult.Success,
+                    probe.probe(target, store.loadActive()),
+                )
+                assertFalse(
+                    Files.exists(
+                        operatorPaths.slot(oldId),
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertFalse(
                     Files.exists(
                         operatorPaths.rotationIntent,
                         java.nio.file.LinkOption.NOFOLLOW_LINKS,
-                    )
-                ) {
-                    store.recoverRotation(target, runtime)
+                    ),
+                )
+                assertTrue(
+                    Files.exists(
+                        operatorPaths.slot(newId),
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                val masterLines = Files.readAllLines(
+                    operatorPaths.masterUsers,
+                    StandardCharsets.US_ASCII,
+                )
+                assertEquals(1, masterLines.size)
+                assertTrue(
+                    masterLines.single().startsWith(
+                        "${newId.masterUsername}:",
+                    ),
+                )
+            } catch (failure: Throwable) {
+                primaryFailure = failure
+                throw failure
+            } finally {
+                var cleanupFailure: Throwable? = null
+                fun attemptCleanup(block: () -> Unit) {
+                    try {
+                        block()
+                    } catch (failure: Throwable) {
+                        val existing = cleanupFailure
+                        if (existing == null) {
+                            cleanupFailure = failure
+                        } else if (existing !== failure) {
+                            existing.addSuppressed(failure)
+                        }
+                    }
                 }
-            }
-            attemptCleanup {
-                runtime.close()
-            }
-            attemptCleanup {
-                oldLease?.close()
-            }
-            attemptCleanup {
-                heldOldSession?.close()
-            }
-            attemptCleanup {
-                if (
-                    addAttempted &&
-                    address in EligibilityFile(eligibilityPaths).list()
-                ) {
-                    removeEligibleTarget(eligibilityCli, address)
-                }
-            }
-            if (addAttempted) {
                 attemptCleanup {
-                    awaitDovecotOperatorTargetRejection(
-                        resultSupplier = {
-                            probe.probe(target, store.loadActive())
-                        },
-                    )
+                    if (
+                        Files.exists(
+                            operatorPaths.rotationIntent,
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                        )
+                    ) {
+                        store.recoverRotation(target, runtime)
+                    }
+                }
+                attemptCleanup {
+                    runtime.close()
+                }
+                attemptCleanup {
+                    oldLease?.close()
+                }
+                attemptCleanup {
+                    heldOldSession?.close()
+                }
+                cleanupFailure?.let { failure ->
+                    val primary = primaryFailure
+                    if (primary != null) {
+                        primary.addSuppressed(failure)
+                    } else {
+                        throw failure
+                    }
                 }
             }
-            cleanupFailure?.let { failure ->
-                val primary = primaryFailure
-                if (primary != null) {
-                    primary.addSuppressed(failure)
-                } else {
-                    throw failure
-                }
-            }
-        }
-    }
-
-    private fun generateTargetPassword(): EligibilityPassword {
-        val bytes = ByteArray(TARGET_PASSWORD_BYTES)
-        try {
-            bytes.indices.forEach { index ->
-                bytes[index] = TARGET_PASSWORD_ALPHABET[
-                    SECURE_RANDOM.nextInt(TARGET_PASSWORD_ALPHABET.length)
-                ].code.toByte()
-            }
-            return EligibilityPassword.takeOwnership(bytes)
-        } catch (failure: Throwable) {
-            bytes.fill(0)
-            throw failure
-        }
-    }
-
-    private fun addEligibleTarget(
-        cli: EligibilityFileCli,
-        address: String,
-        password: EligibilityPassword,
-    ) {
-        var input = ByteArray(0)
-        try {
-            password.withBytes { bytes ->
-                input = ByteArray(bytes.size + 1)
-                bytes.copyInto(input)
-                input[input.lastIndex] = '\n'.code.toByte()
-            }
-            assertEquals(
-                0,
-                executeEligibility(
-                    cli,
-                    arrayOf("add", address),
-                    input,
-                ),
-                "Disposable rotation target add failed",
-            )
-        } finally {
-            input.fill(0)
-        }
-    }
-
-    private fun removeEligibleTarget(
-        cli: EligibilityFileCli,
-        address: String,
-    ) {
-        assertEquals(
-            0,
-            executeEligibility(
-                cli,
-                arrayOf("remove", address),
-                ByteArray(0),
-            ),
-            "Disposable rotation target cleanup failed",
-        )
-    }
-
-    private fun executeEligibility(
-        cli: EligibilityFileCli,
-        args: Array<String>,
-        stdin: ByteArray,
-    ): Int {
-        val sink = PrintStream(
-            OutputStream.nullOutputStream(),
-            true,
-            StandardCharsets.UTF_8,
-        )
-        return sink.use { output ->
-            cli.execute(
-                args = args,
-                stdin = ByteArrayInputStream(stdin),
-                stdout = output,
-                stderr = output,
-            )
         }
     }
 
@@ -309,13 +216,6 @@ class DovecotOperatorRotationLiveTest {
         return requireNotNull(dashboardRoot.parent).also { root ->
             require(Files.isRegularFile(root.resolve("docker-compose.yml")))
         }
-    }
-
-    companion object {
-        private const val TARGET_PASSWORD_BYTES = 48
-        private const val TARGET_PASSWORD_ALPHABET =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-        private val SECURE_RANDOM = SecureRandom()
     }
 }
 

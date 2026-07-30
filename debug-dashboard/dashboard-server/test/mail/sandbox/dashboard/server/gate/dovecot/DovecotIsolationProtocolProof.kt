@@ -485,6 +485,23 @@ internal fun task6InactiveMasterLogin(
     },
 )
 
+internal fun task6RequireInactiveMasterRejected(
+    port: Int,
+    targetAddress: String,
+    activeCredential: DovecotOperatorCredential,
+    requireRejected: (
+        Int,
+        String,
+        DovecotOperatorCredential,
+    ) -> Unit,
+) {
+    requireRejected(
+        port,
+        task6InactiveMasterLogin(targetAddress, activeCredential.id),
+        activeCredential,
+    )
+}
+
 internal fun task6IsHostNonLoopbackIpv4(address: Inet4Address): Boolean =
     !address.isAnyLocalAddress && !address.isLoopbackAddress
 
