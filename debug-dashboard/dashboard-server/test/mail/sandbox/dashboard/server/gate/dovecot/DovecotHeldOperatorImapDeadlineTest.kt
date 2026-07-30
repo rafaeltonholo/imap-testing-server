@@ -21,6 +21,7 @@ import kotlin.test.assertTrue
 class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun delayedCancellationSuccessEventuallyMarksSessionClosed() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(
             transcript = SEED_TRANSCRIPT,
             cancellationDelayMillis = 150,
@@ -31,6 +32,7 @@ class DovecotHeldOperatorImapDeadlineTest {
             credential = credential("delayed-cancellation-secret"),
             message = validMessage(),
             timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
         )
         transport.block = DeadlineTestTransport.Block.Write
         transport.armCloseRelease()
@@ -40,11 +42,12 @@ class DovecotHeldOperatorImapDeadlineTest {
                 session.requireUsable(SHORT_TIMEOUT)
             }
             awaitTrue { session.isClosed }
-            assertTrue(transport.closed)
+            awaitTrue { transport.closed }
         } finally {
             if (!session.isClosed) {
                 session.close()
             }
+            awaitWorkersReleased(workers)
         }
     }
 
