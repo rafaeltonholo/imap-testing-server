@@ -201,16 +201,18 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
-    fun fullMailboxReadIgnoresZeroExistsAndRecentButRejectsZeroFetchSequence() {
+    fun fullMailboxReadAcceptsZeroCountsAfterExistsRecoversBeforeFetch() {
         val validLiteral =
             "Message-ID: <zero-counts@local.test>\r\n\r\n"
         val fixture = probeFixture(
             response = (
-                successfulReadPrefix() +
-                    "* SEARCH 7\r\n" +
-                    "A004 OK Search completed\r\n" +
+                successfulReadPrefixBeforeExamineState() +
                     "* 0 EXISTS\r\n" +
                     "* 0 RECENT\r\n" +
+                    "* 1 EXISTS\r\n" +
+                    "A003 OK [READ-ONLY] Examine completed\r\n" +
+                    "* SEARCH 7\r\n" +
+                    "A004 OK Search completed\r\n" +
                     "* 1 FETCH (UID 7 " +
                     "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
                     "{${validLiteral.length}}\r\n" +
@@ -227,6 +229,92 @@ class DovecotOperatorProbeTest {
             fixture.probe.probe(TARGET, fixture.credential),
         )
         assertClosedAndWiped(fixture, "zero-counts-secret")
+    }
+
+    @Test
+    fun fullMailboxReadRejectsFetchAfterExistsFallsToZero() {
+        val validLiteral =
+            "Message-ID: <empty-mailbox@local.test>\r\n\r\n"
+        val fixture = probeFixture(
+            response = (
+                successfulReadPrefix() +
+                    "* SEARCH 7\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 0 EXISTS\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${validLiteral.length}}\r\n" +
+                    validLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "empty-mailbox-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.ProtocolFailure,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertClosedAndWiped(fixture, "empty-mailbox-secret")
+    }
+
+    @Test
+    fun fullMailboxReadRejectsFetchAfterLastMessageIsExpunged() {
+        val validLiteral =
+            "Message-ID: <expunged-mailbox@local.test>\r\n\r\n"
+        val fixture = probeFixture(
+            response = (
+                successfulReadPrefix() +
+                    "* SEARCH 7\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 1 EXPUNGE\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${validLiteral.length}}\r\n" +
+                    validLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "expunged-mailbox-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.ProtocolFailure,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertClosedAndWiped(fixture, "expunged-mailbox-secret")
+    }
+
+    @Test
+    fun fullMailboxReadRejectsExistsDecreaseWithoutExpunge() {
+        val validLiteral =
+            "Message-ID: <decreased-exists@local.test>\r\n\r\n"
+        val fixture = probeFixture(
+            response = (
+                successfulReadPrefixBeforeExamineState() +
+                    "* 2 EXISTS\r\n" +
+                    "A003 OK [READ-ONLY] Examine completed\r\n" +
+                    "* SEARCH 7 9\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 1 EXISTS\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${validLiteral.length}}\r\n" +
+                    validLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "decreased-exists-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.ProtocolFailure,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertClosedAndWiped(fixture, "decreased-exists-secret")
     }
 
     @Test
@@ -604,6 +692,124 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
+    fun blockedAbortCannotPreventIndependentCloseAndProbeCompletion() {
+        val writeStarted = CountDownLatch(1)
+        val abortStarted = CountDownLatch(1)
+        val releaseWrite = CountDownLatch(1)
+        val releaseAbort = CountDownLatch(1)
+        val transport = object : DovecotOperatorTransport {
+            @Volatile
+            var closed = false
+
+            override val input: InputStream =
+                ByteArrayInputStream("* OK ready\r\n".toByteArray())
+            override val outputStream: OutputStream = object : OutputStream() {
+                override fun write(value: Int) {
+                    error("probe must use bounded command arrays")
+                }
+
+                override fun write(
+                    bytes: ByteArray,
+                    offset: Int,
+                    length: Int,
+                ) {
+                    writeStarted.countDown()
+                    releaseWrite.await()
+                    throw IOException("closed")
+                }
+            }
+
+            override fun abort() {
+                abortStarted.countDown()
+                releaseAbort.await()
+            }
+
+            override fun close() {
+                closed = true
+                releaseWrite.countDown()
+            }
+        }
+        val credentialBytes = "blocking-abort-secret".toByteArray()
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(credentialBytes),
+        )
+        val probe = DovecotOperatorProbe(
+            transportFactory = DovecotOperatorTransportFactory { register ->
+                register(transport)
+                transport
+            },
+            watchdog = DovecotOperatorProbeWatchdog { onDeadline ->
+                val thread = Thread(
+                    {
+                        check(writeStarted.await(2, TimeUnit.SECONDS))
+                        onDeadline()
+                    },
+                    "test-blocking-abort-watchdog",
+                ).also {
+                    it.isDaemon = true
+                    it.start()
+                }
+                AutoCloseable {}
+            },
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val caller = Thread(
+            {
+                result.set(probe.probe(TARGET, credential))
+            },
+            "test-blocking-abort-probe",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(abortStarted.await(2, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(caller.isAlive)
+            assertTrue(transport.closed)
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                result.get(),
+            )
+            assertTrue(credentialBytes.all { it == 0.toByte() })
+        } finally {
+            releaseAbort.countDown()
+            releaseWrite.countDown()
+            caller.join(2_000)
+        }
+    }
+
+    @Test
+    fun productionWatchdogKeepsLaterDeadlinesIndependentOfBlockedCallbacks() {
+        val watchdog = productionProbeWatchdog()
+        val blockedStarted = CountDownLatch(1)
+        val releaseBlocked = CountDownLatch(1)
+        val laterFired = CountDownLatch(1)
+        val first = watchdog.arm {
+            blockedStarted.countDown()
+            releaseBlocked.await()
+        }
+        var second: AutoCloseable? = null
+
+        try {
+            assertTrue(blockedStarted.await(6, TimeUnit.SECONDS))
+            second = watchdog.arm(laterFired::countDown)
+
+            assertTrue(
+                laterFired.await(6, TimeUnit.SECONDS),
+                "A blocked production watchdog callback delayed a later probe",
+            )
+        } finally {
+            releaseBlocked.countDown()
+            first.close()
+            second?.close()
+        }
+    }
+
+    @Test
     fun watchdogCancelsBlockedOpenAndLateTransportSelfAborts() {
         val openStarted = CountDownLatch(1)
         val transport = RecordingTransport(
@@ -731,6 +937,17 @@ class DovecotOperatorProbeTest {
             credential = credential,
             secretBytes = secretBytes,
         )
+    }
+
+    private fun productionProbeWatchdog(): DovecotOperatorProbeWatchdog {
+        val type = Class.forName(
+            "mail.sandbox.dashboard.server.gate.dovecot." +
+                "JvmDovecotOperatorProbeWatchdog",
+        )
+        val instance = type.getDeclaredField("INSTANCE").also {
+            it.isAccessible = true
+        }.get(null)
+        return instance as DovecotOperatorProbeWatchdog
     }
 
     private fun assertClosedAndWiped(
@@ -867,13 +1084,16 @@ class DovecotOperatorProbeTest {
         private val DEADLINE_CLOCK = AtomicLong()
 
         private fun successfulReadPrefix(): String =
+            successfulReadPrefixBeforeExamineState() +
+                "* 1 EXISTS\r\n" +
+                "A003 OK [READ-ONLY] Examine completed\r\n"
+
+        private fun successfulReadPrefixBeforeExamineState(): String =
             "* OK Dovecot ready\r\n" +
                 "+ VXNlcm5hbWU6\r\n" +
                 "+ UGFzc3dvcmQ6\r\n" +
                 "A001 OK Logged in\r\n" +
                 "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
-                "A002 OK List completed\r\n" +
-                "* 1 EXISTS\r\n" +
-                "A003 OK [READ-ONLY] Examine completed\r\n"
+                "A002 OK List completed\r\n"
     }
 }

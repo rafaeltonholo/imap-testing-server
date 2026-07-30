@@ -16,13 +16,14 @@ import java.security.SecureRandom
 import java.security.cert.CertificateFactory
 import java.time.Duration
 import java.util.Base64
-import java.util.concurrent.Executors
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Future
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -84,6 +85,8 @@ internal class DovecotOperatorProbe(
         val transport = AtomicReference<DovecotOperatorTransport?>()
         val openFuture =
             AtomicReference<Future<DovecotOperatorTransport>?>()
+        val transportCancellation =
+            DovecotOperatorTransportCancellation()
         val timedOut = AtomicBoolean()
         val abandoned = AtomicBoolean()
         var watchdogHandle: AutoCloseable? = null
@@ -93,29 +96,30 @@ internal class DovecotOperatorProbe(
                 timedOut.set(true)
                 abandoned.set(true)
                 openFuture.get()?.cancel(true)
-                transport.get()?.let(::abortTransport)
+                transportCancellation.request()
             }
             requireBeforeDeadline(deadline)
             val pendingOpen = OPEN_EXECUTOR.submit<DovecotOperatorTransport> {
                 val candidate = transportFactory.open { allocated ->
                     if (!transport.compareAndSet(null, allocated)) {
-                        abortAndClose(allocated)
+                        cancelTransportIndependently(allocated)
                         throw IOException(
                             "Dovecot operator transport allocation is invalid",
                         )
                     }
+                    transportCancellation.register(allocated)
                     if (abandoned.get()) {
-                        abortTransport(allocated)
+                        transportCancellation.request()
                     }
                 }
                 if (transport.get() !== candidate) {
-                    abortAndClose(candidate)
+                    cancelTransportIndependently(candidate)
                     throw IOException(
                         "Dovecot operator transport allocation is invalid",
                     )
                 }
                 if (abandoned.get()) {
-                    abortAndClose(candidate)
+                    transportCancellation.request()
                     throw SocketTimeoutException(
                         "Dovecot operator probe timed out",
                     )
@@ -145,7 +149,7 @@ internal class DovecotOperatorProbe(
                 throw failure
             }
             if (timedOut.get()) {
-                abortTransport(opened)
+                transportCancellation.request()
                 throw SocketTimeoutException(
                     "Dovecot operator probe timed out",
                 )
@@ -189,6 +193,7 @@ internal class DovecotOperatorProbe(
             ) {
                 TaggedCompletion.Ok -> {
                     if (requireMailboxRead) {
+                        val mailboxReadState = MailboxReadState()
                         writeFixedCommand(
                             output = opened.outputStream,
                             command = EXAMINE_INBOX_COMMAND,
@@ -199,6 +204,7 @@ internal class DovecotOperatorProbe(
                                 input = opened.input,
                                 tag = EXAMINE_TAG,
                                 deadline = deadline,
+                                mailboxReadState = mailboxReadState,
                             )
                         ) {
                             TaggedCompletion.Ok -> Unit
@@ -210,12 +216,14 @@ internal class DovecotOperatorProbe(
                             input = opened.input,
                             output = opened.outputStream,
                             deadline = deadline,
+                            mailboxReadState = mailboxReadState,
                         )
                         fetchAndValidateMessageId(
                             input = opened.input,
                             output = opened.outputStream,
                             uid = selectedUid,
                             deadline = deadline,
+                            mailboxReadState = mailboxReadState,
                         )
                     }
                     requireBeforeDeadline(deadline)
@@ -238,7 +246,7 @@ internal class DovecotOperatorProbe(
             credential.close()
             abandoned.set(true)
             openFuture.get()?.cancel(true)
-            transport.get()?.let(::abortAndClose)
+            transportCancellation.requestAndAwait()
             runCatching { watchdogHandle?.close() }
         }
     }
@@ -259,10 +267,12 @@ internal class DovecotOperatorProbe(
         tag: ByteArray,
         deadline: Long,
         requiredUntaggedPrefix: ByteArray? = null,
+        mailboxReadState: MailboxReadState? = null,
     ): TaggedCompletion {
         var sawRequiredUntagged = requiredUntaggedPrefix == null
         repeat(MAX_RESPONSE_LINES) {
             readLine(input, deadline).useBytes { line ->
+                mailboxReadState?.observe(line)
                 if (
                     requiredUntaggedPrefix != null &&
                     line.startsWithToken(requiredUntaggedPrefix)
@@ -311,6 +321,7 @@ internal class DovecotOperatorProbe(
         input: InputStream,
         output: OutputStream,
         deadline: Long,
+        mailboxReadState: MailboxReadState,
     ): Long {
         writeFixedCommand(
             output = output,
@@ -320,6 +331,7 @@ internal class DovecotOperatorProbe(
         var selectedUid: Long? = null
         repeat(MAX_RESPONSE_LINES) {
             readLine(input, deadline).useBytes { line ->
+                mailboxReadState.observe(line)
                 if (line.startsWithToken(SEARCH_RESPONSE_PREFIX)) {
                     if (selectedUid != null) {
                         throw DovecotOperatorProtocolException()
@@ -376,6 +388,7 @@ internal class DovecotOperatorProbe(
         output: OutputStream,
         uid: Long,
         deadline: Long,
+        mailboxReadState: MailboxReadState,
     ) {
         writeUidFetch(
             output = output,
@@ -385,11 +398,13 @@ internal class DovecotOperatorProbe(
         var sawFetch = false
         repeat(MAX_RESPONSE_LINES) {
             readLine(input, deadline).useBytes { line ->
+                mailboxReadState.observe(line)
                 val literalSize = parseFetchMarkerOrNull(
                     line = line,
                     expectedUid = uid,
                 )
                 if (literalSize != null) {
+                    mailboxReadState.requireMessageAvailable()
                     if (sawFetch) {
                         throw DovecotOperatorProtocolException()
                     }
@@ -807,27 +822,81 @@ internal class DovecotOperatorProbe(
         }
     }
 
-    private fun abortAndClose(transport: DovecotOperatorTransport) {
-        abortTransport(transport)
-        try {
-            transport.close()
-        } catch (_: Exception) {
-            // Close failures cannot safely replace the redacted probe result.
-        }
-    }
-
-    private fun abortTransport(transport: DovecotOperatorTransport) {
-        try {
-            transport.abort()
-        } catch (_: Exception) {
-            // The fixed JSSE abort is socket.close(); preserve redacted results.
-        }
-    }
-
     private enum class TaggedCompletion {
         Ok,
         No,
         Bad,
+    }
+
+    private class MailboxReadState {
+        private var existsCount: Long? = null
+
+        fun observe(line: ByteArray) {
+            parseExistsCountOrNull(line)?.let { count ->
+                val current = existsCount
+                if (current != null && count < current) {
+                    throw DovecotOperatorProtocolException()
+                }
+                existsCount = count
+                return
+            }
+            parseExpungeSequenceOrNull(line)?.let { sequence ->
+                val current = existsCount
+                    ?: throw DovecotOperatorProtocolException()
+                if (sequence == 0L || sequence > current) {
+                    throw DovecotOperatorProtocolException()
+                }
+                existsCount = current - 1L
+            }
+        }
+
+        fun requireMessageAvailable() {
+            if (existsCount == 0L) {
+                throw DovecotOperatorProtocolException()
+            }
+        }
+
+        private fun parseExistsCountOrNull(line: ByteArray): Long? {
+            return parseUntaggedCountWithSuffixOrNull(
+                line = line,
+                suffix = EXISTS_SUFFIX,
+            )
+        }
+
+        private fun parseExpungeSequenceOrNull(line: ByteArray): Long? {
+            return parseUntaggedCountWithSuffixOrNull(
+                line = line,
+                suffix = EXPUNGE_SUFFIX,
+            )
+        }
+
+        private fun parseUntaggedCountWithSuffixOrNull(
+            line: ByteArray,
+            suffix: ByteArray,
+        ): Long? {
+            if (
+                line.size < 4 ||
+                line[0] != ASTERISK ||
+                line[1] != SPACE
+            ) {
+                return null
+            }
+            val count = parseDecimalOrNull(
+                bytes = line,
+                offset = 2,
+                maximum = MAX_IMAP_NUMBER,
+            ) ?: return null
+            if (
+                count.nextOffset + suffix.size != line.size ||
+                !line.matchesAsciiIgnoreCase(
+                    count.nextOffset,
+                    suffix,
+                )
+            ) {
+                return null
+            }
+            return count.value
+        }
     }
 
     companion object {
@@ -872,6 +941,8 @@ internal class DovecotOperatorProbe(
         private val FETCH_TAG = ascii("A005")
         private val LIST_RESPONSE_PREFIX = ascii("* LIST")
         private val SEARCH_RESPONSE_PREFIX = ascii("* SEARCH")
+        private val EXISTS_SUFFIX = ascii(" EXISTS")
+        private val EXPUNGE_SUFFIX = ascii(" EXPUNGE")
         private val FETCH_TOKEN = ascii("FETCH")
         private val FETCH_UID_PREFIX = ascii("(UID ")
         private val FETCH_LITERAL_PREFIX =
@@ -906,26 +977,118 @@ internal class DovecotOperatorProbe(
     }
 }
 
+private fun cancelTransportIndependently(
+    transport: DovecotOperatorTransport,
+) {
+    DovecotOperatorTransportCancellation().apply {
+        register(transport)
+        requestAndAwait()
+    }
+}
+
+private class DovecotOperatorTransportCancellation {
+    private val transport =
+        AtomicReference<DovecotOperatorTransport?>()
+    private val requested = AtomicBoolean()
+    private val started = AtomicBoolean()
+    private val successfulCancellation = CountDownLatch(1)
+
+    fun register(value: DovecotOperatorTransport) {
+        check(transport.compareAndSet(null, value)) {
+            "Dovecot operator cancellation transport is already registered"
+        }
+        startIfReady()
+    }
+
+    fun request() {
+        requested.set(true)
+        startIfReady()
+    }
+
+    fun requestAndAwait() {
+        request()
+        try {
+            successfulCancellation.await(
+                CANCELLATION_WAIT_MILLIS,
+                TimeUnit.MILLISECONDS,
+            )
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun startIfReady() {
+        val registered = transport.get() ?: return
+        if (!requested.get() || !started.compareAndSet(false, true)) {
+            return
+        }
+        startCancellationThread("abort") {
+            registered.abort()
+        }
+        startCancellationThread("close") {
+            registered.close()
+        }
+    }
+
+    private fun startCancellationThread(
+        actionName: String,
+        action: () -> Unit,
+    ) {
+        Thread(
+            {
+                try {
+                    action()
+                    successfulCancellation.countDown()
+                } catch (_: Exception) {
+                    // Cancellation failures cannot replace the redacted result.
+                }
+            },
+            "dovecot-operator-probe-$actionName-" +
+                CANCELLATION_THREAD_SEQUENCE.incrementAndGet(),
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
+
+    companion object {
+        private const val CANCELLATION_WAIT_MILLIS = 100L
+        private val CANCELLATION_THREAD_SEQUENCE = AtomicInteger()
+    }
+}
+
 private object JvmDovecotOperatorProbeWatchdog :
     DovecotOperatorProbeWatchdog {
     override fun arm(onDeadline: () -> Unit): AutoCloseable {
-        val future = SCHEDULER.schedule(
-            onDeadline,
-            WATCHDOG_DELAY_SECONDS,
-            TimeUnit.SECONDS,
-        )
+        val cancelled = CountDownLatch(1)
+        Thread(
+            {
+                try {
+                    if (
+                        !cancelled.await(
+                            WATCHDOG_DELAY_SECONDS,
+                            TimeUnit.SECONDS,
+                        )
+                    ) {
+                        onDeadline()
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            },
+            "dovecot-operator-probe-watchdog-" +
+                WATCHDOG_THREAD_SEQUENCE.incrementAndGet(),
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
         return AutoCloseable {
-            future.cancel(false)
+            cancelled.countDown()
         }
     }
 
     private const val WATCHDOG_DELAY_SECONDS = 5L
-    private val SCHEDULER = Executors.newSingleThreadScheduledExecutor {
-        runnable ->
-        Thread(runnable, "dovecot-operator-probe-watchdog").also {
-            it.isDaemon = true
-        }
-    }
+    private val WATCHDOG_THREAD_SEQUENCE = AtomicInteger()
 }
 
 internal class JvmJsseDovecotOperatorTransportFactory private constructor(
