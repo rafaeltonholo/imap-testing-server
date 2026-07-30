@@ -940,11 +940,19 @@ class DovecotOperatorProcessTransportTest {
                 )
                 assertEquals(
                     false,
+                    outcome.privateFieldValue("naturalExit"),
+                )
+                assertEquals(
+                    false,
                     outcome.privateFieldValue("streamsClosed"),
                 )
                 assertEquals(
                     true,
                     outcome.privateFieldValue("terminationRequired"),
+                )
+                assertEquals(
+                    null,
+                    outcome.privateFieldValue("exitCode"),
                 )
 
                 val completedLifecycle = events.toList()

@@ -254,11 +254,11 @@ handshake remains in flight. Once it observes the acknowledged result, it
 performs no 500-ms natural-exit wait and no repeated destroy, force, or process
 wait. If the result is reaped, it closes each stream once. If the result is
 unreaped, it atomically clears both retained stream references and caches
-`reaped=false`, `streamsClosed=false`, and `terminationRequired=true` without
-calling either potentially contended stream close. The completed-unreaped
-handshake therefore returns fixed failures to both close and abort callers
-rather than authorizing a second termination sequence or blocking behind a
-protocol writer.
+`reaped=false`, `naturalExit=false`, `terminationRequired=true`,
+`streamsClosed=false`, and `exitCode=null` without calling either potentially
+contended stream close. The completed-unreaped handshake therefore returns
+fixed failures to both close and abort callers rather than authorizing a second
+termination sequence or blocking behind a protocol writer.
 
 Regular normal-close and registration-cleanup lifecycle destroy is selected
 under the same signal monitor, then executed by the selecting thread while it

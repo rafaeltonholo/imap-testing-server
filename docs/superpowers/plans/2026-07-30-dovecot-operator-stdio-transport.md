@@ -225,11 +225,11 @@ git commit -m "test: define fixed Dovecot operator process launch"
   handshake before terminal outcome caching. If the child was reaped, the
   lifecycle path then closes both streams without a 500-ms natural-exit wait or
   any repeated destroy/force/wait work. If it was not reaped, clear both stream
-  references and cache `reaped=false`, `streamsClosed=false`, and
-  `terminationRequired=true` without attempting either potentially contended
-  close. Successful termination still requires both stream closes and a reaped
-  child; abort and registration cleanup may accept a nonzero exit. Preserve
-  RED.
+  references and cache `reaped=false`, `naturalExit=false`,
+  `terminationRequired=true`, `streamsClosed=false`, and `exitCode=null`
+  without attempting either potentially contended close. Successful
+  termination still requires both stream closes and a reaped child; abort and
+  registration cleanup may accept a nonzero exit. Preserve RED.
 
 - [ ] Implement the bounded destroy/force/reap branch and re-run those cases
   GREEN.
