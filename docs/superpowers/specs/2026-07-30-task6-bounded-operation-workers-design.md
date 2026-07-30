@@ -98,16 +98,35 @@ immediately after timeout without the worker continuing to read it. No caller
 array crosses the worker boundary.
 
 Each read collector allocates its bounded buffer on the worker. Result
-completion and caller timeout race through an atomic one-winner handoff. The
-caller receives a result only if it claims completion before the absolute
-deadline. The caller may only claim or decline; it never disposes a
-worker-owned result. After producing a result, the I/O worker waits for that
-claim/decline decision against the same absolute deadline. If declined, or if
-the worker completes after timeout, the I/O worker invokes the late-result
-callback exactly once before it can process another task or seal target
-registration. It wipes a buffer or registers/cancels a transport on the
-worker, preserving the single registration authority. This also covers
-timeout before dequeue and completion immediately adjacent to the deadline.
+completion and caller timeout race through an atomic one-winner handoff. After
+the completion latch opens, the caller performs an advisory absolute-deadline
+check before attempting the `Result`/`Failure` to `Claimed` compare-and-set.
+The successful compare-and-set transfers ownership to the caller. The caller
+then immediately samples the monotonic deadline again; that post-CAS sample is
+the exact completion linearization point.
+
+An unexpired claimed result is returned. An expired claimed result is disposed
+exactly once by its new caller owner and becomes
+`DovecotBoundedOperationTimeoutException`. An expired claimed generic failure
+also becomes that timeout, while a claimed `InterruptedException` retains
+precedence at the boundary. Disposition is signalled in `finally`, including
+when an injected clock fails, so the worker cannot be stranded.
+
+Before ownership transfer, the caller may still decline and the I/O worker
+invokes the late-result callback exactly once before it can process another
+task or seal target registration. It wipes a buffer or registers/cancels a
+transport on the worker, preserving the single registration authority. This
+covers timeout before dequeue, worker completion after timeout, and completion
+immediately adjacent to the deadline without assigning disposal to two
+owners.
+
+After publishing either a result or failure, the I/O worker waits for the
+caller disposition against the same absolute deadline. An interrupt of that
+worker is recorded and cleared; it does not change a published `Failure` to
+`Declined`. The worker continues waiting for the caller or deadline decision,
+and the disposition wait restores the recorded flag as it returns. The worker
+run loop immediately records and clears that flag before another task can
+start, then restores it after operation accounting and actor exit.
 
 ## Cancellation and interruption
 
@@ -117,11 +136,18 @@ targets. Timeout has no remaining cleanup wait. Interruption or an earlier
 generic failure may wait only to the same absolute deadline and the smaller
 fixed cancellation budget. Cleanup never determines caller completion.
 
-After bounded cleanup, every Held open/seed, usability, post-close, and raw
-HTTP generic failure path checks the caller interrupt flag. A literal
-interruption or any other failure with the flag set becomes a new redacted
-`InterruptedException`; the flag is restored before throwing. Post-close never
-accepts an interrupted `IOException` as unusability evidence.
+Every Held open/seed, usability, post-close, and raw HTTP failure first
+abandons its operation and performs the bounded cleanup wait while recording
+and clearing interruption. Only after cleanup ownership is established may an
+injected failure-classification hook run. The caller flag is sampled again
+after the hook and combined with literal or cleanup interruption. A literal
+interruption or any other failure with the combined flag becomes a new
+redacted `InterruptedException`; the flag is restored before throwing. A
+throwing hook surfaces its identical failure only after cleanup, with request,
+message, and credential wiping still protected by `finally`. Post-close
+captures its rejected write as an outcome and classifies it exactly once, so
+it never accepts an interrupted `IOException` as unusability evidence or sends
+a redacted interruption through the hook again.
 
 The raw HTTP client acquires coordinator capacity before socket allocation and
 registers the socket before connect. Connect, request writes, response reads,
@@ -135,6 +161,12 @@ exchange. Its credential remains caller-owned and is wiped before return.
 Secret bytes are copied while holding the synchronized credential boundary,
 then that boundary is released before a worker wait begins. Worker-owned
 encoded writes are independently wiped.
+
+Probe result selection and cleanup complete inside a private boundary. Every
+selected public enum result then crosses one outer interruption normalizer.
+If the caller flag is set there, it remains set and the probe returns the
+secret-free `TransportFailure`; success, authentication failure, and protocol
+failure cannot escape with a flagged caller.
 
 Held open/seed acquires one operation. A successfully returned held session
 stores the coordinator, not the completed operation. Each later usability or
@@ -181,11 +213,23 @@ caller's flag and make actual I/O exit through `IOException` or
 Coordinator race tests also cover target registration against release,
 timeout before dequeue, worker-start failure, result handoff at the deadline,
 two distinct cancellation targets reaching the twenty-actor maximum, and
-late-result disposal. Integration tests exercise the same dual-block behavior
-through production probe, Held open/seed, Held NOOP, Held post-close, and raw
-HTTP. Held close tests additionally prove bounded direct and lease-owned close,
-late state publication, retry semantics, and unchanged joinable terminal
-replay at the registry boundary.
+late-result disposal. Deterministic post-claim tests advance the clock between
+the advisory check and ownership transfer and prove caller-owned result
+disposal, generic-failure timeout, and interruption precedence. A worker-side
+failure test interrupts the publishing worker while the caller is held before
+claim and proves that self-interruption cannot demote the failure.
+
+Integration tests exercise the same dual-block behavior through production
+probe, Held open/seed, Held NOOP, Held post-close, and raw HTTP. Held tests
+release an injected generic I/O failure before interrupting the caller at the
+post-cleanup classification barrier. A registered-open characterization holds
+open, abort, and close independently and proves actor/capacity transitions
+from three to two to one to zero. HTTP uses a caller-side malformed-status
+failure and a throwing classification hook to prove copied-request wiping,
+both close callbacks, actor exit, and capacity recovery. Held close tests
+additionally prove bounded direct and lease-owned close, late state
+publication, retry semantics, and unchanged joinable terminal replay at the
+registry boundary.
 
 After focused green runs, rerun the reciprocal Task 6 classes, the exact
 non-live Dovecot selection plus static selectors, the wider non-live

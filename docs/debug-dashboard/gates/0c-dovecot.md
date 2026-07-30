@@ -727,32 +727,54 @@ temporary one-byte repository read without observable wiping, source-text
 live-proof assertions, and cleanup that could miss an add which mutated before
 returning failure.
 
-Adversarial review approved the coordinator integrations, actual HTTP
-collector ownership, repository/terminal replay, and executable live fixtures
-with no remaining finding. Focused non-live selections passed:
+A final state-machine and test-determinism review then exposed a worker
+self-interrupt demoting a published failure, a deadline crossing between the
+pre-claim check and ownership transfer, Probe results returning with a flagged
+caller, self-fulfilling Held generic-I/O tests, HTTP classification running
+before unconditional cleanup, and a missing registered-open triple-block
+characterization. The repairs now:
 
-- HTTP plus coordinator boundaries: `35/35`;
-- durable repository plus terminal runtime replay: `12/12`;
-- executable isolation-fixture contracts: `5/5`;
-- the complete Held deadline class: `26/26`; and
-- the Probe-to-HTTP cross-class ordering check: `39/39`.
+- preserve a published worker failure across worker self-interruption;
+- make the post-CAS monotonic sample the exact completion linearization point,
+  with caller-owned disposal of an expired claimed result, timeout for an
+  expired claimed generic failure, and `InterruptedException` precedence;
+- normalize every selected Probe result after cleanup;
+- classify the actual Held `IOException`/`SocketException` only after
+  abandonment and bounded cleanup, with post-close classification exactly
+  once;
+- run HTTP abandonment and bounded cleanup before its failure hook; and
+- prove registered open, abort, and close actors retain capacity through the
+  deterministic `3 -> 2 -> 1 -> 0` release sequence.
 
-The current 13-class reciprocal run passed `159/159`:
+Independent state-machine, code-quality, and test-determinism reviews approved
+the final coordinator, Probe, Held, HTTP, ownership, and cleanup behavior with
+no remaining Important finding. Focused non-live evidence passed:
 
-- the bounded operation coordinator: `19/19`;
+- the bounded operation coordinator: `23/23` twice;
+- Probe result normalization: `26/26`;
+- the Held deadline class: `28/28`, and Held deadline plus session:
+  `33/33` twice;
+- bounded HTTP and OAuth validation: `17/17` twice;
+- the combined coordinator, Probe, Held, and HTTP selection: `99/99`; and
+- the exact reported five-class order: `78/78` on each of three consecutive
+  identical runs, with no flake.
+
+The current 13-class reciprocal run passed `169/169`:
+
+- the bounded operation coordinator: `23/23`;
 - credential recovery, rotation projection, durable repository, and
   application leases: `52/52`;
-- exact auth classification and the fixed operator probe: `25/25`;
-- OAuth redirect/JSON validation and bounded HTTP transport: `16/16`;
-- held-session, deadline, and mailbox contracts: `36/36`; and
+- exact auth classification and the fixed operator probe: `28/28`;
+- OAuth redirect/JSON validation and bounded HTTP transport: `17/17`;
+- held-session, deadline, and mailbox contracts: `38/38`; and
 - bounded process and topology proofs: `11/11`.
 
 Under the no-Docker verification boundary, the non-live Dovecot class run
-passed `236/236` and the 13 non-daemon static/config selectors passed `13/13`,
-for `249/249` with zero skips. The four effective-configuration selectors
+passed `246/246` and the 13 non-daemon static/config selectors passed `13/13`,
+for `259/259` with zero skips. The four effective-configuration selectors
 that invoke `docker run` were not executed. The wider `dashboard-server`
-non-live run passed `501/501`, plus a second `13/13` run of those same
-selectors, for `514/514`; it excluded all `*LiveTest` classes, the production
+non-live run passed `511/511`, plus a second `13/13` run of those same
+selectors, for `524/524`; it excluded all `*LiveTest` classes, the production
 browser gate that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed
 Docker-backed config class from the broad scan. The independent Python helper
 passed `21/21`, and `./kotlin build --module dashboard-server` completed
