@@ -82,19 +82,16 @@ internal class DovecotOperatorLaunchProfile(
             ),
         )
 
+    @Suppress("UNUSED_PARAMETER")
     fun sanitizedEnvironment(
         inheritedEnvironment: Map<String, String>,
-    ): Map<String, String> {
-        val sanitized = LinkedHashMap<String, String>()
-        inheritedEnvironment.forEach { (key, value) ->
-            if (CONTROL_PREFIXES.none(key::startsWith)) {
-                sanitized[key] = value
-            }
-        }
-        sanitized["COMPOSE_DISABLE_ENV_FILE"] = "1"
-        sanitized["DOCKER_HOST"] = dockerHost
-        return Collections.unmodifiableMap(sanitized)
-    }
+    ): Map<String, String> =
+        Collections.unmodifiableMap(
+            linkedMapOf(
+                "COMPOSE_DISABLE_ENV_FILE" to "1",
+                "DOCKER_HOST" to dockerHost,
+            ),
+        )
 
     internal companion object {
         const val DOCKER_HOST = "unix:///var/run/docker.sock"
@@ -102,8 +99,6 @@ internal class DovecotOperatorLaunchProfile(
         const val COMPOSE_PROFILE = "dovecot-operator"
 
         private val PROJECT_NAME = Regex("[a-z0-9][a-z0-9_-]*")
-        private val CONTROL_PREFIXES =
-            listOf("COMPOSE_", "DOCKER_", "DOVECOT_")
     }
 }
 

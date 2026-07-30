@@ -231,12 +231,13 @@ class DovecotOperatorProcessTransportTest {
         }
 
     @Test
-    fun sanitizedEnvironmentRemovesExactControlNamespacesAndFixesRouting() =
+    fun sanitizedEnvironmentDiscardsEveryInheritedEntryAndFixesRouting() =
         withLaunchFixture { fixture ->
             val profile = fixture.profile()
             val inherited = linkedMapOf(
-                "PATH" to "/trusted/bin",
-                "LANG" to "C.UTF-8",
+                "HOME" to "/hostile/home",
+                "PATH" to "/hostile/bin",
+                "XDG_CONFIG_HOME" to "/hostile/xdg",
                 "COMPOSE_FILE" to "hostile-compose.yml",
                 "COMPOSE_PROJECT_NAME" to "hostile-project",
                 "COMPOSE_PROFILES" to "hostile-profile",
@@ -244,12 +245,14 @@ class DovecotOperatorProcessTransportTest {
                 "DOCKER_HOST" to "tcp://hostile.example.test:2375",
                 "DOCKER_CONTEXT" to "hostile-context",
                 "DOCKER_CONFIG" to "/hostile/config",
+                "DOCKER_CLI_PLUGIN_EXTRA_DIRS" to "/hostile/plugins",
                 "DOCKER_TLS_VERIFY" to "1",
                 "DOVECOT_USER" to "request-user",
                 "DOVECOT_PASSWORD" to "request-password",
-                "XCOMPOSE_FILE" to "preserved",
-                "docker_host" to "case-sensitive-preserved",
-                "Compose_Project" to "case-sensitive-preserved",
+                "LD_PRELOAD" to "/hostile/lib.so",
+                "DYLD_INSERT_LIBRARIES" to "/hostile/lib.dylib",
+                "JAVA_TOOL_OPTIONS" to "-javaagent:/hostile/agent.jar",
+                "UNRELATED_SECRET" to "must-not-cross-boundary",
             )
 
             val sanitized = profile.sanitizedEnvironment(inherited)
@@ -257,11 +260,6 @@ class DovecotOperatorProcessTransportTest {
 
             assertEquals(
                 mapOf(
-                    "PATH" to "/trusted/bin",
-                    "LANG" to "C.UTF-8",
-                    "XCOMPOSE_FILE" to "preserved",
-                    "docker_host" to "case-sensitive-preserved",
-                    "Compose_Project" to "case-sensitive-preserved",
                     "COMPOSE_DISABLE_ENV_FILE" to "1",
                     "DOCKER_HOST" to "unix:///var/run/docker.sock",
                 ),
@@ -293,10 +291,18 @@ class DovecotOperatorProcessTransportTest {
                 ),
             )
             val inherited = linkedMapOf(
-                "PATH" to "/trusted/bin",
+                "HOME" to "/hostile/home",
+                "PATH" to "/hostile/bin",
+                "XDG_CONFIG_HOME" to "/hostile/xdg",
                 "COMPOSE_FILE" to "hostile-compose.yml",
                 "DOCKER_HOST" to "tcp://hostile.example.test:2375",
+                "DOCKER_CONFIG" to "/hostile/config",
+                "DOCKER_CLI_PLUGIN_EXTRA_DIRS" to "/hostile/plugins",
                 "DOVECOT_PASSWORD" to "request-password",
+                "LD_PRELOAD" to "/hostile/lib.so",
+                "DYLD_INSERT_LIBRARIES" to "/hostile/lib.dylib",
+                "JAVA_TOOL_OPTIONS" to "-javaagent:/hostile/agent.jar",
+                "UNRELATED_SECRET" to "must-not-cross-boundary",
             )
             val expectedProcess = UnstartedTestProcess()
             var launches = 0
@@ -334,7 +340,10 @@ class DovecotOperatorProcessTransportTest {
             )
             assertFalse(capturedBuilder.redirectErrorStream())
             assertEquals(
-                profile.sanitizedEnvironment(inherited),
+                mapOf(
+                    "COMPOSE_DISABLE_ENV_FILE" to "1",
+                    "DOCKER_HOST" to "unix:///var/run/docker.sock",
+                ),
                 capturedBuilder.environment(),
             )
         }
