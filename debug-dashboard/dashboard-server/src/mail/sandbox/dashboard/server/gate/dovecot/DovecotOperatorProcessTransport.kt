@@ -8,7 +8,6 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 internal class DovecotOperatorLaunchProfile(
     val dockerCli: Path,
@@ -184,8 +183,8 @@ private class ManagedDovecotOperatorProcessTransport(
     private var childStdin: OutputStream? = null
     private var childStdout: InputStream? = null
     private var terminationOutcome: TerminationOutcome? = null
-    private val terminationSignal =
-        AtomicReference(TerminationSignal.Available)
+    private val terminationSignalLock = Any()
+    private var terminationSignal = TerminationSignal.Available
 
     @Volatile
     private var terminal = false
@@ -218,16 +217,17 @@ private class ManagedDovecotOperatorProcessTransport(
     override fun abort() {
         terminal = true
         var restoreInterrupt = false
-        if (
-            terminationSignal.compareAndSet(
-                TerminationSignal.Available,
-                TerminationSignal.AbortPreempted,
-            )
-        ) {
-            try {
-                process.destroy()
-            } catch (failure: Throwable) {
-                restoreInterrupt = failure is InterruptedException
+        synchronized(terminationSignalLock) {
+            if (terminationSignal == TerminationSignal.Available) {
+                terminationSignal = TerminationSignal.AbortInFlight
+                try {
+                    process.destroy()
+                } catch (failure: Throwable) {
+                    restoreInterrupt = failure is InterruptedException
+                } finally {
+                    terminationSignal =
+                        TerminationSignal.AbortAcknowledged
+                }
             }
         }
         try {
@@ -274,13 +274,15 @@ private class ManagedDovecotOperatorProcessTransport(
             terminationOutcome ?: run {
                 terminal = true
                 val performed = performTermination(mode)
-                val signal = terminationSignal.getAndSet(
-                    TerminationSignal.Completed,
-                )
+                val signal = synchronized(terminationSignalLock) {
+                    val completedSignal = terminationSignal
+                    terminationSignal = TerminationSignal.Completed
+                    completedSignal
+                }
                 performed.copy(
                     terminationRequired =
                         performed.terminationRequired ||
-                            signal == TerminationSignal.AbortPreempted ||
+                            signal == TerminationSignal.AbortAcknowledged ||
                             signal == TerminationSignal.LifecycleDestroy,
                 ).also { completed ->
                     terminationOutcome = completed
@@ -348,12 +350,17 @@ private class ManagedDovecotOperatorProcessTransport(
 
             var reaped = naturalExit
             if (!reaped) {
-                if (
-                    terminationSignal.compareAndSet(
-                        TerminationSignal.Available,
-                        TerminationSignal.LifecycleDestroy,
-                    )
-                ) {
+                val lifecycleDestroySelected =
+                    synchronized(terminationSignalLock) {
+                        if (terminationSignal == TerminationSignal.Available) {
+                            terminationSignal =
+                                TerminationSignal.LifecycleDestroy
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                if (lifecycleDestroySelected) {
                     try {
                         process.destroy()
                     } catch (failure: Throwable) {
@@ -418,7 +425,8 @@ private class ManagedDovecotOperatorProcessTransport(
 
     private enum class TerminationSignal {
         Available,
-        AbortPreempted,
+        AbortInFlight,
+        AbortAcknowledged,
         LifecycleDestroy,
         Completed,
     }

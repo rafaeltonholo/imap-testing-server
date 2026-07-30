@@ -237,26 +237,34 @@ post-allocation registration-failure cleanup use the graceful ordering:
 5. if still alive, call `destroyForcibly()` and make one final reap attempt of
    at most 250 ms.
 
-Abort first claims a one-shot termination signal and calls `destroy()` outside
-the lifecycle lock, before attempting to close either stream. This lets the
-child signal release a protocol writer that holds the JDK process-stdin stream
-monitor, so the lifecycle owner can complete the close attempt instead of
-deadlocking behind it. The owner then closes stdin, waits at most 500 ms with
-stdout open, closes stdout, waits at most 250 ms without issuing a second
-`destroy()`, and, if needed, forces and reaps for at most 250 ms. Thus every
-mode retains the same fixed one-second aggregate wait bound and creates no
-cleanup thread.
+An abort that wins the one-shot signal holds a dedicated signal-coordination
+monitor while calling `destroy()` outside the lifecycle lock. On an abort-first
+path, this happens before either stream-close attempt and lets the child signal
+release a protocol writer that holds the JDK process-stdin stream monitor. On a
+close-first path, stream cleanup may already be underway, but the lifecycle
+owner cannot cache a terminal outcome while the abort attempt remains in
+flight. The winning abort records signal acknowledgement only after the destroy
+attempt returns or throws, then releases the signal monitor before entering the
+lifecycle lock. Regular lifecycle destroy is selected under the same signal
+monitor, then executed by the selecting thread while it owns the lifecycle
+lock.
 
-All callers share one cached terminal outcome. If abort preemption wins or
-races an unfinished normal close, that outcome records that termination was
-required, so the normal close cannot succeed even if the child then exits with
-code zero. A normal probe/session close succeeds only after natural exit with
-code zero, no termination signal, and successful close attempts for both
-mapped streams. Timeout/abort and registration-failure cleanup accept any exit
-code, but still require both successful stream-close attempts and a reaped
-child. Each terminal stream reference is cleared after its one close attempt;
-later close or abort calls reuse the cached outcome and never rerun process
-lifecycle work.
+The lifecycle owner still closes stdin, waits at most 500 ms with stdout open,
+closes stdout, and, when the acknowledged abort already owns the process
+signal, waits at most 250 ms without issuing a second `destroy()`. If needed, it
+forces and reaps for at most 250 ms. Thus every mode retains the same fixed
+one-second aggregate wait bound and creates no cleanup thread.
+
+All callers share one cached terminal outcome. Signal acknowledgement precedes
+terminal-outcome caching. If abort preemption wins or races an unfinished
+normal close, that outcome records that termination was required, so the normal
+close cannot succeed even if the child then exits with code zero. A normal
+probe/session close succeeds only after natural exit with code zero, no
+termination signal, and successful close attempts for both mapped streams.
+Timeout/abort and registration-failure cleanup accept any exit code, but still
+require both successful stream-close attempts and a reaped child. Each terminal
+stream reference is cleared after its one close attempt; later close or abort
+calls reuse the cached outcome and never rerun process lifecycle work.
 
 Interrupted callers retain their interrupt flag. Every failure remains fixed
 and redacted, and no failed close makes a transport reusable. No unbounded
