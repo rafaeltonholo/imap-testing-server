@@ -201,6 +201,35 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
+    fun fullMailboxReadIgnoresZeroExistsAndRecentButRejectsZeroFetchSequence() {
+        val validLiteral =
+            "Message-ID: <zero-counts@local.test>\r\n\r\n"
+        val fixture = probeFixture(
+            response = (
+                successfulReadPrefix() +
+                    "* SEARCH 7\r\n" +
+                    "A004 OK Search completed\r\n" +
+                    "* 0 EXISTS\r\n" +
+                    "* 0 RECENT\r\n" +
+                    "* 1 FETCH (UID 7 " +
+                    "BODY[HEADER.FIELDS (MESSAGE-ID)] " +
+                    "{${validLiteral.length}}\r\n" +
+                    validLiteral +
+                    ")\r\n" +
+                    "A005 OK Fetch completed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "zero-counts-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.Success,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertClosedAndWiped(fixture, "zero-counts-secret")
+    }
+
+    @Test
     fun fragmentedAuthenticateLoginChallengesUseOnlyTheCombinedUsernameForm() {
         val canary = "ProbeSecret-._~012345"
         val fixture = probeFixture(
@@ -282,14 +311,20 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
-    fun authenticateLoginNoIsAuthenticationFailureAndBadIsProtocolFailure() {
+    fun authenticateLoginClassifiesOnlyExactPermanentFailureAsAuthenticationFailure() {
         listOf(
-            "A001 NO Authentication failed\r\n" to
+            "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n" to
                 DovecotOperatorProbeResult.AuthenticationFailure,
+            "A001 NO Authentication failed\r\n" to
+                DovecotOperatorProbeResult.ProtocolFailure,
+            "A001 NO [UNAVAILABLE] Authentication unavailable\r\n" to
+                DovecotOperatorProbeResult.ProtocolFailure,
+            "A001 NO [SERVERBUG] Authentication failed\r\n" to
+                DovecotOperatorProbeResult.ProtocolFailure,
             "A001 BAD Invalid command\r\n" to
                 DovecotOperatorProbeResult.ProtocolFailure,
         ).forEach { (completion, expected) ->
-            val canary = "Canary-${expected.name}"
+            val canary = "Canary-${completion.hashCode()}"
             val fixture = probeFixture(
                 response = (
                     "* OK ready\r\n" +

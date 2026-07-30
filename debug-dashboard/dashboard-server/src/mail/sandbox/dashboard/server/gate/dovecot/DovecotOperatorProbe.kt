@@ -161,16 +161,16 @@ internal class DovecotOperatorProbe(
                 deadline = deadline,
             )
             when (
-                readTaggedCompletion(
+                readAuthenticationCompletion(
                     input = opened.input,
                     tag = LOGIN_TAG,
                     deadline = deadline,
                 )
             ) {
-                TaggedCompletion.Ok -> Unit
-                TaggedCompletion.No ->
+                DovecotAuthenticationResponse.Success -> Unit
+                DovecotAuthenticationResponse.PermanentFailure ->
                     return DovecotOperatorProbeResult.AuthenticationFailure
-                TaggedCompletion.Bad ->
+                DovecotAuthenticationResponse.Indeterminate ->
                     return DovecotOperatorProbeResult.ProtocolFailure
             }
 
@@ -283,6 +283,24 @@ internal class DovecotOperatorProbe(
                             TaggedCompletion.Bad
                         else -> throw DovecotOperatorProtocolException()
                     }
+                }
+            }
+        }
+        throw DovecotOperatorProtocolException()
+    }
+
+    private fun readAuthenticationCompletion(
+        input: InputStream,
+        tag: ByteArray,
+        deadline: Long,
+    ): DovecotAuthenticationResponse {
+        repeat(MAX_RESPONSE_LINES) {
+            readLine(input, deadline).useBytes { line ->
+                if (line.startsWithToken(tag)) {
+                    return DovecotAuthenticationResponseClassifier.classifyImap(
+                        line = line,
+                        tag = tag,
+                    )
                 }
             }
         }
@@ -423,6 +441,15 @@ internal class DovecotOperatorProbe(
         cursor += 1
         if (!line.matchesAsciiIgnoreCase(cursor, FETCH_TOKEN)) {
             return null
+        }
+        if (
+            sequence.value == 0L ||
+            (
+                line[2] == ASCII_ZERO &&
+                    sequence.nextOffset > 3
+                )
+        ) {
+            throw DovecotOperatorProtocolException()
         }
         cursor += FETCH_TOKEN.size
         if (cursor >= line.size || line[cursor] != SPACE) {
@@ -1031,7 +1058,20 @@ private fun parseDecimalOrNull(
     ) {
         return null
     }
-    return parseDecimal(bytes, offset, maximum)
+    var cursor = offset
+    var value = 0L
+    while (
+        cursor < bytes.size &&
+        bytes[cursor] in ASCII_ZERO..ASCII_NINE
+    ) {
+        val digit = bytes[cursor].toInt() - ASCII_ZERO.toInt()
+        if (value > (maximum - digit) / 10L) {
+            throw DovecotOperatorProtocolException()
+        }
+        value = value * 10L + digit
+        cursor += 1
+    }
+    return DecimalParseResult(value, cursor)
 }
 
 private fun parseDecimal(
