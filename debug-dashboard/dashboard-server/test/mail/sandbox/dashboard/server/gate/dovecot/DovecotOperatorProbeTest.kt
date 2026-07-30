@@ -31,7 +31,7 @@ class DovecotOperatorProbeTest {
                     "A001 OK Logged in\r\n" +
                     "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
                     "A002 OK List completed\r\n" +
-                    "* 1 EXISTS\r\n" +
+                    "* 2 EXISTS\r\n" +
                     "A003 OK [READ-ONLY] Examine completed\r\n" +
                     "* SEARCH 7 9\r\n" +
                     "A004 OK Search completed\r\n" +
@@ -42,11 +42,7 @@ class DovecotOperatorProbeTest {
                     ")\r\n" +
                     "A005 OK Fetch completed\r\n"
                 ).toByteArray(StandardCharsets.US_ASCII)
-        assertTrue(
-            response.toString(StandardCharsets.US_ASCII)
-                .contains("* 1 EXISTS\r\n"),
-            "A successful full-read transcript must declare a non-empty INBOX",
-        )
+        assertSearchAllUidCountMatchesExists(response)
         val fixture = probeFixture(
             response = response,
             secret = "read-probe-secret",
@@ -800,6 +796,36 @@ class DovecotOperatorProbeTest {
         val credential: DovecotOperatorCredential,
         val secretBytes: ByteArray,
     )
+
+    private fun assertSearchAllUidCountMatchesExists(
+        response: ByteArray,
+    ) {
+        val transcript = response.toString(StandardCharsets.US_ASCII)
+        val existsMatches = Regex(
+            """\* ([1-9][0-9]*) EXISTS\r\n""",
+        ).findAll(transcript).toList()
+        val searchMatches = Regex(
+            """\* SEARCH ([1-9][0-9]*(?: [1-9][0-9]*)*)\r\n""",
+        ).findAll(transcript).toList()
+        assertEquals(
+            1,
+            existsMatches.size,
+            "A successful full-read transcript must declare one EXISTS count",
+        )
+        assertEquals(
+            1,
+            searchMatches.size,
+            "A successful full-read transcript must return one SEARCH result",
+        )
+        val existsCount = existsMatches.single().groupValues[1].toInt()
+        val searchedUidCount =
+            searchMatches.single().groupValues[1].split(' ').size
+        assertEquals(
+            existsCount,
+            searchedUidCount,
+            "UID SEARCH ALL must return one UID per declared message",
+        )
+    }
 
     companion object {
         private val TARGET = DovecotOperatorTarget.create("probe-target@local.test")
