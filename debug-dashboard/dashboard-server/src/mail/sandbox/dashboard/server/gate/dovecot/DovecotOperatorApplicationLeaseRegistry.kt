@@ -1,13 +1,8 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
 import java.time.Duration
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Future
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -23,6 +18,9 @@ internal class DovecotOperatorApplicationLeaseRegistry(
     }
     private val verificationLeases =
         linkedSetOf<DovecotOperatorApplicationLease>()
+    private val drainAttempts =
+        mutableMapOf<DovecotOperatorId, DrainAttempt>()
+    private var activationClosed = false
 
     fun acquire(
         id: DovecotOperatorId,
@@ -41,7 +39,7 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         closeSession: () -> Unit,
         verification: Boolean,
     ): DovecotOperatorApplicationLease = lock.withLock {
-        check(id == active && id !in blocked) {
+        check(!activationClosed && id == active && id !in blocked) {
             "Dovecot operator application generation is unavailable"
         }
         val trackedCount = leases.values.sumOf { tracked -> tracked.size }
@@ -68,73 +66,61 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         }
     }
 
-    fun activate(id: DovecotOperatorId) = lock.withLock {
+    fun activate(id: DovecotOperatorId) {
+        activateAtomically(id) {}
+    }
+
+    internal fun <T> activateAtomically(
+        id: DovecotOperatorId,
+        publish: () -> T,
+    ): T = lock.withLock {
+        check(!activationClosed && id !in drainAttempts) {
+            "Dovecot operator application generation is unavailable"
+        }
+        check(id !in blocked || leases.getValue(id).isEmpty()) {
+            "Dovecot operator application generation has undrained leases"
+        }
+        val published = publish()
         blocked.remove(id)
         active = id
+        published
     }
 
     fun blockAndDrain(id: DovecotOperatorId) {
-        val draining = lock.withLock {
+        var leader = false
+        val attempt = lock.withLock {
             blocked.add(id)
-            leases.getValue(id).toList()
-        }
-        if (draining.isEmpty()) return
-
-        val deadline = System.nanoTime() + DRAIN_TIMEOUT.toNanos()
-        val futures = mutableListOf<Future<*>>()
-        var primaryFailure: Throwable? = null
-        for (lease in draining) {
-            try {
-                futures += DRAIN_EXECUTOR.submit(lease::close)
-            } catch (failure: Throwable) {
-                primaryFailure = combineFailures(primaryFailure, failure)
-                break
+            drainAttempts[id] ?: DrainAttempt(
+                deadlineNanos = System.nanoTime() + DRAIN_TIMEOUT.toNanos(),
+                leases = leases.getValue(id).toList(),
+            ).also { created ->
+                drainAttempts[id] = created
+                leader = true
             }
         }
-        for (future in futures) {
-            val remaining = deadline - System.nanoTime()
-            if (remaining <= 0L) {
-                primaryFailure = combineFailures(
-                    primaryFailure,
-                    drainTimeoutFailure(),
-                )
-                break
-            }
-            try {
-                future.get(remaining, TimeUnit.NANOSECONDS)
-            } catch (failure: ExecutionException) {
-                primaryFailure = combineFailures(
-                    primaryFailure,
-                    failure.cause ?: failure,
-                )
-            } catch (_: TimeoutException) {
-                primaryFailure = combineFailures(
-                    primaryFailure,
-                    drainTimeoutFailure(),
-                )
-                break
-            } catch (failure: InterruptedException) {
-                Thread.currentThread().interrupt()
-                primaryFailure = combineFailures(
-                    primaryFailure,
-                    failure,
-                )
-                break
-            } catch (failure: Throwable) {
-                primaryFailure = combineFailures(
-                    primaryFailure,
-                    failure,
-                )
-            }
-        }
-        if (primaryFailure != null) {
-            futures.forEach { future ->
-                if (!future.isDone) {
-                    future.cancel(true)
+        if (leader) {
+            val failure = try {
+                DovecotOperatorLeaseCloseSession(
+                    maximumWorkers = maxOf(1, attempt.leases.size),
+                ).use { session ->
+                    session.closeAll(
+                        leases = attempt.leases,
+                        deadlineNanos = attempt.deadlineNanos,
+                    )
                 }
+            } catch (failure: Throwable) {
+                failure
+            }
+            attempt.complete(failure)
+            try {
+                lock.withLock {
+                    drainAttempts.remove(id, attempt)
+                }
+            } catch (failure: Throwable) {
+                attempt.complete(failure)
             }
         }
-        primaryFailure?.let { throw it }
+        attempt.await()?.let { throw it }
     }
 
     fun openLeaseCount(id: DovecotOperatorId): Int = lock.withLock {
@@ -143,6 +129,12 @@ internal class DovecotOperatorApplicationLeaseRegistry(
 
     internal fun activeId(): DovecotOperatorId = lock.withLock { active }
 
+    internal fun <T> beginRuntimeClose(detach: () -> T): T = lock.withLock {
+        activationClosed = true
+        blocked += DovecotOperatorId.entries
+        detach()
+    }
+
     private fun release(lease: DovecotOperatorApplicationLease) {
         lock.withLock {
             leases.getValue(lease.id).remove(lease)
@@ -150,21 +142,40 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         }
     }
 
-    private fun drainTimeoutFailure(): IllegalStateException =
-        IllegalStateException(
-            "Dovecot operator application session drain timed out",
-        )
+    private class DrainAttempt(
+        val deadlineNanos: Long,
+        val leases: List<DovecotOperatorApplicationLease>,
+    ) {
+        private val completion = CountDownLatch(1)
+        private val outcome = AtomicReference<DrainOutcome?>()
 
-    private fun combineFailures(
-        primary: Throwable?,
-        next: Throwable,
-    ): Throwable {
-        if (primary == null) return next
-        if (primary !== next) {
-            primary.addSuppressed(next)
+        fun complete(failure: Throwable?) {
+            if (outcome.compareAndSet(null, DrainOutcome(failure))) {
+                completion.countDown()
+            }
         }
-        return primary
+
+        fun await(): Throwable? {
+            while (outcome.get() == null) {
+                val remaining = deadlineNanos - System.nanoTime()
+                if (remaining <= 0L) {
+                    complete(drainTimeoutFailure())
+                    break
+                }
+                try {
+                    if (!completion.await(remaining, TimeUnit.NANOSECONDS)) {
+                        complete(drainTimeoutFailure())
+                    }
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw interrupted
+                }
+            }
+            return requireNotNull(outcome.get()).failure
+        }
     }
+
+    private data class DrainOutcome(val failure: Throwable?)
 
     companion object {
         private const val MAX_TRACKED_LEASES = 16
@@ -172,24 +183,6 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         private const val MAX_APPLICATION_LEASES =
             MAX_TRACKED_LEASES - RESERVED_VERIFICATION_LEASES
         private val DRAIN_TIMEOUT = Duration.ofSeconds(1)
-        private val DRAIN_THREAD_SEQUENCE = AtomicInteger()
-        private val DRAIN_EXECUTOR = ThreadPoolExecutor(
-            0,
-            MAX_TRACKED_LEASES,
-            30,
-            TimeUnit.SECONDS,
-            SynchronousQueue(),
-            { runnable ->
-                Thread(
-                    runnable,
-                    "dovecot-operator-lease-close-" +
-                        DRAIN_THREAD_SEQUENCE.incrementAndGet(),
-                ).also { thread ->
-                    thread.isDaemon = true
-                }
-            },
-            ThreadPoolExecutor.AbortPolicy(),
-        )
     }
 }
 
@@ -198,36 +191,70 @@ internal class DovecotOperatorApplicationLease internal constructor(
     private val closeSession: () -> Unit,
     private val release: (DovecotOperatorApplicationLease) -> Unit,
 ) : AutoCloseable {
-    private val state = AtomicReference(State.Open)
+    private val stateLock = Any()
+    private var closed = false
+    private var closeAttempt: CloseAttempt? = null
 
     val isOpen: Boolean
-        get() = state.get() != State.Closed
+        get() = synchronized(stateLock) { !closed }
 
     override fun close() {
-        if (!state.compareAndSet(State.Open, State.Closing)) {
-            if (state.get() == State.Closed) return
-            throw IllegalStateException(
-                "Dovecot operator application session close is in progress",
-            )
+        var leader = false
+        val attempt = synchronized(stateLock) {
+            if (closed) return
+            closeAttempt ?: CloseAttempt().also { created ->
+                closeAttempt = created
+                leader = true
+            }
         }
-        try {
-            closeSession()
-        } catch (failure: Throwable) {
-            state.compareAndSet(State.Closing, State.Open)
-            throw failure
+        if (leader) {
+            val failure = try {
+                closeSession()
+                release(this)
+                null
+            } catch (failure: Throwable) {
+                failure
+            }
+            if (failure == null) {
+                synchronized(stateLock) {
+                    closed = true
+                }
+            }
+            attempt.complete(failure)
+            synchronized(stateLock) {
+                if (closeAttempt === attempt) {
+                    closeAttempt = null
+                }
+            }
         }
-        state.set(State.Closed)
-        release(this)
+        attempt.await()?.let { throw it }
     }
 
     override fun toString(): String =
         "DovecotOperatorApplicationLease(id=${id.name}, open=$isOpen)"
 
-    private enum class State {
-        Open,
-        Closing,
-        Closed,
+    private class CloseAttempt {
+        private val completion = CountDownLatch(1)
+        private val outcome = AtomicReference<CloseOutcome?>()
+
+        fun complete(failure: Throwable?) {
+            if (outcome.compareAndSet(null, CloseOutcome(failure))) {
+                completion.countDown()
+            }
+        }
+
+        fun await(): Throwable? {
+            try {
+                completion.await()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            }
+            return requireNotNull(outcome.get()).failure
+        }
     }
+
+    private data class CloseOutcome(val failure: Throwable?)
 }
 
 internal fun interface DovecotOperatorCredentialProber {
@@ -242,7 +269,9 @@ internal class DovecotOperatorLeasedRotationRuntime(
     private val prober: DovecotOperatorCredentialProber,
 ) : DovecotOperatorRotationRuntime, AutoCloseable {
     private val generationLock = Any()
+    private var lifecycle = RuntimeLifecycle.Open
     private var generation: RuntimeGeneration? = null
+    private var closeAttempt: RuntimeCloseAttempt? = null
 
     override fun observePasswdFile(
         target: DovecotOperatorTarget,
@@ -265,10 +294,19 @@ internal class DovecotOperatorLeasedRotationRuntime(
             copied.fill(0)
             throw failure
         }
-        val previous = synchronized(generationLock) {
-            generation.also { generation = next }
+        val previous = try {
+            synchronized(generationLock) {
+                check(lifecycle == RuntimeLifecycle.Open) {
+                    "Dovecot operator leased runtime is closed"
+                }
+                leases.activateAtomically(next.id) {
+                    generation.also { generation = next }
+                }
+            }
+        } catch (failure: Throwable) {
+            next.close()
+            throw failure
         }
-        leases.activate(next.id)
         previous?.close()
     }
 
@@ -277,8 +315,11 @@ internal class DovecotOperatorLeasedRotationRuntime(
         expectedId: DovecotOperatorId,
     ): DovecotOperatorProbeResult {
         var copy = ByteArray(0)
-        val credential = try {
-            val id = synchronized(generationLock) {
+        val credentialAndLease = try {
+            synchronized(generationLock) {
+                check(lifecycle == RuntimeLifecycle.Open) {
+                    "Dovecot operator leased runtime is closed"
+                }
                 val current = checkNotNull(generation) {
                     "Dovecot operator application generation is absent"
                 }
@@ -288,22 +329,26 @@ internal class DovecotOperatorLeasedRotationRuntime(
                 current.secret.withBytes { bytes ->
                     copy = bytes.copyOf()
                 }
-                current.id
+                val credential = DovecotOperatorCredential(
+                    id = current.id,
+                    secret = DovecotOperatorSecret.takeOwnership(copy),
+                )
+                val lease = try {
+                    leases.acquireVerification(
+                        expectedId,
+                        credential::close,
+                    )
+                } catch (failure: Throwable) {
+                    credential.close()
+                    throw failure
+                }
+                credential to lease
             }
-            DovecotOperatorCredential(
-                id = id,
-                secret = DovecotOperatorSecret.takeOwnership(copy),
-            )
         } catch (failure: Throwable) {
             copy.fill(0)
             throw failure
         }
-        val lease = try {
-            leases.acquireVerification(expectedId, credential::close)
-        } catch (failure: Throwable) {
-            credential.close()
-            throw failure
-        }
+        val (credential, lease) = credentialAndLease
         return lease.use {
             prober.probe(target, credential)
         }
@@ -314,24 +359,55 @@ internal class DovecotOperatorLeasedRotationRuntime(
     }
 
     override fun close() {
-        val previous = synchronized(generationLock) {
-            generation.also { generation = null }
-        }
-        previous?.close()
-        var primary: Throwable? = null
-        DovecotOperatorId.entries.forEach { id ->
-            try {
-                leases.blockAndDrain(id)
-            } catch (failure: Throwable) {
-                val existing = primary
-                if (existing == null) {
-                    primary = failure
-                } else if (existing !== failure) {
-                    existing.addSuppressed(failure)
+        val registration = synchronized(generationLock) {
+            when (lifecycle) {
+                RuntimeLifecycle.Closed -> RuntimeCloseRegistration(
+                    attempt = requireNotNull(closeAttempt),
+                    leader = false,
+                    generation = null,
+                )
+                RuntimeLifecycle.Closing -> RuntimeCloseRegistration(
+                    attempt = requireNotNull(closeAttempt),
+                    leader = false,
+                    generation = null,
+                )
+                RuntimeLifecycle.Open -> {
+                    lifecycle = RuntimeLifecycle.Closing
+                    val attempt = RuntimeCloseAttempt()
+                    closeAttempt = attempt
+                    var detached: RuntimeGeneration? = null
+                    leases.beginRuntimeClose {
+                        detached = generation
+                        generation = null
+                    }
+                    RuntimeCloseRegistration(
+                        attempt = attempt,
+                        leader = true,
+                        generation = detached,
+                    )
                 }
             }
         }
-        primary?.let { throw it }
+        if (registration.leader) {
+            var primary: Throwable? = null
+            try {
+                registration.generation?.close()
+            } catch (failure: Throwable) {
+                primary = combineRuntimeCloseFailures(primary, failure)
+            }
+            DovecotOperatorId.entries.forEach { id ->
+                try {
+                    leases.blockAndDrain(id)
+                } catch (failure: Throwable) {
+                    primary = combineRuntimeCloseFailures(primary, failure)
+                }
+            }
+            synchronized(generationLock) {
+                lifecycle = RuntimeLifecycle.Closed
+            }
+            registration.attempt.complete(primary)
+        }
+        registration.attempt.await()?.let { throw it }
     }
 
     private class RuntimeGeneration(
@@ -340,4 +416,50 @@ internal class DovecotOperatorLeasedRotationRuntime(
     ) : AutoCloseable {
         override fun close() = secret.close()
     }
+
+    private enum class RuntimeLifecycle {
+        Open,
+        Closing,
+        Closed,
+    }
+
+    private data class RuntimeCloseRegistration(
+        val attempt: RuntimeCloseAttempt,
+        val leader: Boolean,
+        val generation: RuntimeGeneration?,
+    )
+
+    private class RuntimeCloseAttempt {
+        private val completion = CountDownLatch(1)
+        private val outcome = AtomicReference<RuntimeCloseOutcome?>()
+
+        fun complete(failure: Throwable?) {
+            if (outcome.compareAndSet(null, RuntimeCloseOutcome(failure))) {
+                completion.countDown()
+            }
+        }
+
+        fun await(): Throwable? {
+            try {
+                completion.await()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            }
+            return requireNotNull(outcome.get()).failure
+        }
+    }
+
+    private data class RuntimeCloseOutcome(val failure: Throwable?)
+}
+
+private fun combineRuntimeCloseFailures(
+    primary: Throwable?,
+    next: Throwable,
+): Throwable {
+    if (primary == null) return next
+    if (primary !== next) {
+        primary.addSuppressed(next)
+    }
+    return primary
 }
