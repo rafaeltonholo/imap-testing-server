@@ -176,12 +176,246 @@ internal class JvmDockerExecDovecotOperatorTransportFactory(
     }
 }
 
+private class ProcessStreamAdmissionGate {
+    private val lock = Any()
+    private var sealed = false
+
+    fun guard(raw: InputStream): GuardedInputStream =
+        GuardedInputStream(Direction(raw))
+
+    fun guard(raw: OutputStream): GuardedOutputStream =
+        GuardedOutputStream(Direction(raw))
+
+    fun seal() {
+        synchronized(lock) {
+            sealed = true
+        }
+    }
+
+    private fun <Stream : AutoCloseable, Result> call(
+        direction: Direction<Stream>,
+        operation: (Stream) -> Result,
+    ): Result {
+        synchronized(lock) {
+            if (sealed || direction.closeState != CloseState.Open) {
+                throw IOException(CLOSED_MESSAGE)
+            }
+            direction.activeCalls += 1
+        }
+        return try {
+            operation(direction.raw)
+        } catch (failure: Throwable) {
+            restoreInterruptFrom(failure)
+            throw IOException(OPERATION_FAILURE_MESSAGE)
+        } finally {
+            release(direction)
+        }
+    }
+
+    private fun <Stream : AutoCloseable> requestClose(
+        direction: Direction<Stream>,
+        lifecycleAuthorized: Boolean,
+    ): CloseRequest {
+        val claimed = synchronized(lock) {
+            if (!lifecycleAuthorized && sealed) {
+                return CloseRequest.RejectedAfterSeal
+            }
+            when (direction.closeState) {
+                CloseState.Open -> {
+                    if (direction.activeCalls == 0) {
+                        direction.closeState = CloseState.InProgress
+                        true
+                    } else {
+                        direction.closeState = CloseState.Deferred
+                        false
+                    }
+                }
+                CloseState.Succeeded ->
+                    return CloseRequest.SynchronouslyClosed
+                CloseState.Deferred,
+                CloseState.InProgress,
+                -> return CloseRequest.DeferredOrInProgress
+                CloseState.Failed ->
+                    return CloseRequest.Failed
+            }
+        }
+        return if (claimed) {
+            closeClaimed(direction)
+        } else {
+            CloseRequest.DeferredOrInProgress
+        }
+    }
+
+    private fun <Stream : AutoCloseable> release(
+        direction: Direction<Stream>,
+    ) {
+        val closeDeferred = synchronized(lock) {
+            direction.activeCalls -= 1
+            check(direction.activeCalls >= 0)
+            if (
+                direction.activeCalls == 0 &&
+                direction.closeState == CloseState.Deferred
+            ) {
+                direction.closeState = CloseState.InProgress
+                true
+            } else {
+                false
+            }
+        }
+        if (closeDeferred) {
+            closeClaimed(direction)
+        }
+    }
+
+    private fun <Stream : AutoCloseable> closeClaimed(
+        direction: Direction<Stream>,
+    ): CloseRequest {
+        val failure = try {
+            direction.raw.close()
+            null
+        } catch (caught: Throwable) {
+            restoreInterruptFrom(caught)
+            caught
+        }
+        synchronized(lock) {
+            direction.closeState =
+                if (failure == null) {
+                    CloseState.Succeeded
+                } else {
+                    CloseState.Failed
+                }
+        }
+        return if (failure == null) {
+            CloseRequest.SynchronouslyClosed
+        } else {
+            CloseRequest.Failed
+        }
+    }
+
+    inner class GuardedInputStream internal constructor(
+        private val direction: Direction<InputStream>,
+    ) : InputStream() {
+        override fun read(): Int =
+            call(direction) { raw -> raw.read() }
+
+        override fun read(
+            bytes: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int =
+            call(direction) { raw ->
+                raw.read(bytes, offset, length)
+            }
+
+        override fun close() {
+            when (
+                requestClose(
+                    direction = direction,
+                    lifecycleAuthorized = false,
+                )
+            ) {
+                CloseRequest.SynchronouslyClosed -> Unit
+                CloseRequest.RejectedAfterSeal ->
+                    throw IOException(CLOSED_MESSAGE)
+                CloseRequest.DeferredOrInProgress,
+                CloseRequest.Failed,
+                -> throw IOException(CLOSE_FAILURE_MESSAGE)
+            }
+        }
+
+        fun requestCloseForLifecycle(): Boolean =
+            requestClose(
+                direction = direction,
+                lifecycleAuthorized = true,
+            ) ==
+                CloseRequest.SynchronouslyClosed
+    }
+
+    inner class GuardedOutputStream internal constructor(
+        private val direction: Direction<OutputStream>,
+    ) : OutputStream() {
+        override fun write(value: Int) {
+            call(direction) { raw -> raw.write(value) }
+        }
+
+        override fun write(
+            bytes: ByteArray,
+            offset: Int,
+            length: Int,
+        ) {
+            call(direction) { raw ->
+                raw.write(bytes, offset, length)
+            }
+        }
+
+        override fun flush() {
+            call(direction) { raw -> raw.flush() }
+        }
+
+        override fun close() {
+            when (
+                requestClose(
+                    direction = direction,
+                    lifecycleAuthorized = false,
+                )
+            ) {
+                CloseRequest.SynchronouslyClosed -> Unit
+                CloseRequest.RejectedAfterSeal ->
+                    throw IOException(CLOSED_MESSAGE)
+                CloseRequest.DeferredOrInProgress,
+                CloseRequest.Failed,
+                -> throw IOException(CLOSE_FAILURE_MESSAGE)
+            }
+        }
+
+        fun requestCloseForLifecycle(): Boolean =
+            requestClose(
+                direction = direction,
+                lifecycleAuthorized = true,
+            ) ==
+                CloseRequest.SynchronouslyClosed
+    }
+
+    class Direction<Stream : AutoCloseable>(
+        val raw: Stream,
+        var activeCalls: Int = 0,
+        var closeState: CloseState = CloseState.Open,
+    )
+
+    enum class CloseState {
+        Open,
+        Deferred,
+        InProgress,
+        Succeeded,
+        Failed,
+    }
+
+    private enum class CloseRequest {
+        SynchronouslyClosed,
+        DeferredOrInProgress,
+        Failed,
+        RejectedAfterSeal,
+    }
+
+    private companion object {
+        const val CLOSED_MESSAGE =
+            "Dovecot operator process transport is closed"
+        const val OPERATION_FAILURE_MESSAGE =
+            "Dovecot operator process stream operation failed"
+        const val CLOSE_FAILURE_MESSAGE =
+            "Dovecot operator process stream close failed"
+    }
+}
+
 private class ManagedDovecotOperatorProcessTransport(
     private val process: Process,
 ) : DovecotOperatorTransport {
+    private val streamGate = ProcessStreamAdmissionGate()
     private val lifecycleLock = Any()
-    private var childStdin: OutputStream? = null
-    private var childStdout: InputStream? = null
+    private var childStdin:
+        ProcessStreamAdmissionGate.GuardedOutputStream? = null
+    private var childStdout:
+        ProcessStreamAdmissionGate.GuardedInputStream? = null
     private var terminationOutcome: TerminationOutcome? = null
     private val terminationSignalLock = Any()
     private var terminationSignal = TerminationSignal.Available
@@ -191,8 +425,8 @@ private class ManagedDovecotOperatorProcessTransport(
     private var terminal = false
 
     fun mapProcessStreams() {
-        childStdin = process.outputStream
-        childStdout = process.inputStream
+        childStdin = streamGate.guard(process.outputStream)
+        childStdout = streamGate.guard(process.inputStream)
     }
 
     override val input: InputStream
@@ -216,6 +450,7 @@ private class ManagedDovecotOperatorProcessTransport(
         }
 
     override fun abort() {
+        streamGate.seal()
         terminal = true
         var restoreInterrupt = false
         synchronized(terminationSignalLock) {
@@ -268,6 +503,7 @@ private class ManagedDovecotOperatorProcessTransport(
         mode: TerminationMode,
         failureMessage: String,
     ) {
+        streamGate.seal()
         val outcome = synchronized(lifecycleLock) {
             terminationOutcome ?: run {
                 terminal = true
@@ -376,15 +612,6 @@ private class ManagedDovecotOperatorProcessTransport(
                 false
             }
 
-        fun closeQuietly(stream: AutoCloseable?): Boolean =
-            try {
-                stream?.close()
-                true
-            } catch (failure: Throwable) {
-                rememberInterruption(failure)
-                false
-            }
-
         fun failedUnreapedAbortOutcome(): TerminationOutcome {
             childStdin = null
             childStdout = null
@@ -404,7 +631,7 @@ private class ManagedDovecotOperatorProcessTransport(
                 return failedUnreapedAbortOutcome()
             }
             val stdinClosed = try {
-                closeQuietly(childStdin)
+                childStdin?.requestCloseForLifecycle() ?: true
             } finally {
                 childStdin = null
             }
@@ -416,13 +643,16 @@ private class ManagedDovecotOperatorProcessTransport(
                 return failedUnreapedAbortOutcome()
             }
             val naturalExit =
-                if (acknowledgedAbortReaped == null) {
+                if (
+                    acknowledgedAbortReaped == null &&
+                    stdinClosed
+                ) {
                     awaitProcess(NATURAL_EXIT_WAIT_MILLIS)
                 } else {
                     false
                 }
             val stdoutClosed = try {
-                closeQuietly(childStdout)
+                childStdout?.requestCloseForLifecycle() ?: true
             } finally {
                 childStdout = null
             }

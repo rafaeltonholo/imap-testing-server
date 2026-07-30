@@ -202,18 +202,21 @@ git commit -m "test: define fixed Dovecot operator process launch"
 - Modify:
   `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotBoundedOperationWorkersTest.kt`
 
-- [ ] Add fake-process tests for stream mapping, exact `start()` call count,
-  immediate `registerAllocated`, redacted start failure, and
-  registration-failure cleanup/reap. Run only
-  `DovecotOperatorProcessTransportTest` and preserve RED.
+- [ ] Add fake-process tests for stable guarded stream mapping, exact `start()`
+  call count, immediate `registerAllocated`, redacted start failure, and
+  registration-failure cleanup/reap. Prove that raw process streams never
+  escape and that guarded read, bulk write, and flush delegate normally. Run
+  only `DovecotOperatorProcessTransportTest` and preserve RED.
 
 - [ ] Implement process start/wrap/register and the bounded pre-registration
   failure cleanup. Re-run that class and require the new cases GREEN.
 
-- [ ] Add graceful natural-close and registration-cleanup tests: stdin closes
-  first, stdout stays open during the at-most-500-ms wait, stdout then closes,
-  exit zero succeeds only for normal close, and nonzero normal exit fails. Run
-  the class and preserve RED.
+- [ ] Add graceful natural-close and registration-cleanup tests: an idle,
+  synchronously successful stdin close happens first, stdout stays open during
+  the at-most-500-ms wait, stdout then closes, exit zero succeeds only for
+  normal close, and nonzero normal exit fails. If stdin close is deferred,
+  in-progress, or failed, skip that 500-ms EOF wait and enter the bounded
+  destroy/force path. Run the class and preserve RED.
 
 - [ ] Implement only the natural-close branch and re-run those cases GREEN.
 
@@ -234,19 +237,18 @@ git commit -m "test: define fixed Dovecot operator process launch"
 - [ ] Implement the bounded destroy/force/reap branch and re-run those cases
   GREEN.
 
-- [ ] Add state tests for concurrent idempotent close/abort, abort preemption of
-  a protocol writer holding the process-stdin monitor, close-first natural-zero
-  completion waiting for an in-flight abort handshake acknowledgement, a
-  racing abort making a normal outcome termination-required, cached
-  registration-cleanup failure, and permanent non-reusability after any failed
-  close. Cover both asynchronous `destroy()` return and `destroy()` throwing
-  `Error` while close is blocked on the child-stdin monitor; in both cases the
-  abort winner must complete its force/final-reap handshake before that monitor
-  is manually released. Also gate an unreaped final wait while a close owns the
-  lifecycle lock: both callers must return fixed failures, cache the unreaped
-  outcome, clear both stream references, and make zero stream-close attempts
-  before the writer is released. Repeated callers must not rerun stream or
-  process lifecycle work. Preserve RED.
+- [ ] Add state tests for concurrent idempotent close/abort, a protocol writer
+  already admitted to raw stdin, close-first natural-zero completion waiting
+  for an in-flight abort handshake acknowledgement, a racing abort making a
+  normal outcome termination-required, cached registration-cleanup failure,
+  and permanent non-reusability after any failed close. Cover both asynchronous
+  `destroy()` return and `destroy()` throwing `Error`: the abort winner must
+  complete its force/final-reap handshake while the admitted writer remains
+  blocked, and raw stdin close must be deferred until that writer exits. Also
+  gate an unreaped final wait: both callers must return fixed failures, cache
+  the unreaped outcome, clear both stream references, and make zero new
+  stream-close requests before the writer is released. Repeated callers must
+  not rerun stream or process lifecycle work. Preserve RED.
 
 - [ ] Implement the synchronized idempotent terminal outcome plus the one-shot
   abort signal monitor. Hold that monitor through the winning bounded
@@ -257,9 +259,32 @@ git commit -m "test: define fixed Dovecot operator process launch"
   above; otherwise clear each terminal stream reference after its sole close
   attempt. Re-run those cases GREEN.
 
-- [ ] Add tests for caller-interrupt preservation, no new worker/thread,
-  failed stream-close acceptance, discarded stderr, and fixed/redacted
-  `toString()` and exceptions. Preserve RED.
+- [ ] Add one shared stream-admission gate and stable guarded stdin/stdout
+  wrappers. Seal both directions atomically at close, abort, and registration
+  cleanup entry. Admit read/write/flush under the gate, count the raw call,
+  release the gate before raw I/O, and let the last admitted call own one
+  deferred best-effort raw close outside every gate/signal lock. A lifecycle
+  close request succeeds at its terminal snapshot only when raw close completed
+  synchronously and successfully; deferred, in-progress, and failed close
+  states remain terminal failure even if raw close later succeeds. Do not add a
+  drain wait, thread, executor, or worker.
+
+- [ ] Keep public wrapper `close()` separate from the lifecycle-authorized
+  close request. After the shared gate is sealed, a stale wrapper close returns
+  a fixed redacted `IOException` and cannot request raw close. Before sealing,
+  public close may return only after synchronous success; deferred,
+  in-progress, or failed close returns a fixed redacted `IOException`.
+
+- [ ] Add tests for caller-interrupt preservation, stale wrapper rejection,
+  exactly-once deferred close, no new worker/thread, failed stream-close
+  acceptance, discarded stderr, and fixed/redacted `toString()` and
+  exceptions. Preserve RED.
+
+- [ ] Document the exact boundedness claim: process waits total at most one
+  second on the idle normal path and at most 500 ms in the abort handshake, but
+  an idle raw JDK process-stream `close()` has no enforceable wall-clock bound.
+  Do not claim otherwise without adding a separate actor, which this transport
+  intentionally prohibits.
 
 - [ ] Implement interrupt/redaction details and re-run
   `DovecotOperatorProcessTransportTest` GREEN.

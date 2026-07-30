@@ -44,11 +44,15 @@ class DovecotOperatorProcessTransportTest {
                 events += "register"
                 registered = allocated
             }
+            val guardedInput = transport.input
+            val guardedOutput = transport.outputStream
 
             assertEquals(1, starts)
             assertSame(transport, registered)
-            assertSame(process.childStdout, transport.input)
-            assertSame(process.childStdin, transport.outputStream)
+            assertFalse(process.childStdout === guardedInput)
+            assertFalse(process.childStdin === guardedOutput)
+            assertSame(guardedInput, transport.input)
+            assertSame(guardedOutput, transport.outputStream)
             assertEquals(1, process.stdoutRequests)
             assertEquals(1, process.stdinRequests)
             assertEquals(
@@ -79,16 +83,113 @@ class DovecotOperatorProcessTransportTest {
                 registrationCalls += 1
                 assertEquals(0, process.childStdout.readCalls)
                 assertEquals(0, process.childStdin.writeCalls)
-                assertSame(process.childStdout, allocated.input)
-                assertSame(process.childStdin, allocated.outputStream)
+                assertFalse(process.childStdout === allocated.input)
+                assertFalse(process.childStdin === allocated.outputStream)
+                assertSame(allocated.input, allocated.input)
+                assertSame(
+                    allocated.outputStream,
+                    allocated.outputStream,
+                )
             }
 
             assertEquals(1, registrationCalls)
-            assertSame(process.childStdout, transport.input)
-            assertSame(process.childStdin, transport.outputStream)
+            assertSame(transport.input, transport.input)
+            assertSame(transport.outputStream, transport.outputStream)
             assertEquals(0, process.timedWaits.size)
             assertEquals(0, process.destroyCalls)
             assertEquals(0, process.destroyForciblyCalls)
+        }
+
+    @Test
+    fun guardedProcessStreamsDelegateReadBulkWriteAndFlush() =
+        withLaunchFixture { fixture ->
+            val process = ControlledTestProcess(
+                events = mutableListOf(),
+                waitResults = listOf(true),
+                stdoutContents = byteArrayOf(65, 66),
+            )
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val guardedInput = transport.input
+            val guardedOutput = transport.outputStream
+            val received = ByteArray(2)
+
+            assertEquals(
+                2,
+                guardedInput.read(received, 0, received.size),
+            )
+            guardedOutput.write(byteArrayOf(7, 8, 9), 1, 2)
+            guardedOutput.flush()
+
+            assertTrue(received.contentEquals(byteArrayOf(65, 66)))
+            assertTrue(
+                process.childStdin
+                    .toByteArray()
+                    .contentEquals(byteArrayOf(8, 9)),
+            )
+            assertEquals(1, process.childStdout.readCalls)
+            assertEquals(1, process.childStdin.writeCalls)
+            assertEquals(1, process.childStdin.flushCalls)
+            assertSame(guardedInput, transport.input)
+            assertSame(guardedOutput, transport.outputStream)
+
+            transport.close()
+        }
+
+    @Test
+    fun guardedProcessStreamFailuresAreFixedRedactedAndRestoreInterrupt() =
+        withLaunchFixture { fixture ->
+            val writeSecret =
+                "raw stdin write leaked request-password"
+            val readSecret =
+                "raw stdout read leaked request-user"
+            val process = ControlledTestProcess(
+                events = mutableListOf(),
+                waitResults = listOf(true),
+                stdinOperationFailure =
+                    IOException(writeSecret),
+                stdoutOperationFailure =
+                    InterruptedException(readSecret),
+            )
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+
+            val writeFailure = assertFailsWith<IOException> {
+                transport.outputStream.flush()
+            }
+            assertEquals(
+                "Dovecot operator process stream operation failed",
+                writeFailure.message,
+            )
+            assertEquals(null, writeFailure.cause)
+            assertTrue(writeFailure.suppressed.isEmpty())
+            assertFalse(writeFailure.toString().contains(writeSecret))
+
+            try {
+                val readFailure = assertFailsWith<IOException> {
+                    transport.input.read()
+                }
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals(
+                    "Dovecot operator process stream operation failed",
+                    readFailure.message,
+                )
+                assertEquals(null, readFailure.cause)
+                assertTrue(readFailure.suppressed.isEmpty())
+                assertFalse(readFailure.toString().contains(readSecret))
+            } finally {
+                Thread.interrupted()
+            }
+
+            transport.abort()
         }
 
     @Test
@@ -631,7 +732,7 @@ class DovecotOperatorProcessTransportTest {
         }
 
     @Test
-    fun abortPreemptsCloseBlockedByAProtocolWriterHoldingStdinMonitor() =
+    fun closeDefersRawStdinHeldByAnAdmittedProtocolWriter() =
         withLaunchFixture { fixture ->
             val events =
                 Collections.synchronizedList(mutableListOf<String>())
@@ -696,8 +797,11 @@ class DovecotOperatorProcessTransportTest {
                     ),
                 )
                 assertTrue(
-                    closeCaller.awaitState(Thread.State.BLOCKED),
-                    "Normal close did not block on child stdin",
+                    process.destroyReached.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Close did not bypass the admitted raw stdin write",
                 )
                 abortCaller.start()
                 assertTrue(
@@ -707,13 +811,6 @@ class DovecotOperatorProcessTransportTest {
                     ),
                 )
 
-                assertTrue(
-                    process.destroyReached.await(
-                        TEST_SAFETY_TIMEOUT_SECONDS,
-                        TimeUnit.SECONDS,
-                    ),
-                    "Abort did not preempt the blocked stdin close",
-                )
                 writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
                 closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
                 abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
@@ -723,7 +820,7 @@ class DovecotOperatorProcessTransportTest {
                 assertFalse(abortCaller.isAlive)
                 assertEquals(null, writerFailure.get())
                 assertTrue(closeFailure.get() is IOException)
-                assertEquals(null, abortFailure.get())
+                assertTrue(abortFailure.get() is IOException)
                 assertEquals(1, process.destroyCalls)
                 assertEquals(0, process.destroyForciblyCalls)
                 assertTrue(process.reaped)
@@ -741,17 +838,17 @@ class DovecotOperatorProcessTransportTest {
         }
 
     @Test
-    fun abortReapsBeforeBlockedStreamCleanupWhenDestroyReturnsAsynchronously() =
-        assertAbortReapsBeforeBlockedStreamCleanup(
+    fun abortReapsBeforeDeferredStreamCleanupWhenDestroyReturnsAsynchronously() =
+        assertAbortReapsBeforeDeferredStreamCleanup(
             destroyFailure = null,
             secret = null,
         )
 
     @Test
-    fun abortReapsBeforeBlockedStreamCleanupWhenDestroyThrowsSecretError() {
+    fun abortReapsBeforeDeferredStreamCleanupWhenDestroyThrowsSecretError() {
         val secret = "destroy request-password async failure"
 
-        assertAbortReapsBeforeBlockedStreamCleanup(
+        assertAbortReapsBeforeDeferredStreamCleanup(
             destroyFailure = AssertionError(secret),
             secret = secret,
         )
@@ -992,7 +1089,542 @@ class DovecotOperatorProcessTransportTest {
             assertEquals(null, writerFailure.get())
         }
 
-    private fun assertAbortReapsBeforeBlockedStreamCleanup(
+    @Test
+    fun closeFirstBlockedStdinWriteFailsBeforeDeferredCloseAfterUnreapedAbort() =
+        withLaunchFixture { fixture ->
+            val events =
+                Collections.synchronizedList(mutableListOf<String>())
+            val rawStdin =
+                AdmissionBlockingOutputStream("child-stdin", events)
+            val rawStdout =
+                RecordingInputStream("child-stdout", events)
+            val process = GuardedAdmissionTestProcess(
+                events = events,
+                childStdin = rawStdin,
+                childStdout = rawStdout,
+                waitMode =
+                    GuardedAdmissionWaitMode.GatedUnreaped,
+            )
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val staleOutput = transport.outputStream
+            events.clear()
+            val writerFailure = AtomicReference<Throwable?>()
+            val closeFailure = AtomicReference<Throwable?>()
+            val abortFailure = AtomicReference<Throwable?>()
+            val closeFinished = CountDownLatch(1)
+            val abortFinished = CountDownLatch(1)
+            val writer = Thread(
+                {
+                    try {
+                        staleOutput.write(1)
+                    } catch (failure: Throwable) {
+                        writerFailure.set(failure)
+                    }
+                },
+                "dovecot-guarded-stdin-writer",
+            )
+            val closeCaller = Thread(
+                {
+                    try {
+                        transport.close()
+                    } catch (failure: Throwable) {
+                        closeFailure.set(failure)
+                    } finally {
+                        closeFinished.countDown()
+                    }
+                },
+                "dovecot-guarded-stdin-close",
+            )
+            val abortCaller = Thread(
+                {
+                    try {
+                        transport.abort()
+                    } catch (failure: Throwable) {
+                        abortFailure.set(failure)
+                    } finally {
+                        abortFinished.countDown()
+                    }
+                },
+                "dovecot-guarded-stdin-abort",
+            )
+
+            try {
+                writer.start()
+                assertTrue(
+                    rawStdin.operationEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                )
+                closeCaller.start()
+                assertTrue(
+                    awaitEither(
+                        process.firstProcessWaitEntered,
+                        rawStdin.closeAttempted,
+                    ),
+                    "Close neither deferred stdin nor attempted raw close",
+                )
+                assertEquals(
+                    1L,
+                    rawStdin.closeAttempted.count,
+                    "Close attempted raw stdin while write was admitted",
+                )
+                assertEquals(0L, process.firstProcessWaitEntered.count)
+                assertEquals(0, rawStdin.closeAttempts)
+
+                assertTrue(
+                    process.finalProcessWaitEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Close did not enter its final reap attempt",
+                )
+                abortCaller.start()
+                val staleFailure = assertFailsWith<IOException> {
+                    staleOutput.flush()
+                }
+                assertEquals(
+                    "Dovecot operator process transport is closed",
+                    staleFailure.message,
+                )
+                assertEquals(null, staleFailure.cause)
+                assertTrue(staleFailure.suppressed.isEmpty())
+
+                process.releaseFinalWait()
+                assertTrue(
+                    closeFinished.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Close did not fail before writer release",
+                )
+                assertTrue(
+                    abortFinished.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Abort did not fail before writer release",
+                )
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+
+                assertFalse(closeCaller.isAlive)
+                assertFalse(abortCaller.isAlive)
+                assertTrue(writer.isAlive)
+                val rejectedClose = closeFailure.get()
+                assertTrue(rejectedClose is IOException)
+                assertEquals(
+                    "Dovecot operator process transport close failed",
+                    rejectedClose.message,
+                )
+                assertEquals(null, rejectedClose.cause)
+                assertTrue(rejectedClose.suppressed.isEmpty())
+                val rejectedAbort = abortFailure.get()
+                assertTrue(rejectedAbort is IOException)
+                assertEquals(
+                    "Dovecot operator process transport abort failed",
+                    rejectedAbort.message,
+                )
+                assertEquals(null, rejectedAbort.cause)
+                assertTrue(rejectedAbort.suppressed.isEmpty())
+                assertEquals(0, rawStdin.closeAttempts)
+                assertEquals(1, rawStdout.closeCalls)
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertEquals(
+                    listOf(
+                        250L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                    ),
+                    process.timedWaits,
+                )
+                val outcome =
+                    checkNotNull(transport.terminationOutcomeReference())
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("reaped"),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("naturalExit"),
+                )
+                assertEquals(
+                    true,
+                    outcome.privateFieldValue("terminationRequired"),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("streamsClosed"),
+                )
+                assertEquals(
+                    null,
+                    outcome.privateFieldValue("exitCode"),
+                )
+
+                val terminalEvents = events.toList()
+                repeat(2) {
+                    assertFailsWith<IOException> {
+                        transport.close()
+                    }
+                    assertFailsWith<IOException> {
+                        transport.abort()
+                    }
+                }
+                assertEquals(terminalEvents, events)
+                assertEquals(0, rawStdin.closeAttempts)
+
+                rawStdin.releaseOperation()
+                writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                assertFalse(writer.isAlive)
+                assertEquals(null, writerFailure.get())
+                assertEquals(1, rawStdin.closeAttempts)
+                assertSame(
+                    outcome,
+                    transport.terminationOutcomeReference(),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("streamsClosed"),
+                )
+                val deferredEvents = events.toList()
+                repeat(2) {
+                    assertFailsWith<IOException> {
+                        transport.close()
+                    }
+                    assertFailsWith<IOException> {
+                        transport.abort()
+                    }
+                }
+                assertEquals(deferredEvents, events)
+                assertEquals(1, rawStdin.closeAttempts)
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertEquals(2, process.timedWaits.size)
+            } finally {
+                process.releaseAll()
+                rawStdin.releaseOperation()
+                writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            }
+        }
+
+    @Test
+    fun blockedStdoutReadFailsCloseBeforeItsDeferredRawClose() =
+        withLaunchFixture { fixture ->
+            val events =
+                Collections.synchronizedList(mutableListOf<String>())
+            val rawStdin =
+                RecordingOutputStream("child-stdin", events)
+            val rawStdout =
+                AdmissionBlockingInputStream("child-stdout", events)
+            val process = GuardedAdmissionTestProcess(
+                events = events,
+                childStdin = rawStdin,
+                childStdout = rawStdout,
+                waitMode =
+                    GuardedAdmissionWaitMode.NaturalZero,
+            )
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val staleInput = transport.input
+            events.clear()
+            val readResult = AtomicReference<Int?>()
+            val readerFailure = AtomicReference<Throwable?>()
+            val closeFailure = AtomicReference<Throwable?>()
+            val closeFinished = CountDownLatch(1)
+            val reader = Thread(
+                {
+                    try {
+                        readResult.set(staleInput.read())
+                    } catch (failure: Throwable) {
+                        readerFailure.set(failure)
+                    }
+                },
+                "dovecot-guarded-stdout-reader",
+            )
+            val closeCaller = Thread(
+                {
+                    try {
+                        transport.close()
+                    } catch (failure: Throwable) {
+                        closeFailure.set(failure)
+                    } finally {
+                        closeFinished.countDown()
+                    }
+                },
+                "dovecot-guarded-stdout-close",
+            )
+
+            try {
+                reader.start()
+                assertTrue(
+                    rawStdout.operationEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                )
+                closeCaller.start()
+                assertTrue(
+                    awaitEither(
+                        closeFinished,
+                        rawStdout.closeAttempted,
+                    ),
+                    "Close neither finished nor attempted raw stdout close",
+                )
+                assertEquals(
+                    1L,
+                    rawStdout.closeAttempted.count,
+                    "Close attempted raw stdout while read was admitted",
+                )
+                assertEquals(
+                    0L,
+                    closeFinished.count,
+                    "Close did not fail before reader release",
+                )
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+
+                val rejectedClose = closeFailure.get()
+                assertTrue(rejectedClose is IOException)
+                assertEquals(
+                    "Dovecot operator process transport close failed",
+                    rejectedClose.message,
+                )
+                assertEquals(null, rejectedClose.cause)
+                assertTrue(rejectedClose.suppressed.isEmpty())
+                val staleFailure = assertFailsWith<IOException> {
+                    staleInput.read(ByteArray(0), 0, 0)
+                }
+                assertEquals(
+                    "Dovecot operator process transport is closed",
+                    staleFailure.message,
+                )
+                assertEquals(null, staleFailure.cause)
+                assertTrue(staleFailure.suppressed.isEmpty())
+                assertTrue(reader.isAlive)
+                assertEquals(1, rawStdin.closeCalls)
+                assertEquals(0, rawStdout.closeAttempts)
+                assertEquals(1, process.timedWaits.size)
+                assertEquals(0, process.destroyCalls)
+                assertEquals(0, process.destroyForciblyCalls)
+
+                val outcome =
+                    checkNotNull(transport.terminationOutcomeReference())
+                assertEquals(
+                    true,
+                    outcome.privateFieldValue("reaped"),
+                )
+                assertEquals(
+                    true,
+                    outcome.privateFieldValue("naturalExit"),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("terminationRequired"),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("streamsClosed"),
+                )
+                assertEquals(
+                    0,
+                    outcome.privateFieldValue("exitCode"),
+                )
+
+                rawStdout.releaseOperation()
+                reader.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                assertFalse(reader.isAlive)
+                assertEquals(null, readerFailure.get())
+                assertEquals(65, readResult.get())
+                assertEquals(1, rawStdout.closeAttempts)
+                assertSame(
+                    outcome,
+                    transport.terminationOutcomeReference(),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("streamsClosed"),
+                )
+                val deferredEvents = events.toList()
+                repeat(2) {
+                    assertFailsWith<IOException> {
+                        transport.close()
+                    }
+                }
+                assertEquals(deferredEvents, events)
+                assertEquals(1, rawStdout.closeAttempts)
+                assertEquals(1, process.timedWaits.size)
+            } finally {
+                rawStdout.releaseOperation()
+                reader.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            }
+        }
+
+    @Test
+    fun staleWrapperCloseAfterAbortSealCannotRequestRawClose() =
+        withLaunchFixture { fixture ->
+            val events =
+                Collections.synchronizedList(mutableListOf<String>())
+            val process = SealedAbortLifecycleTestProcess(events)
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val staleInput = transport.input
+            val staleOutput = transport.outputStream
+            events.clear()
+            val abortFailure = AtomicReference<Throwable?>()
+            val abortCaller = Thread(
+                {
+                    try {
+                        transport.abort()
+                    } catch (failure: Throwable) {
+                        abortFailure.set(failure)
+                    }
+                },
+                "dovecot-sealed-wrapper-abort",
+            )
+
+            try {
+                abortCaller.start()
+                assertTrue(
+                    process.waitEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Abort did not seal before its bounded wait",
+                )
+
+                listOf<AutoCloseable>(
+                    staleOutput,
+                    staleInput,
+                ).forEach { staleStream ->
+                    val failure = assertFailsWith<IOException> {
+                        staleStream.close()
+                    }
+                    assertEquals(
+                        "Dovecot operator process transport is closed",
+                        failure.message,
+                    )
+                    assertEquals(null, failure.cause)
+                    assertTrue(failure.suppressed.isEmpty())
+                }
+                assertEquals(0, process.childStdin.closeCalls)
+                assertEquals(0, process.childStdout.closeCalls)
+
+                process.releaseWait()
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+
+                assertFalse(abortCaller.isAlive)
+                assertEquals(null, abortFailure.get())
+                assertEquals(1, process.childStdin.closeCalls)
+                assertEquals(1, process.childStdout.closeCalls)
+                assertEquals(
+                    listOf(
+                        "destroy",
+                        "wait:250:MILLISECONDS",
+                        "child-stdin.close",
+                        "child-stdout.close",
+                    ),
+                    events,
+                )
+            } finally {
+                process.releaseWait()
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            }
+        }
+
+    @Test
+    fun wrapperCloseWithAdmittedWriteFailsThenClosesExactlyOnce() =
+        withLaunchFixture { fixture ->
+            val events =
+                Collections.synchronizedList(mutableListOf<String>())
+            val rawStdin =
+                AdmissionBlockingOutputStream("child-stdin", events)
+            val process = GuardedAdmissionTestProcess(
+                events = events,
+                childStdin = rawStdin,
+                childStdout =
+                    RecordingInputStream("child-stdout", events),
+                waitMode =
+                    GuardedAdmissionWaitMode.NaturalZero,
+            )
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val output = transport.outputStream
+            val writerFailure = AtomicReference<Throwable?>()
+            val writer = Thread(
+                {
+                    try {
+                        output.write(1)
+                    } catch (failure: Throwable) {
+                        writerFailure.set(failure)
+                    }
+                },
+                "dovecot-public-close-admitted-writer",
+            )
+
+            try {
+                writer.start()
+                assertTrue(
+                    rawStdin.operationEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                )
+
+                repeat(2) {
+                    val failure = assertFailsWith<IOException> {
+                        output.close()
+                    }
+                    assertEquals(
+                        "Dovecot operator process stream close failed",
+                        failure.message,
+                    )
+                    assertEquals(null, failure.cause)
+                    assertTrue(failure.suppressed.isEmpty())
+                }
+                assertEquals(0, rawStdin.closeAttempts)
+
+                rawStdin.releaseOperation()
+                writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
+
+                assertFalse(writer.isAlive)
+                assertEquals(null, writerFailure.get())
+                assertEquals(1, rawStdin.closeAttempts)
+                val staleFailure = assertFailsWith<IOException> {
+                    output.flush()
+                }
+                assertEquals(
+                    "Dovecot operator process transport is closed",
+                    staleFailure.message,
+                )
+
+                transport.close()
+                assertEquals(1, rawStdin.closeAttempts)
+            } finally {
+                rawStdin.releaseOperation()
+                writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            }
+        }
+
+    private fun assertAbortReapsBeforeDeferredStreamCleanup(
         destroyFailure: Throwable?,
         secret: String?,
     ) = withLaunchFixture { fixture ->
@@ -1011,7 +1643,6 @@ class DovecotOperatorProcessTransportTest {
         val writerFailure = AtomicReference<Throwable?>()
         val closeFailure = AtomicReference<Throwable?>()
         val abortFailure = AtomicReference<Throwable?>()
-        val closeStarted = CountDownLatch(1)
         val writer = Thread(
             {
                 try {
@@ -1024,7 +1655,6 @@ class DovecotOperatorProcessTransportTest {
         )
         val closeCaller = Thread(
             {
-                closeStarted.countDown()
                 try {
                     transport.close()
                 } catch (failure: Throwable) {
@@ -1052,17 +1682,6 @@ class DovecotOperatorProcessTransportTest {
                     TimeUnit.SECONDS,
                 ),
             )
-            closeCaller.start()
-            assertTrue(
-                closeStarted.await(
-                    TEST_SAFETY_TIMEOUT_SECONDS,
-                    TimeUnit.SECONDS,
-                ),
-            )
-            assertTrue(
-                closeCaller.awaitState(Thread.State.BLOCKED),
-                "Normal close did not block on child stdin",
-            )
             abortCaller.start()
 
             assertTrue(
@@ -1070,8 +1689,10 @@ class DovecotOperatorProcessTransportTest {
                     TEST_SAFETY_TIMEOUT_SECONDS,
                     TimeUnit.SECONDS,
                 ),
-                "Abort did not reap before blocked stream cleanup",
+                "Abort did not reap before deferred stream cleanup",
             )
+            abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            assertFalse(abortCaller.isAlive)
             assertEquals(1, process.destroyCalls)
             assertEquals(1, process.destroyForciblyCalls)
             assertEquals(
@@ -1081,11 +1702,13 @@ class DovecotOperatorProcessTransportTest {
                 ),
                 process.timedWaits,
             )
-            assertTrue(closeCaller.isAlive)
-            assertTrue(
-                closeCaller.awaitState(Thread.State.BLOCKED),
-                "Normal close escaped the held child-stdin monitor",
-            )
+            assertTrue(writer.isAlive)
+            assertEquals(0, process.childStdin.closeCalls)
+            assertEquals(1, process.childStdout.closeCalls)
+
+            closeCaller.start()
+            closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            assertFalse(closeCaller.isAlive)
         } finally {
             process.releaseWriter()
             writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
@@ -1105,9 +1728,17 @@ class DovecotOperatorProcessTransportTest {
         )
         assertEquals(null, rejectedClose.cause)
         assertTrue(rejectedClose.suppressed.isEmpty())
-        assertEquals(null, abortFailure.get())
+        val rejectedAbort = abortFailure.get()
+        assertTrue(rejectedAbort is IOException)
+        assertEquals(
+            "Dovecot operator process transport abort failed",
+            rejectedAbort.message,
+        )
+        assertEquals(null, rejectedAbort.cause)
+        assertTrue(rejectedAbort.suppressed.isEmpty())
         secret?.let { redactedSecret ->
             assertFalse(rejectedClose.toString().contains(redactedSecret))
+            assertFalse(rejectedAbort.toString().contains(redactedSecret))
             assertFalse(transport.toString().contains(redactedSecret))
         }
         assertTrue(process.reaped)
@@ -1120,8 +1751,8 @@ class DovecotOperatorProcessTransportTest {
                 "wait:250:MILLISECONDS",
                 "destroyForcibly",
                 "wait:250:MILLISECONDS",
-                "child-stdin.close",
                 "child-stdout.close",
+                "child-stdin.close",
             ),
             events.filterNot { event -> event.startsWith("writer.") },
         )
@@ -1149,7 +1780,13 @@ class DovecotOperatorProcessTransportTest {
                 "Dovecot operator process transport close failed",
                 repeatedClose.message,
             )
-            transport.abort()
+            val repeatedAbort = assertFailsWith<IOException> {
+                transport.abort()
+            }
+            assertEquals(
+                "Dovecot operator process transport abort failed",
+                repeatedAbort.message,
+            )
         }
         assertEquals(completedLifecycle, events)
         assertEquals(1, process.destroyCalls)
@@ -1894,7 +2531,6 @@ class DovecotOperatorProcessTransportTest {
                     "child-stdout.acquire",
                     "register",
                     "child-stdin.close",
-                    "wait:500:MILLISECONDS",
                     "child-stdout.close",
                     "destroy",
                     "wait:250:MILLISECONDS",
@@ -1907,7 +2543,6 @@ class DovecotOperatorProcessTransportTest {
             assertEquals(1, process.childStdout.closeCalls)
             assertEquals(
                 listOf(
-                    500L to TimeUnit.MILLISECONDS,
                     250L to TimeUnit.MILLISECONDS,
                     250L to TimeUnit.MILLISECONDS,
                 ),
@@ -1952,7 +2587,7 @@ class DovecotOperatorProcessTransportTest {
             }
 
             assertEquals(lifecycleEvents, events)
-            assertEquals(3, process.timedWaits.size)
+            assertEquals(2, process.timedWaits.size)
             assertEquals(1, process.destroyCalls)
             assertEquals(1, process.destroyForciblyCalls)
             assertEquals(1, process.childStdin.closeCalls)
@@ -2004,8 +2639,9 @@ class DovecotOperatorProcessTransportTest {
                     "child-stdout.acquire",
                     "register",
                     "child-stdin.close",
-                    "wait:500:MILLISECONDS",
                     "child-stdout.close",
+                    "destroy",
+                    "wait:250:MILLISECONDS",
                 ),
                 events,
             )
@@ -2044,7 +2680,11 @@ class DovecotOperatorProcessTransportTest {
 
             assertEquals(lifecycleEvents, events)
             assertEquals(1, process.timedWaits.size)
-            assertEquals(0, process.destroyCalls)
+            assertEquals(
+                listOf(250L to TimeUnit.MILLISECONDS),
+                process.timedWaits,
+            )
+            assertEquals(1, process.destroyCalls)
             assertEquals(0, process.destroyForciblyCalls)
             assertEquals(1, process.childStdin.closeCalls)
             assertEquals(1, process.childStdout.closeCalls)
@@ -2648,23 +3288,29 @@ private class ControlledTestProcess(
     private val honorCallerInterrupt: Boolean = false,
     private val waitFailures: Map<Int, Throwable> = emptyMap(),
     private val stdoutAcquisitionFailure: Throwable? = null,
+    stdinOperationFailure: Throwable? = null,
+    stdoutOperationFailure: Throwable? = null,
     stdinCloseFailure: Throwable? = null,
     stdoutCloseFailure: Throwable? = null,
     private val destroyFailure: Throwable? = null,
     private val destroyForciblyFailure: Throwable? = null,
     private val exitValueFailure: Throwable? = null,
+    stdoutContents: ByteArray = ByteArray(0),
     stderrContents: ByteArray = ByteArray(0),
 ) : Process() {
     val childStdin =
         RecordingOutputStream(
             label = "child-stdin",
             events = events,
+            operationFailure = stdinOperationFailure,
             closeFailure = stdinCloseFailure,
         )
     val childStdout =
         RecordingInputStream(
             label = "child-stdout",
             events = events,
+            contents = stdoutContents,
+            operationFailure = stdoutOperationFailure,
             closeFailure = stdoutCloseFailure,
         )
     private val childStderr =
@@ -2772,6 +3418,7 @@ private class RecordingInputStream(
     private val label: String,
     private val events: MutableList<String>,
     contents: ByteArray = ByteArray(0),
+    private val operationFailure: Throwable? = null,
     private val closeFailure: Throwable? = null,
 ) : ByteArrayInputStream(contents) {
     var readCalls = 0
@@ -2781,6 +3428,7 @@ private class RecordingInputStream(
 
     override fun read(): Int {
         readCalls += 1
+        throwInjectedFailure(operationFailure)
         return super.read()
     }
 
@@ -2790,6 +3438,7 @@ private class RecordingInputStream(
         length: Int,
     ): Int {
         readCalls += 1
+        throwInjectedFailure(operationFailure)
         return super.read(bytes, offset, length)
     }
 
@@ -3094,6 +3743,289 @@ private class AsyncDestroyBlockingPipeTestProcess(
     }
 }
 
+private enum class GuardedAdmissionWaitMode {
+    NaturalZero,
+    GatedUnreaped,
+}
+
+private class SealedAbortLifecycleTestProcess(
+    private val events: MutableList<String>,
+) : Process() {
+    private val waitRelease = CountDownLatch(1)
+    val waitEntered = CountDownLatch(1)
+    val childStdin =
+        RecordingOutputStream("child-stdin", events)
+    val childStdout =
+        RecordingInputStream("child-stdout", events)
+
+    override fun getOutputStream(): OutputStream {
+        events += "child-stdin.acquire"
+        return childStdin
+    }
+
+    override fun getInputStream(): InputStream {
+        events += "child-stdout.acquire"
+        return childStdout
+    }
+
+    override fun getErrorStream(): InputStream =
+        error("Child stderr must never be acquired")
+
+    override fun waitFor(): Int =
+        error("Unbounded process wait is forbidden")
+
+    override fun waitFor(
+        timeout: Long,
+        unit: TimeUnit,
+    ): Boolean {
+        check(timeout == 250L && unit == TimeUnit.MILLISECONDS)
+        events += "wait:$timeout:${unit.name}"
+        waitEntered.countDown()
+        check(
+            waitRelease.await(
+                TEST_SAFETY_TIMEOUT_SECONDS,
+                TimeUnit.SECONDS,
+            ),
+        ) {
+            "Abort wait was not released"
+        }
+        return true
+    }
+
+    override fun exitValue(): Int =
+        error("Abort must not read the process exit code")
+
+    override fun destroy() {
+        events += "destroy"
+    }
+
+    override fun destroyForcibly(): Process =
+        error("Reaped abort must not force the process")
+
+    fun releaseWait() {
+        waitRelease.countDown()
+    }
+}
+
+private class GuardedAdmissionTestProcess(
+    private val events: MutableList<String>,
+    val childStdin: OutputStream,
+    val childStdout: InputStream,
+    private val waitMode: GuardedAdmissionWaitMode,
+) : Process() {
+    private val childStderr =
+        RecordingInputStream("child-stderr", events)
+    private val finalWaitRelease = CountDownLatch(1)
+    private val waitStateLock = Any()
+    private var abortWaitCalls = 0
+    val firstProcessWaitEntered = CountDownLatch(1)
+    val finalProcessWaitEntered = CountDownLatch(1)
+    val timedWaits =
+        Collections.synchronizedList(
+            mutableListOf<Pair<Long, TimeUnit>>(),
+        )
+
+    @Volatile
+    var reaped = false
+        private set
+
+    var destroyCalls = 0
+        private set
+    var destroyForciblyCalls = 0
+        private set
+
+    override fun getOutputStream(): OutputStream {
+        events += "child-stdin.acquire"
+        return childStdin
+    }
+
+    override fun getInputStream(): InputStream {
+        events += "child-stdout.acquire"
+        return childStdout
+    }
+
+    override fun getErrorStream(): InputStream {
+        events += "child-stderr.acquire"
+        return childStderr
+    }
+
+    override fun waitFor(): Int =
+        error("Unbounded process wait is forbidden")
+
+    override fun waitFor(
+        timeout: Long,
+        unit: TimeUnit,
+    ): Boolean {
+        timedWaits += timeout to unit
+        events += "wait:$timeout:${unit.name}"
+        firstProcessWaitEntered.countDown()
+        return when (timeout) {
+            500L -> {
+                if (
+                    waitMode ==
+                    GuardedAdmissionWaitMode.GatedUnreaped
+                ) {
+                    false
+                } else {
+                    reaped = true
+                    true
+                }
+            }
+            250L -> {
+                check(
+                    waitMode ==
+                        GuardedAdmissionWaitMode.GatedUnreaped,
+                ) {
+                    "Unexpected abort wait for natural process"
+                }
+                val waitCall = synchronized(waitStateLock) {
+                    abortWaitCalls += 1
+                    abortWaitCalls
+                }
+                if (waitCall == 1) {
+                    false
+                } else {
+                    check(waitCall == 2) {
+                        "Unexpected additional abort wait"
+                    }
+                    finalProcessWaitEntered.countDown()
+                    check(
+                        finalWaitRelease.await(
+                            TEST_SAFETY_TIMEOUT_SECONDS,
+                            TimeUnit.SECONDS,
+                        ),
+                    ) {
+                        "Final abort wait was not released"
+                    }
+                    false
+                }
+            }
+            else -> error("Unexpected process wait timeout")
+        }
+    }
+
+    override fun exitValue(): Int {
+        events += "exitValue"
+        check(reaped) {
+            "The guarded-admission process has not exited"
+        }
+        return 0
+    }
+
+    override fun destroy() {
+        destroyCalls += 1
+        events += "destroy"
+    }
+
+    override fun destroyForcibly(): Process {
+        destroyForciblyCalls += 1
+        events += "destroyForcibly"
+        return this
+    }
+
+    fun releaseFinalWait() {
+        finalWaitRelease.countDown()
+    }
+
+    fun releaseAll() {
+        finalWaitRelease.countDown()
+    }
+}
+
+private class AdmissionBlockingOutputStream(
+    private val label: String,
+    private val events: MutableList<String>,
+) : OutputStream() {
+    private val operationRelease = CountDownLatch(1)
+    val operationEntered = CountDownLatch(1)
+    val closeAttempted = CountDownLatch(1)
+
+    @Volatile
+    var closeAttempts = 0
+        private set
+
+    override fun write(value: Int) {
+        synchronized(this) {
+            events += "$label.write.enter"
+            operationEntered.countDown()
+            check(
+                operationRelease.await(
+                    TEST_SAFETY_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS,
+                ),
+            ) {
+                "Guarded output operation was not released"
+            }
+            events += "$label.write.exit"
+        }
+    }
+
+    override fun close() {
+        closeAttempts += 1
+        closeAttempted.countDown()
+        synchronized(this) {
+            events += "$label.close"
+        }
+    }
+
+    fun releaseOperation() {
+        operationRelease.countDown()
+    }
+}
+
+private class AdmissionBlockingInputStream(
+    private val label: String,
+    private val events: MutableList<String>,
+) : InputStream() {
+    private val operationRelease = CountDownLatch(1)
+    val operationEntered = CountDownLatch(1)
+    val closeAttempted = CountDownLatch(1)
+
+    @Volatile
+    var closeAttempts = 0
+        private set
+
+    override fun read(): Int =
+        synchronized(this) {
+            events += "$label.read.enter"
+            operationEntered.countDown()
+            check(
+                operationRelease.await(
+                    TEST_SAFETY_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS,
+                ),
+            ) {
+                "Guarded input operation was not released"
+            }
+            events += "$label.read.exit"
+            65
+        }
+
+    override fun read(
+        bytes: ByteArray,
+        offset: Int,
+        length: Int,
+    ): Int {
+        if (length == 0) return 0
+        val value = read()
+        if (value < 0) return value
+        bytes[offset] = value.toByte()
+        return 1
+    }
+
+    override fun close() {
+        closeAttempts += 1
+        closeAttempted.countDown()
+        synchronized(this) {
+            events += "$label.close"
+        }
+    }
+
+    fun releaseOperation() {
+        operationRelease.countDown()
+    }
+}
+
 private class UnreapedAbortBlockingPipeTestProcess(
     private val events: MutableList<String>,
 ) : Process() {
@@ -3281,15 +4213,19 @@ private fun processTransportSource(): Path {
 private class RecordingOutputStream(
     private val label: String,
     private val events: MutableList<String>,
+    private val operationFailure: Throwable? = null,
     private val closeFailure: Throwable? = null,
 ) : ByteArrayOutputStream() {
     var writeCalls = 0
+        private set
+    var flushCalls = 0
         private set
     var closeCalls = 0
         private set
 
     override fun write(value: Int) {
         writeCalls += 1
+        throwInjectedFailure(operationFailure)
         super.write(value)
     }
 
@@ -3299,7 +4235,14 @@ private class RecordingOutputStream(
         length: Int,
     ) {
         writeCalls += 1
+        throwInjectedFailure(operationFailure)
         super.write(bytes, offset, length)
+    }
+
+    override fun flush() {
+        flushCalls += 1
+        throwInjectedFailure(operationFailure)
+        super.flush()
     }
 
     override fun close() {
@@ -3348,6 +4291,22 @@ private fun Thread.awaitState(expected: Thread.State): Boolean {
         Thread.yield()
     }
     return state == expected
+}
+
+private fun awaitEither(
+    first: CountDownLatch,
+    second: CountDownLatch,
+): Boolean {
+    val deadline =
+        System.nanoTime() +
+            TimeUnit.SECONDS.toNanos(TEST_SAFETY_TIMEOUT_SECONDS)
+    while (System.nanoTime() - deadline < 0L) {
+        if (first.count == 0L || second.count == 0L) {
+            return true
+        }
+        Thread.yield()
+    }
+    return first.count == 0L || second.count == 0L
 }
 
 private fun awaitCallersOrCloseAttempt(

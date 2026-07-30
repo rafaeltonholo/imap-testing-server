@@ -102,7 +102,10 @@ host-to-operator ingress.
 - Keep TLS authentication and hostname verification on the operator hop.
 - Keep credentials out of process arguments, environment variables, exception
   messages, retained diagnostics, and Compose logs.
-- Make cancellation, timeout, close, and failed startup bounded and leak-free.
+- Bound every process wait and prevent lifecycle/stream-monitor deadlock during
+  cancellation, timeout, close, and failed startup. An idle raw JDK
+  process-stream `close()` has no enforceable wall-clock bound without a
+  separate actor; this design deliberately adds no such actor.
 - Use the same transport in startup readiness, positive isolation proof,
   rotation proof, and the eventual dashboard runtime.
 - Leave the ordinary Dovecot, Postfix, OAuth, and all Stalwart paths unchanged.
@@ -179,14 +182,22 @@ the transport never starts or recreates it.
 
 ### Transport mapping
 
-The child process maps directly onto the existing abstraction:
+The child process maps onto the existing abstraction through stable guarded
+wrappers. Raw `Process` streams never escape the transport:
 
 | Transport member | Child-process resource |
 |---|---|
-| `input` | OpenSSL stdout, containing decrypted IMAP server bytes |
-| `outputStream` | OpenSSL stdin, accepting IMAP client bytes |
+| `input` | stable guarded wrapper over OpenSSL stdout |
+| `outputStream` | stable guarded wrapper over OpenSSL stdin |
 | `abort()` | Idempotent bounded process/stream termination |
 | `close()` | Idempotent bounded process/stream termination |
+
+Both wrappers share one small admission gate. A read, write, or flush checks
+the shared seal and its direction's close state, increments that direction's
+active raw-call count, and releases the gate before invoking raw I/O. Its
+`finally` path decrements the count. No gate or signal lock is held across raw
+I/O or raw close. Raw failures restore interruption when applicable and become
+fixed redacted `IOException`s without causes or suppressed details.
 
 OpenSSL stderr is redirected to `ProcessBuilder.Redirect.DISCARD` at launch. It
 is never merged into the IMAP stream, retained, logged, or copied into an
@@ -226,16 +237,45 @@ types.
 ### Lifecycle and cancellation
 
 Normal IMAP flows retain their existing stream-close behavior; this transport
-change does not add a new IMAP `LOGOUT` exchange. Normal close and
-post-allocation registration-failure cleanup use the graceful ordering:
+change does not add a new IMAP `LOGOUT` exchange. At normal close, abort, or
+post-allocation registration-cleanup entry, the shared admission gate seals
+stdin and stdout atomically before lifecycle or process coordination. A stale
+wrapper then rejects every new read, write, flush, or public close with a fixed
+redacted `IOException`. In particular, public wrapper `close()` after the seal
+cannot become a lifecycle close request and cannot reorder stdout close ahead
+of stdin or close a stream during an abort handshake.
 
-1. close the child stdin so `-no_ign_eof` ends OpenSSL and its Docker exec;
+Before the transport seal, public wrapper close may return normally only when
+raw close completed synchronously and successfully. If a raw call is active,
+the request becomes deferred and public close returns a fixed failure; the last
+admitted raw call then owns the one best-effort deferred close. A repeated
+public close while that request is deferred or in progress, or after it failed,
+also returns a fixed failure.
+
+The lifecycle uses a separate authorized close request after sealing. Per
+direction, the gate records the active raw-call count and exactly one of open,
+deferred, in-progress, succeeded, or failed. An idle open direction is claimed
+under the gate and closed outside it. An active direction is marked deferred
+without waiting for the raw stream monitor; its last admitted raw call claims
+and performs the close outside every gate and signal lock. No caller waits for
+an admitted call to drain, and no helper thread or executor is created.
+
+Idle normal close and registration cleanup retain the graceful ordering only
+when stdin close is synchronously successful:
+
+1. close child stdin so `-no_ign_eof` ends OpenSSL and its Docker exec;
 2. leave stdout open and allow at most 500 ms for child exit so EOF reaches the
    remote exec;
 3. close stdout;
 4. if still alive, issue `destroy()` once and wait at most 250 ms;
 5. if still alive, call `destroyForcibly()` and make one final reap attempt of
    at most 250 ms.
+
+If the stdin close request is deferred, in progress, or failed, the lifecycle
+skips the 500-ms graceful EOF wait, requests stdout close, and enters the
+250-ms destroy plus 250-ms force/reap sequence. This prevents a close-first
+caller from waiting on the raw stdin monitor while preserving the idle
+`stdin → 500 ms → stdout` order.
 
 An abort that wins the one-shot signal holds a dedicated signal-coordination
 monitor while completing a bounded process handshake outside the lifecycle
@@ -246,46 +286,54 @@ handshake's reaped result and records signal acknowledgement before releasing
 the monitor, then releases it before entering the lifecycle lock.
 
 On an abort-first path, the complete process handshake happens before either
-stream-close attempt. On a close-first path, stream cleanup may already be
-blocked on a protocol writer holding the JDK process-stdin stream monitor, but
-the abort can still destroy, force, and reap the child without acquiring the
-lifecycle lock. The lifecycle owner cannot cache a terminal outcome while that
-handshake remains in flight. Once it observes the acknowledged result, it
-performs no 500-ms natural-exit wait and no repeated destroy, force, or process
-wait. If the result is reaped, it closes each stream once. If the result is
-unreaped, it atomically clears both retained stream references and caches
-`reaped=false`, `naturalExit=false`, `terminationRequired=true`,
-`streamsClosed=false`, and `exitCode=null` without calling either potentially
-contended stream close. The completed-unreaped handshake therefore returns
-fixed failures to both close and abort callers rather than authorizing a second
-termination sequence or blocking behind a protocol writer.
+lifecycle stream-close request. On a close-first path, any already admitted
+protocol write remains inside raw stdin, but the guarded lifecycle close
+defers raw close rather than blocking on that stream monitor. The abort can
+still destroy, force, and reap the child without acquiring the lifecycle lock.
+The lifecycle owner cannot cache a terminal outcome while that handshake
+remains in flight. Once it observes the acknowledged result, it performs no
+500-ms natural-exit wait and no repeated destroy, force, or process wait. If
+the result is reaped, it requests each stream close once. If the result is
+unreaped before a lifecycle close request, it atomically clears both retained
+stream references and caches `reaped=false`, `naturalExit=false`,
+`terminationRequired=true`, `streamsClosed=false`, and `exitCode=null` without
+making a new raw-close request. A close request already deferred before that
+outcome may still execute exactly once after its admitted raw call exits, but
+that late close cannot upgrade the cached outcome.
 
 Regular normal-close and registration-cleanup lifecycle destroy is selected
 under the same signal monitor, then executed by the selecting thread while it
-owns the lifecycle lock. Their graceful `stdin → 500 ms → stdout → destroy →
-250 ms → force → 250 ms` ordering remains unchanged. No path exceeds the
-existing fixed one-second aggregate process-wait bound, the abort handshake
-itself waits at most 500 ms, and the transport creates no cleanup thread.
+owns the lifecycle lock. The idle graceful path has at most one second of
+aggregate process waits (`500 + 250 + 250` ms); a path that cannot close stdin
+synchronously has at most 500 ms (`250 + 250` ms). The abort handshake itself
+waits at most 500 ms. These are process-wait bounds, not an unconditional
+wall-clock bound on the whole close call: an idle raw JDK process-stream
+`close()` may take arbitrarily long. Enforcing a bound around that raw call
+would require another actor, which this transport intentionally prohibits.
 
 All callers share one cached terminal outcome. Signal acknowledgement precedes
 terminal-outcome caching. If abort preemption wins or races an unfinished
 normal close, that outcome records that termination was required, so the normal
 close cannot succeed even if the child then exits with code zero. A normal
 probe/session close succeeds only after natural exit with code zero, no
-termination signal, and successful close attempts for both mapped streams.
+termination signal, and both lifecycle stream-close requests already
+synchronously successful at the terminal snapshot.
 Timeout/abort and registration-failure cleanup accept any exit code, but still
-require both successful stream-close attempts and a reaped child to succeed.
+require both lifecycle close requests synchronously successful at that snapshot
+and a reaped child to succeed. A deferred, in-progress, or failed close makes
+`streamsClosed=false` permanently for that outcome; later raw-close success
+does not upgrade it.
 The fail-bounded completed-unreaped abort instead remains unsuccessful and
-skips both close attempts as described above. Each terminal stream reference
-is cleared after its one close attempt, or cleared unclosed by that fail-bounded
-path; later close or abort calls reuse the cached outcome and never rerun
-process lifecycle work.
+skips new close requests as described above. Each terminal stream reference is
+cleared after its one lifecycle request, or cleared unrequested by that
+fail-bounded path; later close or abort calls reuse the cached outcome and never
+rerun process lifecycle work.
 
 Interrupted callers retain their interrupt flag. Every failure remains fixed
 and redacted, and no failed close makes a transport reusable. No unbounded
-`waitFor`, thread creation, retry loop, or stderr buffer is allowed. Cleanup
-may outlive the cancelled caller's 100 ms wait, but not its charged cancellation
-actor.
+`waitFor`, drain wait, thread creation, retry loop, or stderr buffer is allowed.
+Cleanup may outlive the cancelled caller's 100-ms wait. Its process waits remain
+bounded as above; raw idle-close latency is outside that claim.
 
 Finite probes must synchronously close and reap the process inside their
 existing five-second operation deadline before returning any Success,
@@ -297,8 +345,9 @@ The normal close call runs through the existing coordinator rather than
 receiving an ad hoc deadline parameter. If its fixed termination sequence
 outlives the operation deadline, the coordinator caps the caller, changes the
 result to TransportFailure, and invokes the same idempotent abort/close state
-machine. Charged cleanup may then continue for its fixed one-second actor
-bound; no successful result escapes first.
+machine. Charged cleanup may then continue; its process waits consume no more
+than the applicable one-second budget, while raw idle-close latency remains the
+explicit limitation above. No successful result escapes first.
 
 The existing 100 ms post-abandon wait remains only a bound on how long a
 cancelled caller waits for best-effort cancellation actors; it is not evidence
