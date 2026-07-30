@@ -531,6 +531,10 @@ class DovecotOperatorProcessTransportTest {
             assertTrue(firstWaitEntered.await(1, TimeUnit.SECONDS))
             abortCaller.start()
             assertTrue(abortStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(
+                abortCaller.awaitState(Thread.State.BLOCKED),
+                "Abort caller did not overlap the close lifecycle",
+            )
             releaseFirstWait.countDown()
             closeCaller.join(2_000)
             abortCaller.join(2_000)
@@ -545,6 +549,85 @@ class DovecotOperatorProcessTransportTest {
             assertEquals(1, process.destroyCalls)
             assertEquals(1, process.destroyForciblyCalls)
             assertTrue(process.reaped)
+        }
+
+    @Test
+    fun abortFirstNaturalNonzeroOutcomeIsCachedAndRejectedByConcurrentClose() =
+        withLaunchFixture { fixture ->
+            val firstWaitEntered = CountDownLatch(1)
+            val releaseFirstWait = CountDownLatch(1)
+            val events = mutableListOf<String>()
+            val process = ControlledTestProcess(
+                events = events,
+                waitResults = listOf(true),
+                configuredExitCode = 41,
+                firstWaitEntered = firstWaitEntered,
+                releaseFirstWait = releaseFirstWait,
+            )
+            val transport = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter { process },
+            ).open {}
+            events.clear()
+            val abortFailure = AtomicReference<Throwable?>()
+            val closeFailure = AtomicReference<Throwable?>()
+            val closeStarted = CountDownLatch(1)
+            val abortCaller = Thread(
+                {
+                    try {
+                        transport.abort()
+                    } catch (failure: Throwable) {
+                        abortFailure.set(failure)
+                    }
+                },
+                "dovecot-process-abort-first-caller",
+            )
+            val closeCaller = Thread(
+                {
+                    closeStarted.countDown()
+                    try {
+                        transport.close()
+                    } catch (failure: Throwable) {
+                        closeFailure.set(failure)
+                    }
+                },
+                "dovecot-process-close-second-caller",
+            )
+
+            abortCaller.start()
+            assertTrue(firstWaitEntered.await(1, TimeUnit.SECONDS))
+            closeCaller.start()
+            assertTrue(closeStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(
+                closeCaller.awaitState(Thread.State.BLOCKED),
+                "Close caller did not overlap the abort lifecycle",
+            )
+            releaseFirstWait.countDown()
+            abortCaller.join(2_000)
+            closeCaller.join(2_000)
+
+            assertFalse(abortCaller.isAlive)
+            assertFalse(closeCaller.isAlive)
+            assertEquals(null, abortFailure.get())
+            val rejectedClose = closeFailure.get()
+            assertTrue(rejectedClose is IOException)
+            assertEquals(
+                "Dovecot operator process transport close failed",
+                rejectedClose.message,
+            )
+            assertEquals(null, rejectedClose.cause)
+            assertEquals(
+                listOf(
+                    "child-stdin.close",
+                    "wait:500:MILLISECONDS",
+                    "child-stdout.close",
+                    "exitValue",
+                ),
+                events,
+            )
+            assertEquals(1, process.timedWaits.size)
+            assertEquals(0, process.destroyCalls)
+            assertEquals(0, process.destroyForciblyCalls)
         }
 
     @Test
@@ -779,6 +862,449 @@ class DovecotOperatorProcessTransportTest {
         assertFalse("CompletableFuture" in source)
         assertFalse("CoroutineScope" in source)
     }
+
+    @Test
+    fun registrationInterruptedExceptionIsRestoredAfterRedactedCleanup() =
+        withLaunchFixture { fixture ->
+            val process = ControlledTestProcess(
+                events = mutableListOf(),
+                waitResults = listOf(true),
+            )
+            var retained: DovecotOperatorTransport? = null
+            val factory = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter { process },
+            )
+
+            try {
+                val failure = assertFailsWith<IOException> {
+                    factory.open { allocated ->
+                        retained = allocated
+                        throwDirectInterruptedException("registration")
+                    }
+                }
+                val interruptRestored =
+                    Thread.currentThread().isInterrupted
+                Thread.interrupted()
+
+                assertTrue(interruptRestored)
+                assertEquals(
+                    "Dovecot operator process transport registration failed",
+                    failure.message,
+                )
+                assertEquals(null, failure.cause)
+                assertTrue(failure.suppressed.isEmpty())
+                assertTrue(retained != null)
+                assertTrue(process.reaped)
+            } finally {
+                Thread.interrupted()
+            }
+        }
+
+    @Test
+    fun streamCloseInterruptedExceptionsAreRestoredBeforeAbortReturns() =
+        withLaunchFixture { fixture ->
+            val events = mutableListOf<String>()
+            val process = ControlledTestProcess(
+                events = events,
+                waitResults = listOf(true),
+                stdinCloseFailure =
+                    InterruptedException("child stdin request-password"),
+                stdoutCloseFailure =
+                    InterruptedException("child stdout request-user"),
+            )
+            val transport = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter { process },
+            ).open {}
+            events.clear()
+
+            try {
+                transport.abort()
+                val interruptRestored =
+                    Thread.currentThread().isInterrupted
+                Thread.interrupted()
+
+                assertTrue(interruptRestored)
+                assertEquals(
+                    listOf(
+                        "child-stdin.close",
+                        "wait:500:MILLISECONDS",
+                        "child-stdout.close",
+                        "exitValue",
+                    ),
+                    events,
+                )
+                assertEquals(1, process.childStdin.closeCalls)
+                assertEquals(1, process.childStdout.closeCalls)
+                assertTrue(process.reaped)
+            } finally {
+                Thread.interrupted()
+            }
+        }
+
+    @Test
+    fun everyOtherCaughtInterruptedExceptionRestoresCallerFlag() {
+        val unrestored = mutableListOf<DirectInterruptionPoint>()
+        DirectInterruptionPoint.entries.forEach { interruptionPoint ->
+            try {
+                withLaunchFixture { fixture ->
+                    val failure = when (interruptionPoint) {
+                        DirectInterruptionPoint.Starter ->
+                            assertFailsWith<IOException> {
+                                JvmDockerExecDovecotOperatorTransportFactory(
+                                    profile = fixture.profile(),
+                                    starter = DovecotOperatorProcessStarter {
+                                        throwDirectInterruptedException(
+                                            "starter",
+                                        )
+                                    },
+                                ).open {}
+                            }
+                        DirectInterruptionPoint.StreamMapping -> {
+                            val process = ControlledTestProcess(
+                                events = mutableListOf(),
+                                waitResults = listOf(true),
+                                stdoutAcquisitionFailure =
+                                    InterruptedException(
+                                        "mapping request-password",
+                                    ),
+                            )
+                            assertFailsWith<IOException> {
+                                JvmDockerExecDovecotOperatorTransportFactory(
+                                    profile = fixture.profile(),
+                                    starter =
+                                        DovecotOperatorProcessStarter {
+                                            process
+                                        },
+                                ).open {}
+                            }
+                        }
+                        DirectInterruptionPoint.Destroy -> {
+                            val process = ControlledTestProcess(
+                                events = mutableListOf(),
+                                waitResults = listOf(false, true),
+                                destroyFailure =
+                                    InterruptedException(
+                                        "destroy request-password",
+                                    ),
+                            )
+                            val transport =
+                                JvmDockerExecDovecotOperatorTransportFactory(
+                                    profile = fixture.profile(),
+                                    starter =
+                                        DovecotOperatorProcessStarter {
+                                            process
+                                        },
+                                ).open {}
+                            transport.abort()
+                            null
+                        }
+                        DirectInterruptionPoint.DestroyForcibly -> {
+                            val process = ControlledTestProcess(
+                                events = mutableListOf(),
+                                waitResults = listOf(false, false, true),
+                                destroyForciblyFailure =
+                                    InterruptedException(
+                                        "force request-password",
+                                    ),
+                            )
+                            val transport =
+                                JvmDockerExecDovecotOperatorTransportFactory(
+                                    profile = fixture.profile(),
+                                    starter =
+                                        DovecotOperatorProcessStarter {
+                                            process
+                                        },
+                                ).open {}
+                            transport.abort()
+                            null
+                        }
+                        DirectInterruptionPoint.ExitValue -> {
+                            val process = ControlledTestProcess(
+                                events = mutableListOf(),
+                                waitResults = listOf(true),
+                                exitValueFailure =
+                                    InterruptedException(
+                                        "exit request-password",
+                                    ),
+                            )
+                            val transport =
+                                JvmDockerExecDovecotOperatorTransportFactory(
+                                    profile = fixture.profile(),
+                                    starter =
+                                        DovecotOperatorProcessStarter {
+                                            process
+                                        },
+                                ).open {}
+                            assertFailsWith<IOException> {
+                                transport.close()
+                            }
+                        }
+                    }
+                    val interruptRestored =
+                        Thread.currentThread().isInterrupted
+                    Thread.interrupted()
+
+                    if (!interruptRestored) {
+                        unrestored += interruptionPoint
+                    }
+                    failure?.let { caught ->
+                        assertEquals(null, caught.cause)
+                        assertTrue(caught.suppressed.isEmpty())
+                        assertFalse(
+                            caught.toString().contains("request-password"),
+                        )
+                    }
+                }
+            } finally {
+                Thread.interrupted()
+            }
+        }
+        assertEquals(
+            emptyList(),
+            unrestored,
+            "Interrupt was not restored for $unrestored",
+        )
+    }
+
+    @Test
+    fun failedRegistrationCleanupCachesUnreapedOutcomeForRetainedTransport() =
+        withLaunchFixture { fixture ->
+            val events = mutableListOf<String>()
+            val process = ControlledTestProcess(
+                events = events,
+                waitResults = listOf(false, false, false),
+                stdinCloseFailure =
+                    IOException("stdin close request-password"),
+                stdoutCloseFailure =
+                    IOException("stdout close request-user"),
+            )
+            var retained: DovecotOperatorTransport? = null
+            val factory = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter {
+                    events += "start"
+                    process
+                },
+            )
+
+            val registrationFailure = assertFailsWith<IOException> {
+                factory.open { allocated ->
+                    events += "register"
+                    retained = allocated
+                    throw IllegalStateException(
+                        "registration request-password",
+                    )
+                }
+            }
+            val retainedTransport = checkNotNull(retained)
+
+            assertEquals(
+                "Dovecot operator process transport registration failed",
+                registrationFailure.message,
+            )
+            assertEquals(null, registrationFailure.cause)
+            assertTrue(registrationFailure.suppressed.isEmpty())
+            assertEquals(
+                listOf(
+                    "start",
+                    "child-stdin.acquire",
+                    "child-stdout.acquire",
+                    "register",
+                    "child-stdin.close",
+                    "wait:500:MILLISECONDS",
+                    "child-stdout.close",
+                    "destroy",
+                    "wait:250:MILLISECONDS",
+                    "destroyForcibly",
+                    "wait:250:MILLISECONDS",
+                ),
+                events,
+            )
+            assertEquals(1, process.childStdin.closeCalls)
+            assertEquals(1, process.childStdout.closeCalls)
+            assertEquals(
+                listOf(
+                    500L to TimeUnit.MILLISECONDS,
+                    250L to TimeUnit.MILLISECONDS,
+                    250L to TimeUnit.MILLISECONDS,
+                ),
+                process.timedWaits,
+            )
+            assertEquals(1, process.destroyCalls)
+            assertEquals(1, process.destroyForciblyCalls)
+            assertFalse(process.reaped)
+            assertFailsWith<IllegalStateException> {
+                retainedTransport.input
+            }
+            assertFailsWith<IllegalStateException> {
+                retainedTransport.outputStream
+            }
+
+            val lifecycleEvents = events.toList()
+            repeat(2) {
+                val closeFailure = assertFailsWith<IOException> {
+                    retainedTransport.close()
+                }
+                assertEquals(
+                    "Dovecot operator process transport close failed",
+                    closeFailure.message,
+                )
+                assertEquals(null, closeFailure.cause)
+                val abortFailure = assertFailsWith<IOException> {
+                    retainedTransport.abort()
+                }
+                assertEquals(
+                    "Dovecot operator process transport abort failed",
+                    abortFailure.message,
+                )
+                assertEquals(null, abortFailure.cause)
+            }
+
+            assertEquals(lifecycleEvents, events)
+            assertEquals(3, process.timedWaits.size)
+            assertEquals(1, process.destroyCalls)
+            assertEquals(1, process.destroyForciblyCalls)
+            assertEquals(1, process.childStdin.closeCalls)
+            assertEquals(1, process.childStdout.closeCalls)
+        }
+
+    @Test
+    fun normalCloseContinuesAfterInterruptedDestroyWaitAndRestoresFlag() =
+        withLaunchFixture { fixture ->
+            val events = mutableListOf<String>()
+            val process = ControlledTestProcess(
+                events = events,
+                waitResults = listOf(false, true),
+                waitFailures = mapOf(
+                    2 to InterruptedException(
+                        "destroy wait request-password",
+                    ),
+                ),
+                configuredExitCode = 137,
+            )
+            val transport = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter { process },
+            ).open {}
+            events.clear()
+
+            try {
+                val failure = assertFailsWith<IOException> {
+                    transport.close()
+                }
+                val interruptRestored =
+                    Thread.currentThread().isInterrupted
+                Thread.interrupted()
+
+                assertTrue(interruptRestored)
+                assertEquals(
+                    "Dovecot operator process transport close failed",
+                    failure.message,
+                )
+                assertEquals(null, failure.cause)
+                assertTrue(failure.suppressed.isEmpty())
+                assertEquals(
+                    listOf(
+                        "child-stdin.close",
+                        "wait:500:MILLISECONDS",
+                        "child-stdout.close",
+                        "destroy",
+                        "wait:250:MILLISECONDS",
+                        "destroyForcibly",
+                        "wait:250:MILLISECONDS",
+                    ),
+                    events,
+                )
+                assertEquals(
+                    listOf(
+                        500L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                    ),
+                    process.timedWaits,
+                )
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertTrue(process.reaped)
+            } finally {
+                Thread.interrupted()
+            }
+        }
+
+    @Test
+    fun registrationCleanupRestoresInterruptFromFinalReapAttempt() =
+        withLaunchFixture { fixture ->
+            val events = mutableListOf<String>()
+            val process = ControlledTestProcess(
+                events = events,
+                waitResults = listOf(false, false),
+                waitFailures = mapOf(
+                    3 to InterruptedException(
+                        "final reap request-password",
+                    ),
+                ),
+            )
+            val factory = JvmDockerExecDovecotOperatorTransportFactory(
+                profile = fixture.profile(),
+                starter = DovecotOperatorProcessStarter {
+                    events += "start"
+                    process
+                },
+            )
+
+            try {
+                val failure = assertFailsWith<IOException> {
+                    factory.open {
+                        events += "register"
+                        throw IllegalStateException(
+                            "registration request-user",
+                        )
+                    }
+                }
+                val interruptRestored =
+                    Thread.currentThread().isInterrupted
+                Thread.interrupted()
+
+                assertTrue(interruptRestored)
+                assertEquals(
+                    "Dovecot operator process transport registration failed",
+                    failure.message,
+                )
+                assertEquals(null, failure.cause)
+                assertTrue(failure.suppressed.isEmpty())
+                assertEquals(
+                    listOf(
+                        "start",
+                        "child-stdin.acquire",
+                        "child-stdout.acquire",
+                        "register",
+                        "child-stdin.close",
+                        "wait:500:MILLISECONDS",
+                        "child-stdout.close",
+                        "destroy",
+                        "wait:250:MILLISECONDS",
+                        "destroyForcibly",
+                        "wait:250:MILLISECONDS",
+                    ),
+                    events,
+                )
+                assertEquals(
+                    listOf(
+                        500L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                    ),
+                    process.timedWaits,
+                )
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertFalse(process.reaped)
+            } finally {
+                Thread.interrupted()
+            }
+        }
 
     @Test
     fun launchProfileRetainsCanonicalPathsInOrderAndFixesOperatorIdentity() =
@@ -1240,11 +1766,27 @@ private class ControlledTestProcess(
     private val firstWaitEntered: CountDownLatch? = null,
     private val releaseFirstWait: CountDownLatch? = null,
     private val honorCallerInterrupt: Boolean = false,
+    private val waitFailures: Map<Int, Throwable> = emptyMap(),
     private val stdoutAcquisitionFailure: Throwable? = null,
+    stdinCloseFailure: Throwable? = null,
+    stdoutCloseFailure: Throwable? = null,
+    private val destroyFailure: Throwable? = null,
+    private val destroyForciblyFailure: Throwable? = null,
+    private val exitValueFailure: Throwable? = null,
     stderrContents: ByteArray = ByteArray(0),
 ) : Process() {
-    val childStdin = RecordingOutputStream("child-stdin", events)
-    val childStdout = RecordingInputStream("child-stdout", events)
+    val childStdin =
+        RecordingOutputStream(
+            label = "child-stdin",
+            events = events,
+            closeFailure = stdinCloseFailure,
+        )
+    val childStdout =
+        RecordingInputStream(
+            label = "child-stdout",
+            events = events,
+            closeFailure = stdoutCloseFailure,
+        )
     private val childStderr =
         RecordingInputStream("child-stderr", events, stderrContents)
     private val remainingWaitResults = ArrayDeque(waitResults)
@@ -1276,7 +1818,7 @@ private class ControlledTestProcess(
     override fun getInputStream(): InputStream {
         stdoutRequests += 1
         events += "child-stdout.acquire"
-        stdoutAcquisitionFailure?.let { throw it }
+        throwInjectedFailure(stdoutAcquisitionFailure)
         return childStdout
     }
 
@@ -1308,6 +1850,7 @@ private class ControlledTestProcess(
                 "controlled process interruption request-password",
             )
         }
+        throwInjectedFailure(waitFailures[timedWaits.size])
         val completed = remainingWaitResults.removeFirstOrNull()
             ?: error("Unexpected timed process wait")
         if (completed) {
@@ -1319,6 +1862,7 @@ private class ControlledTestProcess(
 
     override fun exitValue(): Int {
         events += "exitValue"
+        throwInjectedFailure(exitValueFailure)
         check(exited) {
             "The controlled process has not exited"
         }
@@ -1328,11 +1872,13 @@ private class ControlledTestProcess(
     override fun destroy() {
         destroyCalls += 1
         events += "destroy"
+        throwInjectedFailure(destroyFailure)
     }
 
     override fun destroyForcibly(): Process {
         destroyForciblyCalls += 1
         events += "destroyForcibly"
+        throwInjectedFailure(destroyForciblyFailure)
         return this
     }
 }
@@ -1341,6 +1887,7 @@ private class RecordingInputStream(
     private val label: String,
     private val events: MutableList<String>,
     contents: ByteArray = ByteArray(0),
+    private val closeFailure: Throwable? = null,
 ) : ByteArrayInputStream(contents) {
     var readCalls = 0
         private set
@@ -1364,6 +1911,7 @@ private class RecordingInputStream(
     override fun close() {
         closeCalls += 1
         events += "$label.close"
+        throwInjectedFailure(closeFailure)
         super.close()
     }
 }
@@ -1387,6 +1935,7 @@ private fun processTransportSource(): Path {
 private class RecordingOutputStream(
     private val label: String,
     private val events: MutableList<String>,
+    private val closeFailure: Throwable? = null,
 ) : ByteArrayOutputStream() {
     var writeCalls = 0
         private set
@@ -1410,6 +1959,45 @@ private class RecordingOutputStream(
     override fun close() {
         closeCalls += 1
         events += "$label.close"
+        throwInjectedFailure(closeFailure)
         super.close()
     }
+}
+
+private enum class DirectInterruptionPoint {
+    Starter,
+    StreamMapping,
+    Destroy,
+    DestroyForcibly,
+    ExitValue,
+}
+
+private fun throwDirectInterruptedException(operation: String): Nothing {
+    Thread.currentThread().interrupt()
+    check(Thread.interrupted()) {
+        "Direct interruption was not established for $operation"
+    }
+    throw InterruptedException(
+        "Dovecot process $operation interrupted request-password",
+    )
+}
+
+private fun throwInjectedFailure(failure: Throwable?) {
+    if (failure == null) return
+    if (failure is InterruptedException) {
+        Thread.currentThread().interrupt()
+        check(Thread.interrupted()) {
+            "Injected interruption was not established"
+        }
+    }
+    throw failure
+}
+
+private fun Thread.awaitState(expected: Thread.State): Boolean {
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+    while (System.nanoTime() - deadline < 0L) {
+        if (state == expected) return true
+        Thread.yield()
+    }
+    return state == expected
 }

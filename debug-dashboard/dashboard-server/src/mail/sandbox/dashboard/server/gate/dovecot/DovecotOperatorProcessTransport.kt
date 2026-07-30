@@ -141,20 +141,23 @@ internal class JvmDockerExecDovecotOperatorTransportFactory(
     ): DovecotOperatorTransport {
         val process = try {
             starter.start(profile)
-        } catch (_: Throwable) {
+        } catch (failure: Throwable) {
+            restoreInterruptFrom(failure)
             throw IOException(START_FAILURE_MESSAGE)
         }
         val transport = ManagedDovecotOperatorProcessTransport(process)
         try {
             transport.mapProcessStreams()
-        } catch (_: Throwable) {
+        } catch (failure: Throwable) {
             transport.cleanupRegistrationFailure()
+            restoreInterruptFrom(failure)
             throw IOException(ALLOCATION_FAILURE_MESSAGE)
         }
         try {
             registerAllocated(transport)
-        } catch (_: Throwable) {
+        } catch (failure: Throwable) {
             transport.cleanupRegistrationFailure()
+            restoreInterruptFrom(failure)
             throw IOException(REGISTRATION_FAILURE_MESSAGE)
         }
         return transport
@@ -226,12 +229,14 @@ private class ManagedDovecotOperatorProcessTransport(
     }
 
     fun cleanupRegistrationFailure() {
-        runCatching {
+        try {
             terminate(
                 mode = TerminationMode.RegistrationCleanup,
                 failureMessage =
                     "Dovecot operator process transport registration cleanup failed",
             )
+        } catch (failure: Throwable) {
+            restoreInterruptFrom(failure)
         }
     }
 
@@ -270,13 +275,28 @@ private class ManagedDovecotOperatorProcessTransport(
     ): TerminationOutcome {
         var restoreInterrupt = Thread.currentThread().isInterrupted
 
+        fun rememberInterruption(failure: Throwable) {
+            if (failure is InterruptedException) {
+                restoreInterrupt = true
+            }
+        }
+
         fun awaitProcess(timeoutMillis: Long): Boolean =
             try {
                 process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
-            } catch (_: InterruptedException) {
-                restoreInterrupt = true
+            } catch (failure: InterruptedException) {
+                rememberInterruption(failure)
                 false
             } catch (_: Throwable) {
+                false
+            }
+
+        fun closeQuietly(stream: AutoCloseable?): Boolean =
+            try {
+                stream?.close()
+                true
+            } catch (failure: Throwable) {
+                rememberInterruption(failure)
                 false
             }
 
@@ -289,7 +309,8 @@ private class ManagedDovecotOperatorProcessTransport(
             if (!reaped) {
                 try {
                     process.destroy()
-                } catch (_: Throwable) {
+                } catch (failure: Throwable) {
+                    rememberInterruption(failure)
                     // Continue to the bounded force/reap sequence.
                 }
                 reaped = awaitProcess(DESTROY_WAIT_MILLIS)
@@ -297,7 +318,8 @@ private class ManagedDovecotOperatorProcessTransport(
             if (!reaped) {
                 try {
                     process.destroyForcibly()
-                } catch (_: Throwable) {
+                } catch (failure: Throwable) {
+                    rememberInterruption(failure)
                     // The final bounded reap attempt is still mandatory.
                 }
                 reaped = awaitProcess(FORCE_WAIT_MILLIS)
@@ -311,7 +333,8 @@ private class ManagedDovecotOperatorProcessTransport(
                 ) {
                     try {
                         process.exitValue()
-                    } catch (_: Throwable) {
+                    } catch (failure: Throwable) {
+                        rememberInterruption(failure)
                         null
                     }
                 } else {
@@ -329,14 +352,6 @@ private class ManagedDovecotOperatorProcessTransport(
             }
         }
     }
-
-    private fun closeQuietly(stream: AutoCloseable?): Boolean =
-        try {
-            stream?.close()
-            true
-        } catch (_: Throwable) {
-            false
-        }
 
     private companion object {
         const val CLOSED_MESSAGE =
@@ -358,6 +373,12 @@ private class ManagedDovecotOperatorProcessTransport(
         val streamsClosed: Boolean,
         val exitCode: Int?,
     )
+}
+
+private fun restoreInterruptFrom(failure: Throwable) {
+    if (failure is InterruptedException) {
+        Thread.currentThread().interrupt()
+    }
 }
 
 private fun requireCanonicalDockerCli(path: Path) {
