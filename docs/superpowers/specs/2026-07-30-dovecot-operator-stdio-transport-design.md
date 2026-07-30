@@ -251,9 +251,14 @@ blocked on a protocol writer holding the JDK process-stdin stream monitor, but
 the abort can still destroy, force, and reap the child without acquiring the
 lifecycle lock. The lifecycle owner cannot cache a terminal outcome while that
 handshake remains in flight. Once it observes the acknowledged result, it
-closes each stream once and performs no 500-ms natural-exit wait and no repeated
-destroy, force, or process wait. A stored unreaped result remains a failed abort
-rather than authorizing a second termination sequence.
+performs no 500-ms natural-exit wait and no repeated destroy, force, or process
+wait. If the result is reaped, it closes each stream once. If the result is
+unreaped, it atomically clears both retained stream references and caches
+`reaped=false`, `streamsClosed=false`, and `terminationRequired=true` without
+calling either potentially contended stream close. The completed-unreaped
+handshake therefore returns fixed failures to both close and abort callers
+rather than authorizing a second termination sequence or blocking behind a
+protocol writer.
 
 Regular normal-close and registration-cleanup lifecycle destroy is selected
 under the same signal monitor, then executed by the selecting thread while it
@@ -269,9 +274,12 @@ close cannot succeed even if the child then exits with code zero. A normal
 probe/session close succeeds only after natural exit with code zero, no
 termination signal, and successful close attempts for both mapped streams.
 Timeout/abort and registration-failure cleanup accept any exit code, but still
-require both successful stream-close attempts and a reaped child. Each terminal
-stream reference is cleared after its one close attempt; later close or abort
-calls reuse the cached outcome and never rerun process lifecycle work.
+require both successful stream-close attempts and a reaped child to succeed.
+The fail-bounded completed-unreaped abort instead remains unsuccessful and
+skips both close attempts as described above. Each terminal stream reference
+is cleared after its one close attempt, or cleared unclosed by that fail-bounded
+path; later close or abort calls reuse the cached outcome and never rerun
+process lifecycle work.
 
 Interrupted callers retain their interrupt flag. Every failure remains fixed
 and redacted, and no failed close makes a transport reusable. No unbounded

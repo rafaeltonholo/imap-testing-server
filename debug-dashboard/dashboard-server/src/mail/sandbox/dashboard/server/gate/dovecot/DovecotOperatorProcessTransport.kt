@@ -385,9 +385,24 @@ private class ManagedDovecotOperatorProcessTransport(
                 false
             }
 
+        fun failedUnreapedAbortOutcome(): TerminationOutcome {
+            childStdin = null
+            childStdout = null
+            return TerminationOutcome(
+                reaped = false,
+                naturalExit = false,
+                terminationRequired = true,
+                streamsClosed = false,
+                exitCode = null,
+            )
+        }
+
         return try {
             var acknowledgedAbortReaped =
                 acknowledgedAbortReaped()
+            if (acknowledgedAbortReaped == false) {
+                return failedUnreapedAbortOutcome()
+            }
             val stdinClosed = try {
                 closeQuietly(childStdin)
             } finally {
@@ -396,6 +411,9 @@ private class ManagedDovecotOperatorProcessTransport(
             if (acknowledgedAbortReaped == null) {
                 acknowledgedAbortReaped =
                     acknowledgedAbortReaped()
+            }
+            if (acknowledgedAbortReaped == false) {
+                return failedUnreapedAbortOutcome()
             }
             val naturalExit =
                 if (acknowledgedAbortReaped == null) {

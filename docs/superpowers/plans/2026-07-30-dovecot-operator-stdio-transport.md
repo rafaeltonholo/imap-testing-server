@@ -222,11 +222,14 @@ git commit -m "test: define fixed Dovecot operator process launch"
   pre-stream process handshake outside the lifecycle lock: call `destroy()`,
   wait at most 250 ms, force once if still alive, and make one final reap
   attempt of at most 250 ms. Store that result and acknowledge the completed
-  handshake before terminal outcome caching; the lifecycle path then closes
-  both streams without a 500-ms natural-exit wait or any repeated
-  destroy/force/wait work. Every mode requires successful close attempts for
-  both mapped streams and a reaped child; abort and registration cleanup may
-  accept a nonzero exit. Preserve RED.
+  handshake before terminal outcome caching. If the child was reaped, the
+  lifecycle path then closes both streams without a 500-ms natural-exit wait or
+  any repeated destroy/force/wait work. If it was not reaped, clear both stream
+  references and cache `reaped=false`, `streamsClosed=false`, and
+  `terminationRequired=true` without attempting either potentially contended
+  close. Successful termination still requires both stream closes and a reaped
+  child; abort and registration cleanup may accept a nonzero exit. Preserve
+  RED.
 
 - [ ] Implement the bounded destroy/force/reap branch and re-run those cases
   GREEN.
@@ -239,16 +242,20 @@ git commit -m "test: define fixed Dovecot operator process launch"
   close. Cover both asynchronous `destroy()` return and `destroy()` throwing
   `Error` while close is blocked on the child-stdin monitor; in both cases the
   abort winner must complete its force/final-reap handshake before that monitor
-  is manually released. Repeated callers must not rerun stream or process
-  lifecycle work. Preserve RED.
+  is manually released. Also gate an unreaped final wait while a close owns the
+  lifecycle lock: both callers must return fixed failures, cache the unreaped
+  outcome, clear both stream references, and make zero stream-close attempts
+  before the writer is released. Repeated callers must not rerun stream or
+  process lifecycle work. Preserve RED.
 
 - [ ] Implement the synchronized idempotent terminal outcome plus the one-shot
   abort signal monitor. Hold that monitor through the winning bounded
   destroy/wait/force/final-reap handshake, store its reaped result, acknowledge
   before release, release it before entering the lifecycle lock, and use the
   stored result for lifecycle destroy selection and terminal signal
-  completion. Clear each terminal stream reference after its sole close
-  attempt, and re-run those cases GREEN.
+  completion. A stored `false` result must take the fail-bounded path described
+  above; otherwise clear each terminal stream reference after its sole close
+  attempt. Re-run those cases GREEN.
 
 - [ ] Add tests for caller-interrupt preservation, no new worker/thread,
   failed stream-close acceptance, discarded stderr, and fixed/redacted

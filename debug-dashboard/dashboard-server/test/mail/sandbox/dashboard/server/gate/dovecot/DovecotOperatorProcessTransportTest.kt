@@ -410,14 +410,16 @@ class DovecotOperatorProcessTransportTest {
     @Test
     fun abortFailsRedactedWhenForcedChildCannotBeReaped() =
         withLaunchFixture { fixture ->
+            val events = mutableListOf<String>()
             val process = ControlledTestProcess(
-                events = mutableListOf(),
+                events = events,
                 waitResults = listOf(false, false),
             )
             val transport = JvmDockerExecDovecotOperatorTransportFactory(
                 profile = fixture.profile(),
                 starter = DovecotOperatorProcessStarter { process },
             ).open {}
+            events.clear()
 
             val failure = assertFailsWith<IOException> {
                 transport.abort()
@@ -433,6 +435,25 @@ class DovecotOperatorProcessTransportTest {
             assertEquals(1, process.destroyCalls)
             assertEquals(1, process.destroyForciblyCalls)
             assertFalse(process.reaped)
+            assertEquals(0, process.childStdin.closeCalls)
+            assertEquals(0, process.childStdout.closeCalls)
+            assertEquals(
+                listOf(
+                    "destroy",
+                    "wait:250:MILLISECONDS",
+                    "destroyForcibly",
+                    "wait:250:MILLISECONDS",
+                ),
+                events,
+            )
+            assertEquals(
+                null,
+                transport.terminalStreamReference("childStdin"),
+            )
+            assertEquals(
+                null,
+                transport.terminalStreamReference("childStdout"),
+            )
         }
 
     @Test
@@ -735,6 +756,233 @@ class DovecotOperatorProcessTransportTest {
             secret = secret,
         )
     }
+
+    @Test
+    fun unreapedAbortFailsWithoutEnteringContendedStreamCleanup() =
+        withLaunchFixture { fixture ->
+            val events =
+                Collections.synchronizedList(mutableListOf<String>())
+            val process =
+                UnreapedAbortBlockingPipeTestProcess(events)
+            val transport =
+                JvmDockerExecDovecotOperatorTransportFactory(
+                    profile = fixture.profile(),
+                    starter =
+                        DovecotOperatorProcessStarter { process },
+                ).open {}
+            val childStdin = transport.outputStream
+            events.clear()
+            val writerFailure = AtomicReference<Throwable?>()
+            val closeFailure = AtomicReference<Throwable?>()
+            val abortFailure = AtomicReference<Throwable?>()
+            val closeStarted = CountDownLatch(1)
+            val closeFinished = CountDownLatch(1)
+            val abortFinished = CountDownLatch(1)
+            val writer = Thread(
+                {
+                    try {
+                        childStdin.write(1)
+                    } catch (failure: Throwable) {
+                        writerFailure.set(failure)
+                    }
+                },
+                "dovecot-unreaped-abort-blocking-writer",
+            )
+            val abortCaller = Thread(
+                {
+                    try {
+                        transport.abort()
+                    } catch (failure: Throwable) {
+                        abortFailure.set(failure)
+                    } finally {
+                        abortFinished.countDown()
+                    }
+                },
+                "dovecot-unreaped-abort-caller",
+            )
+            val closeCaller = Thread(
+                {
+                    closeStarted.countDown()
+                    try {
+                        transport.close()
+                    } catch (failure: Throwable) {
+                        closeFailure.set(failure)
+                    } finally {
+                        closeFinished.countDown()
+                    }
+                },
+                "dovecot-unreaped-abort-close-owner",
+            )
+
+            try {
+                writer.start()
+                assertTrue(
+                    process.writerEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                )
+                abortCaller.start()
+                assertTrue(
+                    process.finalWaitEntered.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                    "Abort did not enter its final bounded reap attempt",
+                )
+
+                closeCaller.start()
+                assertTrue(
+                    closeStarted.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                )
+                assertTrue(
+                    closeCaller.awaitState(Thread.State.BLOCKED),
+                    "Close did not wait for abort handshake acknowledgement",
+                )
+                assertEquals(0, process.childStdin.closeAttempts)
+                assertEquals(0, process.childStdout.closeCalls)
+                assertEquals(null, transport.terminationOutcomeReference())
+
+                process.releaseFinalWait()
+                assertTrue(
+                    awaitCallersOrCloseAttempt(
+                        closeFinished = closeFinished,
+                        abortFinished = abortFinished,
+                        closeAttempted =
+                            process.childStdin.closeAttempted,
+                    ),
+                    "Callers neither completed nor attempted stream cleanup",
+                )
+                assertEquals(
+                    1L,
+                    process.childStdin.closeAttempted.count,
+                    "Unreaped abort entered child stdin cleanup",
+                )
+                assertEquals(
+                    0L,
+                    closeFinished.count,
+                    "Close did not return its bounded failure",
+                )
+                assertEquals(
+                    0L,
+                    abortFinished.count,
+                    "Abort did not return its bounded failure",
+                )
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+
+                assertFalse(closeCaller.isAlive)
+                assertFalse(abortCaller.isAlive)
+                assertTrue(writer.isAlive)
+                val rejectedClose = closeFailure.get()
+                assertTrue(rejectedClose is IOException)
+                assertEquals(
+                    "Dovecot operator process transport close failed",
+                    rejectedClose.message,
+                )
+                assertEquals(null, rejectedClose.cause)
+                assertTrue(rejectedClose.suppressed.isEmpty())
+                val rejectedAbort = abortFailure.get()
+                assertTrue(rejectedAbort is IOException)
+                assertEquals(
+                    "Dovecot operator process transport abort failed",
+                    rejectedAbort.message,
+                )
+                assertEquals(null, rejectedAbort.cause)
+                assertTrue(rejectedAbort.suppressed.isEmpty())
+                assertFalse(process.reaped)
+                assertEquals(0, process.exitValueCalls)
+                assertEquals(0, process.childStdin.closeAttempts)
+                assertEquals(0, process.childStdout.closeCalls)
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertEquals(
+                    listOf(
+                        250L to TimeUnit.MILLISECONDS,
+                        250L to TimeUnit.MILLISECONDS,
+                    ),
+                    process.timedWaits,
+                )
+                assertEquals(
+                    listOf(
+                        "destroy",
+                        "wait:250:MILLISECONDS",
+                        "destroyForcibly",
+                        "wait:250:MILLISECONDS",
+                    ),
+                    events.filterNot {
+                        event -> event.startsWith("writer.")
+                    },
+                )
+                assertEquals(
+                    null,
+                    transport.terminalStreamReference("childStdin"),
+                )
+                assertEquals(
+                    null,
+                    transport.terminalStreamReference("childStdout"),
+                )
+                assertFailsWith<IllegalStateException> {
+                    transport.input
+                }
+                assertFailsWith<IllegalStateException> {
+                    transport.outputStream
+                }
+
+                val outcome =
+                    checkNotNull(transport.terminationOutcomeReference())
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("reaped"),
+                )
+                assertEquals(
+                    false,
+                    outcome.privateFieldValue("streamsClosed"),
+                )
+                assertEquals(
+                    true,
+                    outcome.privateFieldValue("terminationRequired"),
+                )
+
+                val completedLifecycle = events.toList()
+                repeat(2) {
+                    val repeatedClose = assertFailsWith<IOException> {
+                        transport.close()
+                    }
+                    assertEquals(
+                        "Dovecot operator process transport close failed",
+                        repeatedClose.message,
+                    )
+                    val repeatedAbort = assertFailsWith<IOException> {
+                        transport.abort()
+                    }
+                    assertEquals(
+                        "Dovecot operator process transport abort failed",
+                        repeatedAbort.message,
+                    )
+                }
+                assertEquals(completedLifecycle, events)
+                assertEquals(0, process.childStdin.closeAttempts)
+                assertEquals(0, process.childStdout.closeCalls)
+                assertEquals(1, process.destroyCalls)
+                assertEquals(1, process.destroyForciblyCalls)
+                assertEquals(2, process.timedWaits.size)
+            } finally {
+                process.releaseFinalWait()
+                process.releaseWriter()
+                writer.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                closeCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+                abortCaller.join(TEST_SAFETY_TIMEOUT_MILLIS)
+            }
+
+            assertFalse(writer.isAlive)
+            assertFalse(closeCaller.isAlive)
+            assertFalse(abortCaller.isAlive)
+            assertEquals(null, writerFailure.get())
+        }
 
     private fun assertAbortReapsBeforeBlockedStreamCleanup(
         destroyFailure: Throwable?,
@@ -1235,9 +1483,20 @@ class DovecotOperatorProcessTransportTest {
             )
             assertEquals(firstFailure.message, repeatedFailure.message)
             assertEquals(firstLifecycle, events)
+            assertEquals(
+                listOf(
+                    "destroy",
+                    "wait:250:MILLISECONDS",
+                    "destroyForcibly",
+                    "wait:250:MILLISECONDS",
+                ),
+                events,
+            )
             assertEquals(2, process.timedWaits.size)
             assertEquals(1, process.destroyCalls)
             assertEquals(1, process.destroyForciblyCalls)
+            assertEquals(0, process.childStdin.closeCalls)
+            assertEquals(0, process.childStdout.closeCalls)
         }
 
     @Test
@@ -2827,6 +3086,144 @@ private class AsyncDestroyBlockingPipeTestProcess(
     }
 }
 
+private class UnreapedAbortBlockingPipeTestProcess(
+    private val events: MutableList<String>,
+) : Process() {
+    private val writerRelease = CountDownLatch(1)
+    private val finalWaitRelease = CountDownLatch(1)
+    val writerEntered = CountDownLatch(1)
+    val finalWaitEntered = CountDownLatch(1)
+    val childStdin =
+        CloseAttemptBlockingPipeOutputStream(
+            events = events,
+            writerEntered = writerEntered,
+            writerRelease = writerRelease,
+        )
+    val childStdout =
+        RecordingInputStream("child-stdout", events)
+    private val childStderr =
+        RecordingInputStream("child-stderr", events)
+    val timedWaits =
+        Collections.synchronizedList(
+            mutableListOf<Pair<Long, TimeUnit>>(),
+        )
+
+    @Volatile
+    var reaped = false
+        private set
+
+    var destroyCalls = 0
+        private set
+    var destroyForciblyCalls = 0
+        private set
+    var exitValueCalls = 0
+        private set
+
+    override fun getOutputStream(): OutputStream {
+        events += "child-stdin.acquire"
+        return childStdin
+    }
+
+    override fun getInputStream(): InputStream {
+        events += "child-stdout.acquire"
+        return childStdout
+    }
+
+    override fun getErrorStream(): InputStream {
+        events += "child-stderr.acquire"
+        return childStderr
+    }
+
+    override fun waitFor(): Int =
+        error("Unbounded process wait is forbidden")
+
+    @Synchronized
+    override fun waitFor(
+        timeout: Long,
+        unit: TimeUnit,
+    ): Boolean {
+        timedWaits += timeout to unit
+        events += "wait:$timeout:${unit.name}"
+        return when (timedWaits.size) {
+            1 -> false
+            2 -> {
+                finalWaitEntered.countDown()
+                check(
+                    finalWaitRelease.await(
+                        TEST_SAFETY_TIMEOUT_SECONDS,
+                        TimeUnit.SECONDS,
+                    ),
+                ) {
+                    "Final process wait was not released"
+                }
+                false
+            }
+            else -> error("Unexpected timed process wait")
+        }
+    }
+
+    override fun exitValue(): Int {
+        exitValueCalls += 1
+        events += "exitValue"
+        return 0
+    }
+
+    override fun destroy() {
+        destroyCalls += 1
+        events += "destroy"
+    }
+
+    override fun destroyForcibly(): Process {
+        destroyForciblyCalls += 1
+        events += "destroyForcibly"
+        return this
+    }
+
+    fun releaseFinalWait() {
+        finalWaitRelease.countDown()
+    }
+
+    fun releaseWriter() {
+        writerRelease.countDown()
+    }
+}
+
+private class CloseAttemptBlockingPipeOutputStream(
+    private val events: MutableList<String>,
+    private val writerEntered: CountDownLatch,
+    private val writerRelease: CountDownLatch,
+) : OutputStream() {
+    val closeAttempted = CountDownLatch(1)
+
+    @Volatile
+    var closeAttempts = 0
+        private set
+
+    override fun write(value: Int) {
+        synchronized(this) {
+            events += "writer.enter"
+            writerEntered.countDown()
+            check(
+                writerRelease.await(
+                    TEST_SAFETY_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS,
+                ),
+            ) {
+                "Blocking pipe writer was not released"
+            }
+            events += "writer.exit"
+        }
+    }
+
+    override fun close() {
+        closeAttempts += 1
+        closeAttempted.countDown()
+        synchronized(this) {
+            events += "child-stdin.close"
+        }
+    }
+}
+
 private class BlockingPipeOutputStream(
     private val events: MutableList<String>,
     private val writerEntered: CountDownLatch,
@@ -2945,12 +3342,47 @@ private fun Thread.awaitState(expected: Thread.State): Boolean {
     return state == expected
 }
 
+private fun awaitCallersOrCloseAttempt(
+    closeFinished: CountDownLatch,
+    abortFinished: CountDownLatch,
+    closeAttempted: CountDownLatch,
+): Boolean {
+    val deadline =
+        System.nanoTime() +
+            TimeUnit.SECONDS.toNanos(TEST_SAFETY_TIMEOUT_SECONDS)
+    while (System.nanoTime() - deadline < 0L) {
+        if (
+            closeAttempted.count == 0L ||
+            (
+                closeFinished.count == 0L &&
+                    abortFinished.count == 0L
+            )
+        ) {
+            return true
+        }
+        Thread.yield()
+    }
+    return closeAttempted.count == 0L ||
+        (
+            closeFinished.count == 0L &&
+                abortFinished.count == 0L
+        )
+}
+
 private fun DovecotOperatorTransport.terminalStreamReference(
     fieldName: String,
 ): Any? {
     val field = javaClass.getDeclaredField(fieldName)
     check(field.trySetAccessible()) {
         "Unable to inspect terminal stream reference"
+    }
+    return field.get(this)
+}
+
+private fun Any.privateFieldValue(fieldName: String): Any? {
+    val field = javaClass.getDeclaredField(fieldName)
+    check(field.trySetAccessible()) {
+        "Unable to inspect private field"
     }
     return field.get(this)
 }
