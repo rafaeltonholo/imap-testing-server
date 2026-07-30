@@ -335,13 +335,15 @@ class DovecotHeldOperatorImapDeadlineTest {
 
     @Test
     fun postCloseValidationDoesNotTreatInterruptionAsUnusability() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("interrupted-post-close-secret"),
             message = validMessage(),
-            timeout = Duration.ofSeconds(1),
+            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+            operationWorkers = workers,
         )
         session.close()
         transport.interruptWrites = true
@@ -349,7 +351,7 @@ class DovecotHeldOperatorImapDeadlineTest {
 
         try {
             assertFailsWith<InterruptedException> {
-                session.requireClosedAndUnusable(Duration.ofSeconds(1))
+                session.requireClosedAndUnusable(SYNTHETIC_INTERRUPT_TIMEOUT)
             }
             interruptPreserved = Thread.currentThread().isInterrupted
         } finally {
@@ -357,6 +359,7 @@ class DovecotHeldOperatorImapDeadlineTest {
         }
 
         assertTrue(interruptPreserved)
+        awaitWorkersReleased(workers)
     }
 
     @Test
@@ -1299,6 +1302,7 @@ class DovecotHeldOperatorImapDeadlineTest {
     companion object {
         private val SHORT_TIMEOUT = Duration.ofMillis(50)
         private val REGISTRY_CLOSE_TIMEOUT = Duration.ofMillis(250)
+        private val SYNTHETIC_INTERRUPT_TIMEOUT = Duration.ofSeconds(5)
         private const val IO_FAILURE_MARKER =
             "fixture-transport-io-secret-marker"
         private val TARGET = DovecotOperatorTarget.create(
