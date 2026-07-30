@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
@@ -618,6 +619,266 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
+    fun dualBlockedCancellationCannotHoldProbeCallerPastItsAbsoluteDeadline() {
+        val writeStarted = CountDownLatch(1)
+        val abortStarted = CountDownLatch(1)
+        val closeStarted = CountDownLatch(1)
+        val releaseWrite = CountDownLatch(1)
+        val releaseAbort = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
+        val transport = TripleBlockingTransport(
+            writeStarted = writeStarted,
+            abortStarted = abortStarted,
+            closeStarted = closeStarted,
+            releaseWrite = releaseWrite,
+            releaseAbort = releaseAbort,
+            releaseClose = releaseClose,
+        )
+        val deadlineClock = shortProbeDeadlineClock()
+        val operationWorkers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val credentialBytes = "dual-blocked-probe-secret".toByteArray()
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(credentialBytes),
+        )
+        val probe = DovecotOperatorProbe(
+            transportFactory = DovecotOperatorTransportFactory { register ->
+                register(transport)
+                transport
+            },
+            clock = deadlineClock,
+            operationWorkers = operationWorkers,
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val failure = AtomicReference<Throwable>()
+        val caller = Thread(
+            {
+                try {
+                    result.set(probe.probe(TARGET, credential))
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            },
+            "test-dual-blocked-probe-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(writeStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(abortStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(closeStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(
+                caller.isAlive,
+                "write, abort, and close must not hold the probe caller",
+            )
+            assertEquals(null, failure.get())
+            assertEquals(DovecotOperatorProbeResult.TransportFailure, result.get())
+            assertTrue(credentialBytes.all { it == 0.toByte() })
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                operationWorkers.snapshot(),
+            )
+        } finally {
+            releaseWrite.countDown()
+            releaseAbort.countDown()
+            releaseClose.countDown()
+            caller.join(2_000)
+        }
+
+        assertProbeEventually {
+            operationWorkers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
+        assertTrue(transport.writeReferencesWereWiped())
+    }
+
+    @Test
+    fun fourDualBlockedProbesFillCapacityBeforeAFifthTransportAllocation() {
+        val operationCount = 4
+        val callersReady = CountDownLatch(operationCount)
+        val startCallers = CountDownLatch(1)
+        val writeStarted = CountDownLatch(operationCount)
+        val abortStarted = CountDownLatch(operationCount)
+        val closeStarted = CountDownLatch(operationCount)
+        val releaseWrite = CountDownLatch(1)
+        val releaseAbort = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
+        val blockingPhase = AtomicBoolean(true)
+        val allocations = AtomicInteger()
+        val transports = mutableListOf<TripleBlockingTransport>()
+        val recoveryTransport = AtomicReference<RecordingTransport>()
+        val transportFactory = DovecotOperatorTransportFactory { register ->
+            allocations.incrementAndGet()
+            if (blockingPhase.get()) {
+                TripleBlockingTransport(
+                    writeStarted = writeStarted,
+                    abortStarted = abortStarted,
+                    closeStarted = closeStarted,
+                    releaseWrite = releaseWrite,
+                    releaseAbort = releaseAbort,
+                    releaseClose = releaseClose,
+                ).also { transport ->
+                    synchronized(transports) {
+                        transports += transport
+                    }
+                    register(transport)
+                }
+            } else {
+                RecordingTransport(
+                    ByteArrayInputStream(successfulReadPrefix().toByteArray()),
+                ).also { transport ->
+                    recoveryTransport.set(transport)
+                    register(transport)
+                }
+            }
+        }
+        val operationWorkers =
+            DovecotBoundedOperationWorkers(maxOperations = operationCount)
+        val deadlineClock = shortProbeDeadlineClock()
+        val probe = DovecotOperatorProbe(
+            transportFactory = transportFactory,
+            clock = deadlineClock,
+            operationWorkers = operationWorkers,
+        )
+        val credentialBytes = List(operationCount) { index ->
+            "capacity-probe-secret-$index".toByteArray()
+        }
+        val results = List(operationCount) {
+            AtomicReference<DovecotOperatorProbeResult>()
+        }
+        val failures = List(operationCount) { AtomicReference<Throwable>() }
+        val callers = List(operationCount) { index ->
+            val credential = DovecotOperatorCredential(
+                DovecotOperatorId.A,
+                DovecotOperatorSecret.takeOwnership(credentialBytes[index]),
+            )
+            Thread(
+                {
+                    callersReady.countDown()
+                    startCallers.await()
+                    try {
+                        results[index].set(probe.probe(TARGET, credential))
+                    } catch (caught: Throwable) {
+                        failures[index].set(caught)
+                    }
+                },
+                "test-capacity-probe-caller-$index",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+        }
+
+        try {
+            assertTrue(callersReady.await(1, TimeUnit.SECONDS))
+            startCallers.countDown()
+            assertTrue(writeStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(abortStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(closeStarted.await(2, TimeUnit.SECONDS))
+            callers.forEach { caller -> caller.join(1_000) }
+
+            assertTrue(callers.none(Thread::isAlive))
+            assertTrue(failures.all { failure -> failure.get() == null })
+            assertTrue(
+                results.all { result ->
+                    result.get() == DovecotOperatorProbeResult.TransportFailure
+                },
+            )
+            assertTrue(
+                credentialBytes.all { bytes ->
+                    bytes.all { it == 0.toByte() }
+                },
+            )
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = operationCount,
+                    activeActors = operationCount * 3,
+                    peakActors = operationCount * 3,
+                ),
+                operationWorkers.snapshot(),
+            )
+
+            val fifthCredentialBytes = "rejected-capacity-secret".toByteArray()
+            val fifthCredential = DovecotOperatorCredential(
+                DovecotOperatorId.A,
+                DovecotOperatorSecret.takeOwnership(fifthCredentialBytes),
+            )
+            val allocationsBeforeFifth = allocations.get()
+            val actorsBeforeFifth = operationWorkers.snapshot().activeActors
+
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                probe.probe(TARGET, fifthCredential),
+            )
+            assertEquals(allocationsBeforeFifth, allocations.get())
+            assertEquals(
+                actorsBeforeFifth,
+                operationWorkers.snapshot().activeActors,
+            )
+            assertTrue(fifthCredentialBytes.all { it == 0.toByte() })
+        } finally {
+            startCallers.countDown()
+            releaseWrite.countDown()
+            releaseAbort.countDown()
+            releaseClose.countDown()
+            callers.forEach { caller -> caller.join(2_000) }
+        }
+
+        assertProbeEventually {
+            operationWorkers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
+        val blockingTransports = synchronized(transports) {
+            transports.toList()
+        }
+        assertEquals(operationCount, blockingTransports.size)
+        assertTrue(
+            blockingTransports.all(
+                TripleBlockingTransport::writeReferencesWereWiped,
+            ),
+        )
+
+        blockingPhase.set(false)
+        val recoveryCredentialBytes = "capacity-recovery-secret".toByteArray()
+        val recoveryCredential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(recoveryCredentialBytes),
+        )
+        val recoveryProbe = DovecotOperatorProbe(
+            transportFactory = transportFactory,
+            operationWorkers = operationWorkers,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.Success,
+            recoveryProbe.probe(TARGET, recoveryCredential),
+        )
+        assertTrue(recoveryCredentialBytes.all { it == 0.toByte() })
+        assertTrue(recoveryTransport.get().closed)
+        assertProbeEventually {
+            operationWorkers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
+    }
+
+    @Test
     fun watchdogAbortsABlockedWriteAndCleanupNeverWritesLogout() {
         val writeStarted = CountDownLatch(1)
         val releaseWrite = CountDownLatch(1)
@@ -783,33 +1044,6 @@ class DovecotOperatorProbeTest {
     }
 
     @Test
-    fun productionWatchdogKeepsLaterDeadlinesIndependentOfBlockedCallbacks() {
-        val watchdog = productionProbeWatchdog()
-        val blockedStarted = CountDownLatch(1)
-        val releaseBlocked = CountDownLatch(1)
-        val laterFired = CountDownLatch(1)
-        val first = watchdog.arm {
-            blockedStarted.countDown()
-            releaseBlocked.await()
-        }
-        var second: AutoCloseable? = null
-
-        try {
-            assertTrue(blockedStarted.await(6, TimeUnit.SECONDS))
-            second = watchdog.arm(laterFired::countDown)
-
-            assertTrue(
-                laterFired.await(6, TimeUnit.SECONDS),
-                "A blocked production watchdog callback delayed a later probe",
-            )
-        } finally {
-            releaseBlocked.countDown()
-            first.close()
-            second?.close()
-        }
-    }
-
-    @Test
     fun watchdogCancelsBlockedOpenAndLateTransportSelfAborts() {
         val openStarted = CountDownLatch(1)
         val transport = RecordingTransport(
@@ -864,6 +1098,7 @@ class DovecotOperatorProbeTest {
     @Test
     fun callerInterruptionCancelsBlockedOpenAndRestoresInterruptStatus() {
         val openStarted = CountDownLatch(1)
+        val releaseOpen = CountDownLatch(1)
         val transport = RecordingTransport(
             ByteArrayInputStream("* OK ready\r\n".toByteArray()),
         )
@@ -875,11 +1110,7 @@ class DovecotOperatorProbeTest {
         val probe = DovecotOperatorProbe(
             transportFactory = DovecotOperatorTransportFactory { register ->
                 openStarted.countDown()
-                try {
-                    CountDownLatch(1).await(10, TimeUnit.SECONDS)
-                } catch (_: InterruptedException) {
-                    // Simulate an allocation that completes after cancellation.
-                }
+                releaseOpen.await()
                 register(transport)
                 transport
             },
@@ -898,6 +1129,7 @@ class DovecotOperatorProbeTest {
         assertTrue(openStarted.await(2, TimeUnit.SECONDS))
         caller.interrupt()
         caller.join(2_000)
+        releaseOpen.countDown()
 
         assertFalse(caller.isAlive)
         assertEquals(DovecotOperatorProbeResult.TransportFailure, result.get())
@@ -932,22 +1164,14 @@ class DovecotOperatorProbeTest {
                 },
                 clock = clock,
                 requireMailboxRead = requireMailboxRead,
+                operationWorkers = DovecotBoundedOperationWorkers(
+                    nanoTime = clock::nanoTime,
+                ),
             ),
             transport = transport,
             credential = credential,
             secretBytes = secretBytes,
         )
-    }
-
-    private fun productionProbeWatchdog(): DovecotOperatorProbeWatchdog {
-        val type = Class.forName(
-            "mail.sandbox.dashboard.server.gate.dovecot." +
-                "JvmDovecotOperatorProbeWatchdog",
-        )
-        val instance = type.getDeclaredField("INSTANCE").also {
-            it.isAccessible = true
-        }.get(null)
-        return instance as DovecotOperatorProbeWatchdog
     }
 
     private fun assertClosedAndWiped(
@@ -990,6 +1214,60 @@ class DovecotOperatorProbeTest {
             references += target
             return super.read(target, offset, length)
         }
+    }
+
+    private class TripleBlockingTransport(
+        private val writeStarted: CountDownLatch,
+        private val abortStarted: CountDownLatch,
+        private val closeStarted: CountDownLatch,
+        private val releaseWrite: CountDownLatch,
+        private val releaseAbort: CountDownLatch,
+        private val releaseClose: CountDownLatch,
+    ) : DovecotOperatorTransport {
+        private val writeReferences = mutableListOf<ByteArray>()
+
+        override val input: InputStream =
+            ByteArrayInputStream("* OK ready\r\n".toByteArray())
+        override val outputStream: OutputStream = object : OutputStream() {
+            override fun write(value: Int) {
+                error("probe must use bounded command arrays")
+            }
+
+            override fun write(
+                bytes: ByteArray,
+                offset: Int,
+                length: Int,
+            ) {
+                assertEquals(0, offset)
+                assertEquals(bytes.size, length)
+                synchronized(writeReferences) {
+                    writeReferences += bytes
+                }
+                writeStarted.countDown()
+                releaseWrite.await()
+                throw IOException("released blocked probe write")
+            }
+        }
+
+        override fun abort() {
+            abortStarted.countDown()
+            releaseAbort.await()
+        }
+
+        override fun close() {
+            closeStarted.countDown()
+            releaseClose.await()
+        }
+
+        fun writeReferencesWereWiped(): Boolean =
+            synchronized(writeReferences) {
+                writeReferences.isNotEmpty() &&
+                    writeReferences.all { bytes ->
+                        bytes.all { it == 0.toByte() }
+                    }
+            }
+
+        override fun toString(): String = "TripleBlockingTransport(redacted)"
     }
 
     private class RecordingTransport(
@@ -1048,6 +1326,22 @@ class DovecotOperatorProbeTest {
         val credential: DovecotOperatorCredential,
         val secretBytes: ByteArray,
     )
+
+    private fun shortProbeDeadlineClock(): DovecotOperatorProbeClock {
+        val productionDeadlineNanos = TimeUnit.SECONDS.toNanos(5)
+        val testDeadlineNanos = TimeUnit.MILLISECONDS.toNanos(200)
+        return DovecotOperatorProbeClock {
+            System.nanoTime() - productionDeadlineNanos + testDeadlineNanos
+        }
+    }
+
+    private fun assertProbeEventually(assertion: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (!assertion() && System.nanoTime() < deadline) {
+            Thread.sleep(10)
+        }
+        assertTrue(assertion())
+    }
 
     private fun assertSearchAllUidCountMatchesExists(
         response: ByteArray,
