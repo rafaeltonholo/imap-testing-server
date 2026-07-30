@@ -1,9 +1,6 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
 import java.time.Duration
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 internal class DovecotTask6ProofDeadline(
@@ -11,24 +8,21 @@ internal class DovecotTask6ProofDeadline(
     private val onDeadline: () -> Unit,
 ) : AutoCloseable {
     private val timeoutNanos = timeout.requirePositiveNanos()
-    private val deadlineNanos = Math.addExact(
-        System.nanoTime(),
-        timeoutNanos,
-    )
+    val deadlineNanos: Long = try {
+        Math.addExact(
+            System.nanoTime(),
+            timeoutNanos,
+        )
+    } catch (failure: ArithmeticException) {
+        throw IllegalArgumentException(
+            "Dovecot proof timeout was out of bounds",
+            failure,
+        )
+    }
     private val state = AtomicReference(State.Active)
-    private val wakeup = CountDownLatch(1)
-    private val watchdog: Thread
 
     init {
         requireCallerNotInterrupted()
-        watchdog = Thread(
-            ::watch,
-            "dovecot-task6-proof-watchdog-" +
-                WATCHDOG_SEQUENCE.incrementAndGet(),
-        ).also { thread ->
-            thread.isDaemon = true
-            thread.start()
-        }
     }
 
     fun remainingNanos(): Long {
@@ -59,31 +53,14 @@ internal class DovecotTask6ProofDeadline(
         check(state.compareAndSet(State.Active, State.Completed)) {
             "Dovecot proof operation exceeded its deadline"
         }
-        wakeup.countDown()
     }
 
     override fun close() {
         state.compareAndSet(State.Active, State.Completed)
-        wakeup.countDown()
     }
 
     private fun expire() {
         if (state.compareAndSet(State.Active, State.Expired)) {
-            wakeup.countDown()
-        }
-    }
-
-    private fun watch() {
-        val signalled = try {
-            wakeup.await(timeoutNanos, TimeUnit.NANOSECONDS)
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            return
-        }
-        if (!signalled) {
-            state.compareAndSet(State.Active, State.Expired)
-        }
-        if (state.get() == State.Expired) {
             try {
                 onDeadline()
             } catch (_: Throwable) {
@@ -121,7 +98,4 @@ internal class DovecotTask6ProofDeadline(
         return nanos
     }
 
-    companion object {
-        private val WATCHDOG_SEQUENCE = AtomicInteger()
-    }
 }

@@ -1,59 +1,51 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
 import java.io.IOException
-import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Base64
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Future
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 internal class HeldDovecotOperatorImapSession private constructor(
     private val transport: DovecotOperatorTransport,
+    private val operationWorkers: DovecotBoundedOperationWorkers,
 ) : AutoCloseable {
     private val closed = AtomicBoolean()
 
     val isClosed: Boolean
         get() = closed.get()
 
-    @Synchronized
     fun requireUsable(timeout: Duration = SESSION_TIMEOUT) {
         check(!closed.get()) {
             "Held Dovecot operator session is closed"
         }
-        val deadline = DovecotTask6ProofDeadline(timeout) {
-            closeFromDeadline()
-        }
+        var operation: DovecotBoundedOperation? = null
+        var deadline: DovecotTask6ProofDeadline? = null
         try {
-            writeFixed(
-                transport,
-                USABILITY_NOOP_COMMAND,
-                deadline,
+            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
+            deadline = operationDeadline
+            val acquired = acquireOperation(
+                operationDeadline.deadlineNanos,
             )
+            operation = acquired
+            registerTransport(acquired)
+            val io = HeldIo(acquired, transport)
+            writeFixed(io, USABILITY_NOOP_COMMAND)
             requireTaggedOkay(
-                transport,
+                io,
                 USABILITY_NOOP_TAG,
-                deadline,
             )
-            deadline.complete()
-        } catch (interrupted: InterruptedException) {
-            closeFromDeadline()
-            Thread.currentThread().interrupt()
-            throw interrupted
-        } catch (_: Throwable) {
-            closeFromDeadline()
+            completeOperation(acquired, operationDeadline)
+        } catch (failure: Throwable) {
+            if (abandonAndDetectInterruption(operation, failure)) {
+                throwRedactedInterruption(
+                    "Held Dovecot operator usability proof was interrupted",
+                )
+            }
             error("Held Dovecot operator usability proof failed")
         } finally {
-            deadline.close()
+            deadline?.close()
         }
     }
 
@@ -61,46 +53,118 @@ internal class HeldDovecotOperatorImapSession private constructor(
         check(closed.get()) {
             "Held Dovecot operator session remains open"
         }
-        val deadline = DovecotTask6ProofDeadline(timeout) {
-            abortAndClose(transport)
-        }
-        val command = CLOSED_SESSION_NOOP_COMMAND.copyOf()
+        var operation: DovecotBoundedOperation? = null
+        var deadline: DovecotTask6ProofDeadline? = null
         try {
+            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
+            deadline = operationDeadline
+            val acquired = acquireOperation(
+                operationDeadline.deadlineNanos,
+            )
+            operation = acquired
+            registerTransport(acquired)
+            val io = HeldIo(acquired, transport)
             val rejected = try {
-                deadline.requireRemaining()
-                transport.outputStream.write(command)
-                deadline.requireRemaining()
-                transport.outputStream.flush()
-                deadline.requireRemaining()
+                writeFixed(io, CLOSED_SESSION_NOOP_COMMAND)
                 false
-            } catch (interrupted: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw interrupted
-            } catch (_: Exception) {
+            } catch (failure: Throwable) {
+                if (abandonAndDetectInterruption(acquired, failure)) {
+                    throwRedactedInterruption(
+                        "Held Dovecot operator post-close proof " +
+                            "was interrupted",
+                    )
+                }
                 true
             }
             if (rejected) {
                 return
             }
-            deadline.complete()
+            completeOperation(acquired, operationDeadline)
             error("Closed Dovecot operator transport remained usable")
+        } catch (failure: Throwable) {
+            if (abandonAndDetectInterruption(operation, failure)) {
+                throwRedactedInterruption(
+                    "Held Dovecot operator post-close proof " +
+                        "was interrupted",
+                )
+            }
+            error("Held Dovecot operator post-close proof failed")
         } finally {
-            command.fill(0)
-            deadline.close()
+            deadline?.close()
         }
     }
 
-    @Synchronized
-    override fun close() {
+    override fun close() = close(SESSION_TIMEOUT)
+
+    fun close(timeout: Duration) {
         if (closed.get()) return
-        transport.close()
+        var operation: DovecotBoundedOperation? = null
+        var deadline: DovecotTask6ProofDeadline? = null
+        val succeeded = try {
+            val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
+            deadline = operationDeadline
+            val acquired = acquireOperation(
+                operationDeadline.deadlineNanos,
+            )
+            operation = acquired
+            val closeSucceeded = acquired.execute {
+                registerCancellationTarget(
+                    identity = transport,
+                    abort = ::abortTransport,
+                    close = ::closeTransport,
+                )
+                try {
+                    closeTransport()
+                    true
+                } catch (interrupted: InterruptedException) {
+                    throw interrupted
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            completeOperation(acquired, operationDeadline)
+            closeSucceeded
+        } catch (failure: Throwable) {
+            if (abandonAndDetectInterruption(operation, failure)) {
+                throwRedactedInterruption(
+                    "Held Dovecot operator close was interrupted",
+                )
+            }
+            error("Held Dovecot operator close failed")
+        } finally {
+            deadline?.close()
+        }
+        check(succeeded) {
+            "Held Dovecot operator close failed"
+        }
+    }
+
+    private fun acquireOperation(
+        deadlineNanos: Long,
+    ): DovecotBoundedOperation =
+        operationWorkers.tryAcquire(deadlineNanos)
+            ?: error("Held Dovecot operator capacity was exhausted")
+
+    private fun registerTransport(
+        operation: DovecotBoundedOperation,
+    ) {
+        operation.execute {
+            registerCancellationTarget(
+                identity = transport,
+                abort = ::abortTransport,
+                close = ::closeTransport,
+            )
+        }
+    }
+
+    private fun abortTransport() {
+        transport.abort()
         closed.set(true)
     }
 
-    private fun closeFromDeadline() {
-        abortAndClose(transport) {
-            closed.set(true)
-        }
+    private fun closeTransport() {
+        transport.close()
+        closed.set(true)
     }
 
     companion object {
@@ -110,119 +174,46 @@ internal class HeldDovecotOperatorImapSession private constructor(
             credential: DovecotOperatorCredential,
             message: ByteArray,
             timeout: Duration = SESSION_TIMEOUT,
+            operationWorkers: DovecotBoundedOperationWorkers =
+                DovecotBoundedOperationWorkers.processWide,
         ): HeldDovecotOperatorImapSession {
-            val allocated =
-                AtomicReference<DovecotOperatorTransport?>()
-            val returned =
-                AtomicReference<DovecotOperatorTransport?>()
-            val pending =
-                AtomicReference<Future<DovecotOperatorTransport>?>()
-            val abandoned = AtomicBoolean()
-            val invalidAllocation = AtomicBoolean()
+            var operation: DovecotBoundedOperation? = null
             var deadline: DovecotTask6ProofDeadline? = null
             try {
-                val operationDeadline = DovecotTask6ProofDeadline(timeout) {
-                    abandoned.set(true)
-                    pending.get()?.cancel(true)
-                    allocated.get()?.let(::abortAndClose)
-                }
+                val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
                 deadline = operationDeadline
                 requireValidMessage(message)
-                operationDeadline.requireRemaining()
-                val openFuture = try {
-                    OPEN_EXECUTOR.submit<DovecotOperatorTransport> {
-                        val opened = transportFactory.open { candidate ->
-                            if (
-                                !allocated.compareAndSet(null, candidate)
-                            ) {
-                                invalidAllocation.set(true)
-                                abortAndClose(candidate)
-                                error(
-                                    "Held Dovecot operator transport " +
-                                        "allocation is invalid",
-                                )
-                            }
-                            if (abandoned.get()) {
-                                abortAndClose(candidate)
-                                error(
-                                    "Held Dovecot operator open was abandoned",
-                                )
-                            }
-                        }
-                        returned.set(opened)
-                        if (
-                            invalidAllocation.get() ||
-                            allocated.get() !== opened
-                        ) {
-                            abortAndClose(opened)
-                            error(
-                                "Held Dovecot operator transport " +
-                                    "allocation is invalid",
-                            )
-                        }
-                        if (abandoned.get()) {
-                            abortAndClose(opened)
-                            throw SocketTimeoutException(
-                                "Held Dovecot operator open timed out",
-                            )
-                        }
-                        opened
-                    }
-                } catch (_: RejectedExecutionException) {
-                    error(
-                        "Held Dovecot operator open capacity was exhausted",
-                    )
-                }
-                pending.set(openFuture)
-                if (abandoned.get()) {
-                    openFuture.cancel(true)
-                }
-                val opened = try {
-                    openFuture.get(
-                        operationDeadline.remainingNanos(),
-                        TimeUnit.NANOSECONDS,
-                    )
-                } catch (_: TimeoutException) {
-                    operationDeadline.expireNow()
-                } catch (_: InterruptedException) {
-                    abandoned.set(true)
-                    openFuture.cancel(true)
-                    Thread.currentThread().interrupt()
-                    throw InterruptedException(
-                        "Held Dovecot operator open was interrupted",
-                    )
-                } catch (failure: ExecutionException) {
-                    throwOpenFailure(failure.cause)
-                }
-                operationDeadline.requireRemaining()
-                requireGreeting(opened, operationDeadline)
+                val acquired = operationWorkers.tryAcquire(
+                    operationDeadline.deadlineNanos,
+                ) ?: error(
+                    "Held Dovecot operator capacity was exhausted",
+                )
+                operation = acquired
+                val opened = openTransport(
+                    operation = acquired,
+                    transportFactory = transportFactory,
+                )
+                val io = HeldIo(acquired, opened)
+                requireGreeting(io)
                 authenticate(
-                    transport = opened,
+                    io = io,
                     target = target,
                     credential = credential,
-                    deadline = operationDeadline,
                 )
-                appendMessage(opened, message, operationDeadline)
-                operationDeadline.complete()
-                return HeldDovecotOperatorImapSession(opened)
+                appendMessage(io, message)
+                completeOperation(acquired, operationDeadline)
+                return HeldDovecotOperatorImapSession(
+                    transport = opened,
+                    operationWorkers = operationWorkers,
+                )
             } catch (failure: Throwable) {
-                abandoned.set(true)
-                pending.get()?.cancel(true)
-                abortDistinct(
-                    returned.get(),
-                    allocated.get(),
-                )
-                when (failure) {
-                    is InterruptedException -> {
-                        Thread.currentThread().interrupt()
-                        throw failure
-                    }
-                    is IllegalArgumentException -> throw failure
-                    is IllegalStateException -> throw failure
-                    else -> error(
-                        "Held Dovecot operator seed proof failed",
+                if (abandonAndDetectInterruption(operation, failure)) {
+                    throwRedactedInterruption(
+                        "Held Dovecot operator seed proof was interrupted",
                     )
                 }
+                if (failure is IllegalArgumentException) throw failure
+                error("Held Dovecot operator seed proof failed")
             } finally {
                 deadline?.close()
                 credential.close()
@@ -230,11 +221,37 @@ internal class HeldDovecotOperatorImapSession private constructor(
             }
         }
 
-        private fun requireGreeting(
-            transport: DovecotOperatorTransport,
-            deadline: DovecotTask6ProofDeadline,
-        ) {
-            readLine(transport, deadline).useWiped { line ->
+        private fun openTransport(
+            operation: DovecotBoundedOperation,
+            transportFactory: DovecotOperatorTransportFactory,
+        ): DovecotOperatorTransport = operation.execute {
+            var allocated: DovecotOperatorTransport? = null
+            val opened = transportFactory.open { candidate ->
+                registerCancellationTarget(
+                    identity = candidate,
+                    abort = candidate::abort,
+                    close = candidate::close,
+                )
+                check(allocated == null) {
+                    "Held Dovecot operator transport allocation is invalid"
+                }
+                allocated = candidate
+            }
+            if (allocated !== opened) {
+                registerCancellationTarget(
+                    identity = opened,
+                    abort = opened::abort,
+                    close = opened::close,
+                )
+                error(
+                    "Held Dovecot operator transport allocation is invalid",
+                )
+            }
+            opened
+        }
+
+        private fun requireGreeting(io: HeldIo) {
+            io.readLine().useWiped { line ->
                 check(line.hasAsciiTokenAt(0, "* OK")) {
                     "Held Dovecot operator greeting was invalid"
                 }
@@ -242,52 +259,49 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
 
         private fun authenticate(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             target: DovecotOperatorTarget,
             credential: DovecotOperatorCredential,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             writeFixed(
-                transport,
+                io,
                 AUTHENTICATE_LOGIN_COMMAND,
-                deadline,
             )
             requireExactLine(
-                transport,
+                io,
                 USERNAME_CHALLENGE,
-                deadline,
             )
             writeCombinedUsername(
-                transport,
+                io,
                 target,
                 credential.id,
-                deadline,
             )
             requireExactLine(
-                transport,
+                io,
                 PASSWORD_CHALLENGE,
-                deadline,
             )
-            credential.withSecretBytes { secret ->
-                writeBase64(transport, secret, deadline)
+            val secretCopy = credential.withSecretBytes(ByteArray::copyOf)
+            try {
+                writeBase64(io, secretCopy)
+            } finally {
+                secretCopy.fill(0)
             }
-            requireTaggedOkay(transport, "A001", deadline)
+            requireTaggedOkay(io, "A001")
         }
 
         private fun appendMessage(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             message: ByteArray,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             val appendCommand = (
                 "A002 APPEND \"INBOX\" {${message.size}}\r\n"
                 ).toByteArray(StandardCharsets.US_ASCII)
             try {
-                write(transport, appendCommand, deadline)
+                io.write(appendCommand)
             } finally {
                 appendCommand.fill(0)
             }
-            readLine(transport, deadline).useWiped { continuation ->
+            io.readLine().useWiped { continuation ->
                 check(
                     continuation.isNotEmpty() &&
                         continuation[0] == '+'.code.toByte(),
@@ -295,15 +309,14 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     "Held Dovecot operator APPEND continuation was invalid"
                 }
             }
-            write(transport, message, deadline, appendCrlf = true)
-            requireTaggedOkay(transport, "A002", deadline)
+            io.write(message, appendCrlf = true)
+            requireTaggedOkay(io, "A002")
         }
 
         private fun writeCombinedUsername(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             target: DovecotOperatorTarget,
             id: DovecotOperatorId,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             val targetBytes = target.address.toByteArray(
                 StandardCharsets.US_ASCII,
@@ -321,7 +334,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     combined,
                     destinationOffset = targetBytes.size + 1,
                 )
-                writeBase64(transport, combined, deadline)
+                writeBase64(io, combined)
             } finally {
                 targetBytes.fill(0)
                 masterBytes.fill(0)
@@ -330,9 +343,8 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
 
         private fun writeBase64(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             raw: ByteArray,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             val encoded = Base64.getEncoder().encode(raw)
             val line = ByteArray(encoded.size + CRLF.size)
@@ -342,7 +354,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 }
                 encoded.copyInto(line)
                 CRLF.copyInto(line, destinationOffset = encoded.size)
-                write(transport, line, deadline)
+                io.write(line)
             } finally {
                 encoded.fill(0)
                 line.fill(0)
@@ -350,41 +362,22 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
 
         private fun writeFixed(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             command: ByteArray,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             val copy = command.copyOf()
             try {
-                write(transport, copy, deadline)
+                io.write(copy)
             } finally {
                 copy.fill(0)
             }
         }
 
-        private fun write(
-            transport: DovecotOperatorTransport,
-            bytes: ByteArray,
-            deadline: DovecotTask6ProofDeadline,
-            appendCrlf: Boolean = false,
-        ) {
-            deadline.requireRemaining()
-            transport.outputStream.write(bytes)
-            deadline.requireRemaining()
-            if (appendCrlf) {
-                transport.outputStream.write(CRLF)
-                deadline.requireRemaining()
-            }
-            transport.outputStream.flush()
-            deadline.requireRemaining()
-        }
-
         private fun requireExactLine(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             expected: ByteArray,
-            deadline: DovecotTask6ProofDeadline,
         ) {
-            readLine(transport, deadline).useWiped { line ->
+            io.readLine().useWiped { line ->
                 check(line.contentEquals(expected)) {
                     "Held Dovecot operator continuation was invalid"
                 }
@@ -392,12 +385,11 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
 
         private fun requireTaggedOkay(
-            transport: DovecotOperatorTransport,
+            io: HeldIo,
             tag: String,
-            deadline: DovecotTask6ProofDeadline,
         ) {
             repeat(MAX_RESPONSE_LINES) {
-                readLine(transport, deadline).useWiped { line ->
+                io.readLine().useWiped { line ->
                     if (line.hasAsciiTokenAt(0, tag)) {
                         check(line.hasAsciiTokenAt(tag.length + 1, "OK")) {
                             "Held Dovecot operator command failed"
@@ -407,42 +399,6 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 }
             }
             error("Held Dovecot operator response exceeded its bound")
-        }
-
-        private fun readLine(
-            transport: DovecotOperatorTransport,
-            deadline: DovecotTask6ProofDeadline,
-        ): ByteArray {
-            val buffer = ByteArray(MAX_LINE_BYTES + 1)
-            var size = 0
-            try {
-                while (true) {
-                    deadline.requireRemaining()
-                    val value = transport.input.read()
-                    deadline.requireRemaining()
-                    if (value < 0) {
-                        throw IOException(
-                            "Held Dovecot operator response was truncated",
-                        )
-                    }
-                    if (value == '\n'.code) {
-                        check(
-                            size > 0 &&
-                                buffer[size - 1] == '\r'.code.toByte(),
-                        ) {
-                            "Held Dovecot operator response was invalid"
-                        }
-                        return buffer.copyOf(size - 1)
-                    }
-                    check(size < buffer.size) {
-                        "Held Dovecot operator response exceeded its bound"
-                    }
-                    buffer[size] = value.toByte()
-                    size += 1
-                }
-            } finally {
-                buffer.fill(0)
-            }
         }
 
         private fun requireValidMessage(message: ByteArray) {
@@ -553,63 +509,108 @@ internal class HeldDovecotOperatorImapSession private constructor(
                     this[size - candidate.size + index] == candidate[index]
                 }
 
-        private fun abortDistinct(
-            first: DovecotOperatorTransport?,
-            second: DovecotOperatorTransport?,
+        private fun completeOperation(
+            operation: DovecotBoundedOperation,
+            deadline: DovecotTask6ProofDeadline,
         ) {
-            first?.let(::abortAndClose)
-            if (second != null && second !== first) {
-                abortAndClose(second)
+            deadline.complete()
+            operation.complete()
+            check(operation.awaitRelease()) {
+                "Held Dovecot operator operation exceeded its deadline"
             }
         }
 
-        private fun abortAndClose(
-            transport: DovecotOperatorTransport,
-            onSuccess: () -> Unit = {},
+        private fun abandonAndDetectInterruption(
+            operation: DovecotBoundedOperation?,
+            failure: Throwable,
         ): Boolean {
-            val succeeded = AtomicBoolean()
-            val attemptsFinished = CountDownLatch(2)
-            fun start(
-                actionName: String,
-                action: () -> Unit,
-            ) {
-                Thread(
-                    {
-                        try {
-                            action()
-                            succeeded.set(true)
-                            onSuccess()
-                        } catch (_: Throwable) {
-                            // Proof cancellation preserves its redacted result.
-                        } finally {
-                            attemptsFinished.countDown()
-                        }
-                    },
-                    "dovecot-held-session-$actionName-" +
-                        CANCELLATION_THREAD_SEQUENCE.incrementAndGet(),
-                ).also {
-                    it.isDaemon = true
-                    it.start()
-                }
+            var interrupted =
+                failure is InterruptedException ||
+                    Thread.currentThread().isInterrupted
+            if (Thread.interrupted()) {
+                interrupted = true
             }
-            start("abort", transport::abort)
-            start("close", transport::close)
+            operation?.abandon()
             try {
-                attemptsFinished.await(
-                    CANCELLATION_WAIT_MILLIS,
-                    TimeUnit.MILLISECONDS,
-                )
+                operation?.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
             } catch (_: InterruptedException) {
+                interrupted = true
+                Thread.interrupted()
+            }
+            if (Thread.currentThread().isInterrupted) {
+                interrupted = true
+                Thread.interrupted()
+            }
+            if (interrupted) {
                 Thread.currentThread().interrupt()
             }
-            return succeeded.get()
+            return interrupted
         }
 
-        private fun throwOpenFailure(failure: Throwable?): Nothing {
-            when (failure) {
-                is IllegalArgumentException -> throw failure
-                is IllegalStateException -> throw failure
-                else -> error("Held Dovecot operator open failed")
+        private fun throwRedactedInterruption(message: String): Nothing {
+            Thread.currentThread().interrupt()
+            throw InterruptedException(message)
+        }
+
+        private class HeldIo(
+            private val operation: DovecotBoundedOperation,
+            private val transport: DovecotOperatorTransport,
+        ) {
+            fun write(
+                source: ByteArray,
+                appendCrlf: Boolean = false,
+            ) {
+                operation.executeWithCopiedBytes<Unit>(source) { owned ->
+                    transport.outputStream.write(
+                        owned,
+                        0,
+                        owned.size,
+                    )
+                    if (appendCrlf) {
+                        transport.outputStream.write(
+                            CRLF,
+                            0,
+                            CRLF.size,
+                        )
+                    }
+                    transport.outputStream.flush()
+                }
+            }
+
+            fun readLine(): ByteArray = operation.execute(
+                disposeLate = { bytes: ByteArray -> bytes.fill(0) },
+            ) {
+                val buffer = ByteArray(MAX_LINE_BYTES + 1)
+                var size = 0
+                try {
+                    while (true) {
+                        val value = transport.input.read()
+                        if (value < 0) {
+                            throw IOException(
+                                "Held Dovecot operator response was truncated",
+                            )
+                        }
+                        if (value == '\n'.code) {
+                            check(
+                                size > 0 &&
+                                    buffer[size - 1] ==
+                                    '\r'.code.toByte(),
+                            ) {
+                                "Held Dovecot operator response was invalid"
+                            }
+                            return@execute buffer.copyOf(size - 1)
+                        }
+                        check(size < buffer.size) {
+                            "Held Dovecot operator response exceeded its bound"
+                        }
+                        buffer[size] = value.toByte()
+                        size += 1
+                    }
+                    @Suppress("UNREACHABLE_CODE")
+                    ByteArray(0)
+                } finally {
+                    buffer.fill(0)
+                }
             }
         }
 
@@ -642,26 +643,13 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
 
         private val SESSION_TIMEOUT = Duration.ofSeconds(5)
-        private val OPEN_EXECUTOR = ThreadPoolExecutor(
-            0,
-            4,
-            30,
-            TimeUnit.SECONDS,
-            SynchronousQueue(),
-            { runnable ->
-                Thread(runnable, "dovecot-held-session-open").also {
-                    it.isDaemon = true
-                }
-            },
-            ThreadPoolExecutor.AbortPolicy(),
-        )
         private const val MAX_LINE_BYTES = 16 * 1024
         private const val MAX_RESPONSE_LINES = 64
         private const val MAX_AUTH_RESPONSE_BYTES = 1024
         private const val MAX_MESSAGE_BYTES = 16 * 1024
-        private const val CANCELLATION_WAIT_MILLIS = 50L
+        private val CANCELLATION_WAIT_NANOS =
+            TimeUnit.MILLISECONDS.toNanos(100)
         private const val USABILITY_NOOP_TAG = "A003"
-        private val CANCELLATION_THREAD_SEQUENCE = AtomicInteger()
         private val REQUIRED_MESSAGE_HEADERS = listOf(
             "From",
             "To",

@@ -8,12 +8,14 @@ import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotHeldOperatorImapDeadlineTest {
@@ -85,7 +87,7 @@ class DovecotHeldOperatorImapDeadlineTest {
                 "Blocked abort kept the current NOOP proof alive",
             )
             assertTrue(failure.get() is IllegalStateException)
-            assertTrue(transport.closed)
+            awaitTrue { transport.closed }
             assertTrue(session.isClosed)
         } finally {
             transport.releaseBlockedAbort()
@@ -202,21 +204,35 @@ class DovecotHeldOperatorImapDeadlineTest {
             releaseBlockedCallback.await()
         }
         var subsequent: DovecotTask6ProofDeadline? = null
+        val blockedCaller = Thread(
+            {
+                Thread.sleep(SHORT_TIMEOUT.toMillis() + 10)
+                runCatching { blocked.remainingNanos() }
+            },
+            "task6-workerless-blocked-expiry-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
 
         try {
             assertTrue(blockedCallbackStarted.await(1, TimeUnit.SECONDS))
             subsequent = DovecotTask6ProofDeadline(SHORT_TIMEOUT) {
                 subsequentCallbackFired.countDown()
             }
-
+            Thread.sleep(SHORT_TIMEOUT.toMillis() + 10)
+            assertFailsWith<IllegalStateException> {
+                checkNotNull(subsequent).remainingNanos()
+            }
             assertTrue(
                 subsequentCallbackFired.await(1, TimeUnit.SECONDS),
-                "A blocked cancellation callback delayed a later deadline",
+                "A blocked caller expiry delayed a later caller expiry",
             )
         } finally {
             releaseBlockedCallback.countDown()
             blocked.close()
             subsequent?.close()
+            blockedCaller.join(2_000)
         }
     }
 
@@ -344,6 +360,663 @@ class DovecotHeldOperatorImapDeadlineTest {
     }
 
     @Test
+    fun interruptedSeedIOExceptionIsPromotedToRedactedInterruption() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            initialBlock = DeadlineTestTransport.Block.Write,
+        )
+        val message = validMessage()
+        val credential = credential("interrupted-seed-credential")
+        val failure = AtomicReference<Throwable?>()
+        val interruptPreserved = AtomicBoolean()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                try {
+                    HeldDovecotOperatorImapSession.openAndSeed(
+                        transportFactory = factoryFor(transport),
+                        target = TARGET,
+                        credential = credential,
+                        message = message,
+                        timeout = Duration.ofSeconds(1),
+                        operationWorkers = workers,
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                } finally {
+                    interruptPreserved.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                    Thread.interrupted()
+                    completed.countDown()
+                }
+            },
+            "task6-interrupted-seed-ioexception-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            caller.interrupt()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitIoExitedWithIOException())
+
+            val caught = failure.get()
+            assertTrue(caught is InterruptedException)
+            assertTrue(interruptPreserved.get())
+            assertFalse(
+                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
+                "Interrupted seed failure exposed its transport detail",
+            )
+            assertTrue(message.all { it == 0.toByte() })
+            assertCredentialClosed(credential)
+        } finally {
+            transport.releaseBlockedIo()
+            caller.interrupt()
+            caller.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun interruptedUsabilityIOExceptionIsPromotedToRedactedInterruption() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("interrupted-noop-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        transport.block = DeadlineTestTransport.Block.Write
+        val failure = AtomicReference<Throwable?>()
+        val interruptPreserved = AtomicBoolean()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                try {
+                    session.requireUsable(Duration.ofSeconds(1))
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                } finally {
+                    interruptPreserved.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                    Thread.interrupted()
+                    completed.countDown()
+                }
+            },
+            "task6-interrupted-noop-ioexception-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            caller.interrupt()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitIoExitedWithIOException())
+
+            val caught = failure.get()
+            assertTrue(caught is InterruptedException)
+            assertTrue(interruptPreserved.get())
+            assertFalse(
+                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
+                "Interrupted usability failure exposed its transport detail",
+            )
+        } finally {
+            transport.releaseBlockedIo()
+            caller.interrupt()
+            caller.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun interruptedPostCloseIOExceptionIsNotAcceptedAsUnusability() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("interrupted-post-close-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        session.close()
+        transport.block = DeadlineTestTransport.Block.Write
+        val returnedNormally = AtomicBoolean()
+        val failure = AtomicReference<Throwable?>()
+        val interruptPreserved = AtomicBoolean()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                try {
+                    session.requireClosedAndUnusable(Duration.ofSeconds(1))
+                    returnedNormally.set(true)
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                } finally {
+                    interruptPreserved.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                    Thread.interrupted()
+                    completed.countDown()
+                }
+            },
+            "task6-interrupted-post-close-ioexception-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            caller.interrupt()
+            assertTrue(completed.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitIoExitedWithIOException())
+
+            assertFalse(returnedNormally.get())
+            val caught = failure.get()
+            assertTrue(caught is InterruptedException)
+            assertTrue(interruptPreserved.get())
+            assertFalse(
+                caught.message.orEmpty().contains(IO_FAILURE_MARKER),
+                "Interrupted post-close failure exposed transport detail",
+            )
+        } finally {
+            transport.releaseBlockedIo()
+            caller.interrupt()
+            caller.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun blockedNoopAbortAndCloseCannotKeepCurrentCallerBlocked() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockAbort = true,
+            blockClose = true,
+        )
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("dual-block-noop-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        transport.block = DeadlineTestTransport.Block.Write
+        val failure = AtomicReference<Throwable?>()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                failure.set(
+                    runCatching {
+                        session.requireUsable(SHORT_TIMEOUT)
+                    }.exceptionOrNull(),
+                )
+                completed.countDown()
+            },
+            "task6-dual-block-noop-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            assertTrue(transport.awaitAbortStarted())
+            assertTrue(transport.awaitCloseStarted())
+            assertTrue(
+                completed.await(1, TimeUnit.SECONDS),
+                "Blocked I/O, abort, and close kept the NOOP caller alive",
+            )
+            assertTrue(failure.get() is IllegalStateException)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertEquals(
+                null,
+                workers.tryAcquire(
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+        } finally {
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            transport.releaseBlockedIo()
+            caller.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+        assertTrue(session.isClosed)
+    }
+
+    @Test
+    fun blockedOpenSeedAbortAndCloseCannotKeepCallerBlocked() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            initialBlock = DeadlineTestTransport.Block.Write,
+            blockAbort = true,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("dual-block-seed-credential")
+        val failure = AtomicReference<Throwable?>()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                failure.set(
+                    runCatching {
+                        HeldDovecotOperatorImapSession.openAndSeed(
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SHORT_TIMEOUT,
+                            operationWorkers = workers,
+                        )
+                    }.exceptionOrNull(),
+                )
+                completed.countDown()
+            },
+            "task6-dual-block-seed-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            assertTrue(transport.awaitAbortStarted())
+            assertTrue(transport.awaitCloseStarted())
+            assertTrue(
+                completed.await(1, TimeUnit.SECONDS),
+                "Blocked seed I/O, abort, and close kept the caller alive",
+            )
+            assertTrue(failure.get() is IllegalStateException)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertTrue(message.all { it == 0.toByte() })
+            assertCredentialClosed(credential)
+        } finally {
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            transport.releaseBlockedIo()
+            caller.join(2_000)
+        }
+        assertTrue(transport.awaitIoExitedWithIOException())
+        awaitWorkersReleased(workers)
+        assertTrue(transport.closed)
+    }
+
+    @Test
+    fun blockedPostCloseIoAbortAndCloseCannotKeepCallerBlocked() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("dual-block-post-close-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        awaitWorkersReleased(workers)
+        session.close()
+        awaitWorkersReleased(workers)
+        transport.block = DeadlineTestTransport.Block.Write
+        transport.blockAbort = true
+        transport.blockClose = true
+        val failure = AtomicReference<Throwable?>()
+        val completed = CountDownLatch(1)
+        val caller = Thread(
+            {
+                failure.set(
+                    runCatching {
+                        session.requireClosedAndUnusable(SHORT_TIMEOUT)
+                    }.exceptionOrNull(),
+                )
+                completed.countDown()
+            },
+            "task6-dual-block-post-close-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitBlockedIo())
+            assertTrue(transport.awaitAbortStarted())
+            awaitTrue { transport.closeCalls >= 2 }
+            assertTrue(
+                completed.await(1, TimeUnit.SECONDS),
+                "Blocked post-close I/O, abort, and close kept the caller alive",
+            )
+            assertEquals(null, failure.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+        } finally {
+            transport.releaseBlockedAbort()
+            transport.releaseBlockedClose()
+            transport.releaseBlockedIo()
+            caller.join(2_000)
+        }
+        assertTrue(transport.awaitIoExitedWithIOException())
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun blockedExplicitCloseReturnsBoundedAndPublishesLateSuccess() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("bounded-explicit-close-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        awaitWorkersReleased(workers)
+        transport.blockAbort = true
+        transport.blockClose = true
+        val failure = AtomicReference<Throwable?>()
+        val completed = CountDownLatch(1)
+        val started = System.nanoTime()
+        val caller = Thread(
+            {
+                failure.set(
+                    runCatching {
+                        session.close(SHORT_TIMEOUT)
+                    }.exceptionOrNull(),
+                )
+                completed.countDown()
+            },
+            "task6-bounded-explicit-close-caller",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitCloseStarted())
+            assertTrue(transport.awaitAbortStarted())
+            awaitTrue { transport.closeCalls >= 2 }
+            assertTrue(
+                completed.await(1, TimeUnit.SECONDS),
+                "A blocked explicit close exceeded its caller deadline",
+            )
+            assertTrue(
+                Duration.ofNanos(System.nanoTime() - started) <
+                    Duration.ofSeconds(1),
+            )
+            assertTrue(failure.get() is IllegalStateException)
+            assertFalse(session.isClosed)
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+
+            transport.releaseBlockedClose()
+            awaitTrue { session.isClosed }
+            awaitTrue {
+                workers.snapshot().let { snapshot ->
+                    snapshot.abandonedOperations == 1 &&
+                        snapshot.activeActors == 1
+                }
+            }
+        } finally {
+            transport.releaseBlockedClose()
+            transport.releaseBlockedAbort()
+            caller.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+        assertTrue(session.isClosed)
+    }
+
+    @Test
+    fun heldOperationCapacityRejectsFifthBeforeAllocationAndRecovers() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 4)
+        val transports = List(4) {
+            DeadlineTestTransport(
+                transcript = SEED_TRANSCRIPT,
+                blockAbort = true,
+                blockClose = true,
+            )
+        }
+        val sessions = transports.mapIndexed { index, transport ->
+            HeldDovecotOperatorImapSession.openAndSeed(
+                transportFactory = factoryFor(transport),
+                target = TARGET,
+                credential = credential("capacity-session-$index"),
+                message = validMessage(),
+                timeout = Duration.ofSeconds(1),
+                operationWorkers = workers,
+            ).also {
+                awaitWorkersReleased(workers)
+            }
+        }
+        transports.forEach { transport ->
+            transport.block = DeadlineTestTransport.Block.Write
+        }
+        val failures = List(4) { AtomicReference<Throwable?>() }
+        val callersFinished = CountDownLatch(4)
+        val callers = sessions.mapIndexed { index, session ->
+            Thread(
+                {
+                    failures[index].set(
+                        runCatching {
+                            session.requireUsable(SHORT_TIMEOUT)
+                        }.exceptionOrNull(),
+                    )
+                    callersFinished.countDown()
+                },
+                "task6-held-capacity-caller-$index",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+        }
+
+        try {
+            transports.forEach { transport ->
+                assertTrue(transport.awaitBlockedIo())
+                assertTrue(transport.awaitAbortStarted())
+                assertTrue(transport.awaitCloseStarted())
+            }
+            assertTrue(callersFinished.await(2, TimeUnit.SECONDS))
+            assertTrue(
+                failures.all { failure ->
+                    failure.get() is IllegalStateException
+                },
+            )
+            val fullSnapshot = DovecotBoundedOperationSnapshot(
+                abandonedOperations = 4,
+                activeActors = 12,
+                peakActors = 12,
+            )
+            assertEquals(fullSnapshot, workers.snapshot())
+
+            val fifthAllocations = AtomicInteger()
+            val fifthMessage = validMessage()
+            val fifthCredential = credential("rejected-fifth-credential")
+            assertFailsWith<IllegalStateException> {
+                HeldDovecotOperatorImapSession.openAndSeed(
+                    transportFactory = DovecotOperatorTransportFactory {
+                        fifthAllocations.incrementAndGet()
+                        error(
+                            "A capacity-rejected Held open allocated transport",
+                        )
+                    },
+                    target = TARGET,
+                    credential = fifthCredential,
+                    message = fifthMessage,
+                    timeout = Duration.ofSeconds(1),
+                    operationWorkers = workers,
+                )
+            }
+
+            assertEquals(0, fifthAllocations.get())
+            assertTrue(fifthMessage.all { it == 0.toByte() })
+            assertCredentialClosed(fifthCredential)
+            assertEquals(fullSnapshot, workers.snapshot())
+        } finally {
+            transports.forEach { transport ->
+                transport.releaseBlockedAbort()
+                transport.releaseBlockedClose()
+                transport.releaseBlockedIo()
+            }
+            callers.forEach { caller -> caller.join(2_000) }
+        }
+        transports.forEach { transport ->
+            assertTrue(transport.awaitIoExitedWithIOException())
+        }
+        awaitWorkersReleased(workers)
+        assertTrue(sessions.all { session -> session.isClosed })
+
+        val recoveryTransport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val recovered = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(recoveryTransport),
+            target = TARGET,
+            credential = credential("recovered-capacity-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        awaitWorkersReleased(workers)
+        recovered.close(SHORT_TIMEOUT)
+
+        assertTrue(recovered.isClosed)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun runtimeCloseCallersJoinAndReplayDelayedHeldCloseFailure() {
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
+        val session = HeldDovecotOperatorImapSession.openAndSeed(
+            transportFactory = factoryFor(transport),
+            target = TARGET,
+            credential = credential("runtime-close-replay-credential"),
+            message = validMessage(),
+            timeout = Duration.ofSeconds(1),
+            operationWorkers = workers,
+        )
+        awaitWorkersReleased(workers)
+        transport.blockAbort = true
+        transport.blockClose = true
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val closeCalls = AtomicInteger()
+        registry.acquire(DovecotOperatorId.A) {
+            closeCalls.incrementAndGet()
+            session.close(REGISTRY_CLOSE_TIMEOUT)
+        }
+        val runtime = DovecotOperatorLeasedRotationRuntime(
+            leases = registry,
+            prober = { _, _ -> DovecotOperatorProbeResult.Success },
+        )
+        val firstFailure = AtomicReference<Throwable?>()
+        val secondFailure = AtomicReference<Throwable?>()
+        val firstFinished = CountDownLatch(1)
+        val secondFinished = CountDownLatch(1)
+        var second: Thread? = null
+        val first = Thread(
+            {
+                firstFailure.set(runCatching(runtime::close).exceptionOrNull())
+                firstFinished.countDown()
+            },
+            "task6-delayed-held-close-runtime-leader",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitCloseStarted())
+            second = Thread(
+                {
+                    secondFailure.set(
+                        runCatching(runtime::close).exceptionOrNull(),
+                    )
+                    secondFinished.countDown()
+                },
+                "task6-delayed-held-close-runtime-follower",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+
+            assertFalse(secondFinished.await(50, TimeUnit.MILLISECONDS))
+            assertTrue(transport.awaitAbortStarted())
+            awaitTrue { transport.closeCalls >= 2 }
+            assertTrue(firstFinished.await(1, TimeUnit.SECONDS))
+            assertTrue(secondFinished.await(1, TimeUnit.SECONDS))
+            first.join(2_000)
+            requireNotNull(second).join(2_000)
+
+            assertTrue(firstFailure.get() is IllegalStateException)
+            assertSame(firstFailure.get(), secondFailure.get())
+            assertEquals(1, closeCalls.get())
+            val replay =
+                runCatching(runtime::close).exceptionOrNull()
+            assertSame(firstFailure.get(), replay)
+            assertEquals(1, closeCalls.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+
+            transport.releaseBlockedClose()
+            awaitTrue { session.isClosed }
+            assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+        } finally {
+            transport.releaseBlockedClose()
+            transport.releaseBlockedAbort()
+            first.join(2_000)
+            second?.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+        assertTrue(session.isClosed)
+    }
+
+    @Test
     fun invalidTimeoutStillClosesCredentialAndWipesMessageBeforeOpening() {
         val message = validMessage()
         val credential = credential("invalid-timeout-secret")
@@ -376,9 +1049,13 @@ class DovecotHeldOperatorImapDeadlineTest {
         val laterRemaining = deadline.remainingNanos()
 
         deadline.complete()
+        Thread.sleep(300)
 
         assertTrue(laterRemaining in 1 until initialRemaining)
-        assertFalse(fired.await(350, TimeUnit.MILLISECONDS))
+        assertFailsWith<IllegalStateException> {
+            deadline.remainingNanos()
+        }
+        assertFalse(fired.await(0, TimeUnit.MILLISECONDS))
     }
 
     @Test
@@ -423,7 +1100,7 @@ class DovecotHeldOperatorImapDeadlineTest {
     }
 
     @Test
-    fun watchdogInterruptsBlockedSeedWriteAndFlush() {
+    fun coordinatorBoundsBlockedSeedWriteAndFlush() {
         listOf(
             DeadlineTestTransport.Block.Write,
             DeadlineTestTransport.Block.Flush,
@@ -450,15 +1127,16 @@ class DovecotHeldOperatorImapDeadlineTest {
                 Duration.ofNanos(System.nanoTime() - started) <
                     Duration.ofSeconds(1),
             )
-            assertTrue(transport.aborted)
-            assertTrue(transport.closed)
+            awaitTrue {
+                transport.aborted && transport.closed
+            }
             assertTrue(message.all { it == 0.toByte() })
             assertCredentialClosed(credential)
         }
     }
 
     @Test
-    fun watchdogInterruptsBlockedNoopWriteFlushAndRead() {
+    fun coordinatorBoundsBlockedNoopWriteFlushAndRead() {
         DeadlineTestTransport.Block.entries.forEach { block ->
             val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
             val session = HeldDovecotOperatorImapSession.openAndSeed(
@@ -480,13 +1158,14 @@ class DovecotHeldOperatorImapDeadlineTest {
                     Duration.ofSeconds(1),
             )
             assertTrue(transport.aborted)
-            assertTrue(transport.closed)
-            assertTrue(session.isClosed)
+            awaitTrue {
+                transport.closed && session.isClosed
+            }
         }
     }
 
     @Test
-    fun postCloseValidationHasAWatchdogAndBoundedCompletion() {
+    fun postCloseValidationUsesCoordinatorAndHasBoundedCompletion() {
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
         val session = HeldDovecotOperatorImapSession.openAndSeed(
             transportFactory = factoryFor(transport),
@@ -532,12 +1211,15 @@ class DovecotHeldOperatorImapDeadlineTest {
         assertFalse(session.isClosed)
         assertFalse(transport.closed)
         awaitTrue {
-            transport.abortCalls >= 2 && transport.closeCalls >= 2
+            transport.abortCalls >= 1 && transport.closeCalls >= 1
+        }
+        assertFailsWith<IllegalStateException> {
+            session.close()
         }
         session.close()
         assertTrue(session.isClosed)
         assertTrue(transport.closed)
-        assertTrue(transport.abortCalls >= 2)
+        assertTrue(transport.abortCalls >= 1)
         assertTrue(transport.closeCalls >= 3)
     }
 
@@ -602,8 +1284,23 @@ class DovecotHeldOperatorImapDeadlineTest {
         assertTrue(condition())
     }
 
+    private fun awaitWorkersReleased(
+        workers: DovecotBoundedOperationWorkers,
+    ) {
+        awaitTrue {
+            workers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
+    }
+
     companion object {
         private val SHORT_TIMEOUT = Duration.ofMillis(50)
+        private val REGISTRY_CLOSE_TIMEOUT = Duration.ofMillis(250)
+        private const val IO_FAILURE_MARKER =
+            "fixture-transport-io-secret-marker"
         private val TARGET = DovecotOperatorTarget.create(
             "task6-deadline@local.test",
         )
@@ -636,7 +1333,8 @@ private class DeadlineTestTransport(
     initialBlock: Block? = null,
     private val failedAbortAttempts: Int = 0,
     private val failedCloseAttempts: Int = 0,
-    private val blockAbort: Boolean = false,
+    blockAbort: Boolean = false,
+    blockClose: Boolean = false,
     private val cancellationDelayMillis: Long = 0,
 ) : DovecotOperatorTransport {
     enum class Block {
@@ -646,8 +1344,12 @@ private class DeadlineTestTransport(
     }
 
     private val released = CountDownLatch(1)
+    private val blockedIoStarted = CountDownLatch(1)
+    private val ioExitedWithIOException = CountDownLatch(1)
     private val abortStarted = CountDownLatch(1)
     private val abortRelease = CountDownLatch(1)
+    private val closeStarted = CountDownLatch(1)
+    private val closeRelease = CountDownLatch(1)
     private val closeSignal = CountDownLatch(1)
     private val transcriptInput = ByteArrayInputStream(transcript)
 
@@ -659,6 +1361,12 @@ private class DeadlineTestTransport(
 
     @Volatile
     var interruptWrites = false
+
+    @Volatile
+    var blockAbort = blockAbort
+
+    @Volatile
+    var blockClose = blockClose
 
     @Volatile
     var aborted = false
@@ -692,8 +1400,9 @@ private class DeadlineTestTransport(
         override fun read(): Int {
             readCounter.incrementAndGet()
             if (block == Block.Read) {
+                blockedIoStarted.countDown()
                 awaitRelease()
-                throw IOException("aborted")
+                throwFixtureIOException()
             }
             return transcriptInput.read()
         }
@@ -717,16 +1426,18 @@ private class DeadlineTestTransport(
                 )
             }
             if (block == Block.Write) {
+                blockedIoStarted.countDown()
                 awaitRelease()
-                throw IOException("aborted")
+                throwFixtureIOException()
             }
         }
 
         override fun flush() {
             flushCounter.incrementAndGet()
             if (block == Block.Flush) {
+                blockedIoStarted.countDown()
                 awaitRelease()
-                throw IOException("aborted")
+                throwFixtureIOException()
             }
         }
     }
@@ -752,6 +1463,10 @@ private class DeadlineTestTransport(
         if (cancellationDelayMillis > 0) {
             Thread.sleep(cancellationDelayMillis)
         }
+        closeStarted.countDown()
+        if (blockClose) {
+            awaitUninterruptibly(closeRelease)
+        }
         check(attempt > failedCloseAttempts) {
             "Deadline transport close failed"
         }
@@ -766,8 +1481,25 @@ private class DeadlineTestTransport(
     fun awaitAbortStarted(): Boolean =
         abortStarted.await(1, TimeUnit.SECONDS)
 
+    fun awaitCloseStarted(): Boolean =
+        closeStarted.await(1, TimeUnit.SECONDS)
+
+    fun awaitBlockedIo(): Boolean =
+        blockedIoStarted.await(1, TimeUnit.SECONDS)
+
+    fun awaitIoExitedWithIOException(): Boolean =
+        ioExitedWithIOException.await(1, TimeUnit.SECONDS)
+
     fun releaseBlockedAbort() {
         abortRelease.countDown()
+    }
+
+    fun releaseBlockedClose() {
+        closeRelease.countDown()
+    }
+
+    fun releaseBlockedIo() {
+        released.countDown()
     }
 
     fun armCloseRelease() {
@@ -786,13 +1518,24 @@ private class DeadlineTestTransport(
     }
 
     private fun awaitRelease() {
+        awaitUninterruptibly(released)
+    }
+
+    private fun awaitUninterruptibly(latch: CountDownLatch) {
         while (true) {
             try {
-                released.await()
+                latch.await()
                 return
             } catch (_: InterruptedException) {
                 // The transport abort, not cooperative interruption, releases I/O.
             }
         }
+    }
+
+    private fun throwFixtureIOException(): Nothing {
+        ioExitedWithIOException.countDown()
+        throw IOException(
+            "fixture-transport-io-secret-marker",
+        )
     }
 }
