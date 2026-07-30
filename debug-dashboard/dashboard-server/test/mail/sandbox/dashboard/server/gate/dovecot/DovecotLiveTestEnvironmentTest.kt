@@ -103,6 +103,17 @@ class DovecotLiveTestEnvironmentTest {
     }
 
     @Test
+    fun proofProfileKeepsOperatorImapsPortOnlyAsATransitionalTask5Alias() {
+        val profile = DovecotTask5ProofProfile.load(
+            environment = validEnvironment,
+            repositoryRoot = repositoryRoot,
+        )
+
+        assertEquals(2993, profile.forbiddenOperatorHostPort)
+        assertEquals(2993, profile.operatorImapsPort)
+    }
+
+    @Test
     fun readinessIsBoundedAndRequiresTheCompleteTopology() {
         val live = DovecotLiveTestEnvironment.load(
             environment = validEnvironment,

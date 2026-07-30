@@ -18,12 +18,19 @@ internal class DovecotTask5ProofProfile private constructor(
     val loopbackAddress: String,
     val ordinaryImapsPort: Int,
     val ordinaryPop3sPort: Int,
-    val operatorImapsPort: Int,
+    val forbiddenOperatorHostPort: Int,
     val smtpPort: Int,
     val oauthPort: Int,
     internal val dockerRoutingEnvironment: Map<String, String>,
     private val trustedOwner: UserPrincipal,
 ) {
+    @Deprecated(
+        message = "Task 5 removes this compatibility alias.",
+        replaceWith = ReplaceWith("forbiddenOperatorHostPort"),
+    )
+    internal val operatorImapsPort: Int
+        get() = forbiddenOperatorHostPort
+
     fun eligibilityPaths(): EligibilityPaths =
         EligibilityPaths.task5Proof(repositoryRoot)
 
@@ -179,7 +186,7 @@ internal class DovecotTask5ProofProfile private constructor(
         private const val FIXED_LOOPBACK = "127.0.0.1"
         private const val ORDINARY_IMAPS_PORT = 1993
         private const val ORDINARY_POP3S_PORT = 21995
-        private const val OPERATOR_IMAPS_PORT = 2993
+        private const val FORBIDDEN_OPERATOR_HOST_PORT = 2993
         private const val SMTP_PORT = 21025
         private const val OAUTH_PORT = 28080
         private const val OVERRIDE_RELATIVE_PATH =
@@ -279,7 +286,7 @@ internal class DovecotTask5ProofProfile private constructor(
                 loopbackAddress = FIXED_LOOPBACK,
                 ordinaryImapsPort = ORDINARY_IMAPS_PORT,
                 ordinaryPop3sPort = ORDINARY_POP3S_PORT,
-                operatorImapsPort = OPERATOR_IMAPS_PORT,
+                forbiddenOperatorHostPort = FORBIDDEN_OPERATOR_HOST_PORT,
                 smtpPort = SMTP_PORT,
                 oauthPort = OAUTH_PORT,
                 dockerRoutingEnvironment = mapOf(
