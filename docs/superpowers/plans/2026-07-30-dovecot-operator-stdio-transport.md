@@ -608,9 +608,13 @@ git commit -m "fix: remove Dovecot operator host ingress"
 - Create:
   `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorBoundedExchangeTest.kt`
 - Modify:
+  `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorProbe.kt`
+- Modify:
   `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironment.kt`
 - Modify:
   `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironmentTest.kt`
+- Modify:
+  `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorRuntimeTest.kt`
 - Modify:
   `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorStartupLiveTest.kt`
 - Modify:
@@ -655,6 +659,7 @@ cd debug-dashboard
   --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorBoundedExchangeTest \
   --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotLiveTestEnvironmentTest \
   --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotIsolationMailboxContractTest \
+  --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorRuntimeTest \
   --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorProbeTest \
   --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotHeldOperatorImapSessionTest
 ```
@@ -691,8 +696,10 @@ rg -n \
 git add \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorBoundedExchange.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorBoundedExchangeTest.kt \
+  debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorProbe.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironment.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironmentTest.kt \
+  debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorRuntimeTest.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorStartupLiveTest.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotIsolationProtocolProof.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotIsolationLiveTest.kt \

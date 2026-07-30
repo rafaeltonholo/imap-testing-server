@@ -425,7 +425,7 @@ class DovecotOperatorRuntimeTest {
 
         assertTrue(
             companionClass.declaredMethods.none {
-                it.name == "production"
+                it.name.substringBefore('$') == "production"
             },
         )
         val task5Proof = companionClass.declaredMethods.single {
