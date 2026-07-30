@@ -4,7 +4,7 @@
 
 **Goal:** Make one hashed runtime eligibility set authoritative across every Dovecot/Postfix/OAuth path and prove an isolated master/operator IMAP ingress can safely administer disposable accounts without retaining user passwords.
 
-**Architecture:** The ordinary Dovecot container never loads a master passdb. A second Dovecot instance shares the read-only eligibility directory and Maildir volume but loads a separate hashed master credential, runs IMAP only, joins its own internal Docker network, and publishes only a loopback operator port. Postfix and the OAuth mock consult the same atomic eligibility file on every decision; dashboard/file tools share an OS-visible global lock.
+**Architecture:** The ordinary Dovecot container never loads a master passdb. A second Dovecot instance shares the read-only eligibility directory and Maildir volume but loads a separate hashed master credential, runs IMAP only, joins its own dedicated non-internal Docker bridge whose sole service member is the operator, and publishes only a loopback operator port. The loopback bind plus exclusive bridge membership—not Docker internal mode—form this local test provider's ingress boundary. Postfix and the OAuth mock consult the same atomic eligibility file on every decision; dashboard/file tools share an OS-visible global lock.
 
 **Tech Stack:** Pinned `dovecot/dovecot:2.4.1` image/digest, Dovecot 2.4 passwd-file/master auth, isolated Docker Compose network, Postfix socketmap, Python standard-library OAuth/socketmap service, Kotlin/JVM gate writer and live tests.
 
@@ -83,6 +83,8 @@ Never generate a tracked default password.
 - [ ] Add cross-process concurrency/fault tests requiring one `FileChannel.lock()` from read through verification, a restrictive same-directory temporary, file `fsync`, atomic replace, parent-directory `fsync` where supported, and abandoned-temporary cleanup. Simulate crashes before and after replace.
 
 - [ ] Implement the fixed canonical file `debug-dashboard/.runtime/dovecot/users` plus stable lock `debug-dashboard/.runtime/dovecot/users.lock`. `EligibilityFileCli` may seed/add/reset/remove/list through the same writer; secrets arrive through stdin and are cleared. It must not accept arbitrary file paths.
+
+The canonical record is `<address>:<provider-hash>::::::`: eight passwd-file columns (`user`, `password`, `uid`, `gid`, `gecos`, `home`, `shell`, and `extra_fields`). The six post-password fields are empty because Dovecot configuration supplies the UID, GID, and home defaults; their delimiters are still required so passwd-file userdb recognizes the record.
 
 - [ ] Mount the containing `debug-dashboard/.runtime/dovecot` directory read-only into the ordinary Dovecot container. Do not bind-mount the file itself: atomic replacement must remain visible inside the container.
 
@@ -203,7 +205,10 @@ Review the bounded logs for correct lookup outcomes and no secret values.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorConfigTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStoreTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorStartupLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorRemovalRejectionPolicyTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironment.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotTask5ProofLifecycleTest.kt`
+- Create: `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh`
 
 - [ ] Add a second `dovecot-operator` service using the exact same pinned image. It:
 
@@ -212,31 +217,58 @@ Review the bounded logs for correct lookup outcomes and no secret values.
   - starts from the standalone `config/operator/dovecot.conf`;
   - runs IMAP only;
   - publishes only `127.0.0.1:2993:31993`;
-  - joins only a dedicated `operator-ingress` internal network with no other service; and
-  - has a bounded healthcheck that proves the `imap-login` service is running.
+  - joins only a dedicated `operator-ingress` non-internal bridge with no other service;
+  - has a bounded, quiet POSIX `sh` healthcheck that requires a positive integer `process_count`, exact `throttle_secs: 0`, and exact `doveadm_stop: n` for both `auth` and `imap-login`. It captures each `doveadm service status` result before applying exact greps, so any query or grep failure fails health without relying on non-POSIX `pipefail`. It also passively matches IPv4 LISTEN state `0A` for container port `31993` (`7CF9`) in `/proc/net/tcp` without connecting. The predicate deliberately ignores the `listening` field, which reports `n` for these healthy preforked services. It generates no recurring auth/login traffic and remains bounded by the fixed three-second timeout; host JSSE readiness remains the end-to-end gate; and
+  - is excluded from the default clean Compose model behind the explicit `dovecot-operator` profile. The fixed Task 5 proof override clears this production profile because that lifecycle selects the operator service explicitly.
 
 The ordinary `dovecot` service never mounts or loads the master credential directory/passdb.
+The non-internal bridge is a deliberate local-test relaxation required for Docker's loopback host publication; no other Compose service joins it, and the published operator port remains bound exactly to `127.0.0.1`.
 
-- [ ] Configure the operator master passdb as `master = yes` with `result_success = continue`, followed by a target passwd lookup with `skip = unauthenticated`, then exact userdb lookup against the shared eligibility file. The only accepted login forms are `target*dashboard-operator-a` and `target*dashboard-operator-b`; these two immutable protected master identities are not present in normal passdb/userdb and have no mailboxes. Exactly one identity is active at steady state; both may coexist only inside the locked rotation window.
+- [ ] Configure the operator master passdb as `master = yes` with canonical `result_success = continue`, followed by the exact four-stage chain `operator-master` → `deny-direct` → `eligible-target` → `deny-missing` and then exact userdb lookup against the shared eligibility file. Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and uses `skip = authenticated`. The canonical `result_success = continue` marks the master password verified, jumps to the first non-master passdb, and does not pre-authorize the target. A verified master continuation therefore skips `deny-direct`, while a direct bare-target LOGIN remains unauthenticated and stops there. `eligible-target` uses `skip = unauthenticated`, `result_failure = continue-fail`, and `result_internalfail = return-fail`. A found target's default `return-ok` finalizes master authentication; a missing target clears any prior success and continues to `deny-missing`; an internal eligibility error fails immediately instead of being masked. Both deny passdbs set `deny = yes`, `nopassword = yes`, and `nodelay = yes`. Enable only the SASL `LOGIN` mechanism. The probe must issue `AUTHENTICATE LOGIN` and answer its username challenge with exactly `target*dashboard-operator-a` or `target*dashboard-operator-b`; it must not use the IMAP `LOGIN` command, which Dovecot implements through SASL PLAIN. SASL `LOGIN` has no separate authorization-ID field, so the combined username is the only master-login form available. Do not enable PLAIN: it would also permit the forbidden authorization-ID form `target\0dashboard-operator-a\0master-secret`. The live proof must first issue bare-target SASL LOGIN with the eligible disposable target's generated password and require a tagged `NO` within the fixed one-second JSSE read timeout. It must then require `AUTH=LOGIN`, reject `AUTH=PLAIN`, receive an immediate tagged `NO` or `BAD` for the PLAIN tuple, and prove the positive combined master form.
+
+  These two immutable protected master identities are not present in normal passdb/userdb and have no mailboxes. Exactly one identity is active at steady state; both may coexist only inside the locked rotation window.
 
 The critical standalone auth block is:
 
 ```dovecot
 protocols = imap
-auth_mechanisms = plain
+auth_mechanisms = login
 auth_allow_cleartext = no
 auth_master_user_separator = *
 auth_username_format = %{user}
 
-passdb passwd-file {
+passdb operator-master {
+  driver = passwd-file
   passwd_file_path = /etc/dovecot/operator-auth/master-users
   master = yes
   result_success = continue
 }
 
-passdb passwd-file {
+passdb deny-direct {
+  driver = static
+  deny = yes
+  skip = authenticated
+  fields {
+    nopassword = yes
+    nodelay = yes
+  }
+}
+
+passdb eligible-target {
+  driver = passwd-file
   passwd_file_path = /etc/dovecot/runtime/users
   skip = unauthenticated
+  result_failure = continue-fail
+  result_internalfail = return-fail
+}
+
+passdb deny-missing {
+  driver = static
+  deny = yes
+  fields {
+    nopassword = yes
+    nodelay = yes
+  }
 }
 
 userdb passwd-file {
@@ -259,30 +291,157 @@ Also configure mail/namespace/TLS/stdout logging explicitly and omit OAuth, POP3
 
 - [ ] Make every selected Dovecot `*LiveTest` use `DovecotLiveTestEnvironment`. It requires `DOVECOT_LIVE_TESTS=1` and bounded readiness of the exact fixed loopback endpoints; missing configuration or an unavailable ordinary/operator/Postfix/OAuth service fails the selected suite rather than skipping.
 
-- [ ] After the configuration checks, recreate the complete ordinary Compose topology—not only one-off containers—and wait for health. `DovecotOperatorStartupLiveTest` creates an eligible disposable target through `EligibilityFileCli`, performs a TLS master login plus mailbox list through `127.0.0.1:2993`, and verifies the ordinary Dovecot, Postfix, and OAuth endpoints are reachable. Task 6 cannot start until this proof passes.
+- [ ] Preserve this staged activation invariant: first validate the ordinary
+  Tasks 2–4 authority, eligibility file, and TLS material; next make only OAuth,
+  ordinary Dovecot, and Postfix available; then bootstrap the operator
+  credential through the ordinary Dovecot hasher boundary; and only afterward
+  make the operator endpoint available. This is explanatory ordering, not a
+  second executable workflow. The checked proof script below is Task 5's sole
+  mutating invocation. It must never select an unrelated service, and the
+  operator remains unavailable until bootstrap atomically installs its
+  hash-only `master-users` input. Raw operator secrets remain host-only.
 
-- [ ] Run:
+- [ ] After the configuration checks, run only the checked
+  `mail-sandbox-task5-proof` fail-closed lifecycle. It accepts no arguments or
+  ambient `DOVECOT_`, `COMPOSE_`, or `DOCKER_` overrides and derives every
+  fixed path, project, profile, port, and service from its canonical
+  non-symbolic repository location. After rejecting ambient Docker routing it
+  fixes `DOCKER_HOST=unix:///var/run/docker.sock` for every direct
+  Docker/Compose command and Kotlin subprocess; it never falls back to the
+  active Docker context. The only supported invocation is direct execution
+  through `#!/bin/bash -p`; the privileged first stage suppresses `BASH_ENV`,
+  imported functions, and inherited shell options before the body runs. It
+  rejects arguments and ambient routing with builtins, then uses absolute
+  `/usr/bin/env -i` to re-execute `/bin/bash -p` with only validated
+  `HOME`/`TMPDIR`, one internal stage marker, and the fixed trusted `PATH`
+  `/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`. The clean
+  stage revalidates `HOME`/`TMPDIR` and validates its raw NUL-delimited
+  environment, PATH, traps, and function table before disabling
+  tracing/automatic export and de-exporting every global and function-local
+  token holder.
+
+- [ ] Run this one exact invocation from the repository root:
 
 ```bash
-cd debug-dashboard
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest'
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorCredentialStoreTest'
-cd ..
-docker compose config --quiet
-docker compose run --rm dovecot doveconf -n
-docker compose run --rm dovecot-operator doveconf -n
-docker compose up -d --build --force-recreate --wait
-docker compose ps
-docker compose exec -T dovecot doveadm service status imap-login
-docker compose exec -T dovecot-operator doveadm service status imap-login
-cd debug-dashboard
-DOVECOT_LIVE_TESTS=1 \
-./kotlin test \
-  --include-module dashboard-server \
-  --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorStartupLiveTest'
+./debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
 ```
 
-Expected: primary has no master passdb; operator has one master passdb, exactly one steady-state protected identity, and an eligibility-backed target lookup. The recreated full stack is healthy and a real operator login succeeds before Task 6.
+The script owns preparation, execution, and mandatory cleanup under one Bash
+`set -euo pipefail` boundary with `EXIT`, `INT`, and `TERM` handling installed
+before mutation. It preserves a primary failure, promotes a cleanup-only
+failure to a nonzero result, and reports cleanup failure even when both fail.
+The first INT/TERM status is deferred through ownership publication and all
+mandatory cleanup; exit precedence is primary failure, then deferred signal,
+then cleanup-only failure.
+Its invariants are:
+
+- before the first Docker query it validates the exact physical
+  `/private/tmp` parent, generates an unexported random 64-hex nonce, and
+  exclusively creates the fixed mode-`0700` host-global lifecycle lock
+  `/private/tmp/mail-sandbox-task5-proof.lifecycle.lock`. The lock path is a
+  readonly literal with no runtime override, so distinct checkouts, worktrees,
+  and clones targeting the fixed local daemon/project share one lease. Its
+  exact mode-`0600` regular marker, byte-exact nonce, and captured directory
+  and marker device/inode identities must all remain current before any
+  mutation. A pre-existing, partial, symbolic, remoded, retokened, or replaced
+  lock is retained and never stolen. Signals received after exclusive `mkdir`
+  but before validated ownership publication are recorded, publication is
+  completed, and exact owned cleanup runs before returning `130` or `143`; a
+  failed creation that leaves an unowned path is reported and retained, and
+  its nonzero operation status remains primary over any queued signal.
+  Signal-shielded critical children ignore process-group INT/TERM while the
+  parent records the first signal, so terminal delivery cannot kill `mkdir`,
+  identity inspection, or marker publication mid-transition.
+  Non-live concurrency coverage uses two
+  physically distinct fixture repositories with one patched global lock and
+  shared fake-daemon state, proves the contender cannot reach Docker, Kotlin,
+  Compose, or its proof root while the holder owns the lease, and proves it can
+  succeed after exact release;
+- the initial project-label container, network, and volume queries must each
+  succeed and all be empty before baseline capture. Successful unfiltered name
+  listings must also prove exact-line absence of containers
+  `mail-sandbox-task5-proof-{dovecot,dovecot-operator,postfix,oauth2-mock}-1`,
+  networks `mail-sandbox-task5-proof_{default,operator-ingress}`, and volumes
+  `mail-sandbox-task5-proof_task5-proof-{vmail,logs}`, so missing or altered
+  labels cannot hide a fixed-name collision;
+- `docker ps --quiet` and every per-ID inspection must succeed before the
+  baseline becomes valid. Baseline-directory allocation, parent publication,
+  and mode validation run under signal deferral; the `mktemp` substitution
+  and post-create `chmod` are signal-shielded so process-group INT/TERM cannot
+  strand an unrecorded directory. An interrupted successful allocation is
+  recorded, reduced to an incomplete baseline during mandatory cleanup, and
+  only then returns `130` or `143`, while an allocation/mode failure remains
+  primary over a queued signal. The captured ID order is reused after cleanup,
+  and exact bytes for ID, `StartedAt`, status, health-or-`none`, and restart
+  count are compared with the health-safe template
+  `{{with (index .State "Health")}}{{.Status}}{{else}}none{{end}}`;
+- ports `1993`, `2993`, `21025`, and `28080` must be queryable and free.
+  A collision aborts without stopping its owner;
+- `debug-dashboard/.runtime` must already be an exact canonical non-symbolic
+  directory and the exact proof root must be absent. The script records its
+  creation attempt before exclusive owner-only `mkdir`; it never uses
+  directory installation that could adopt a raced path. Only a successfully
+  created root with its own exact token, marker device/inode, and directory
+  device/inode becomes teardown-owned. Its certificate and private key are
+  regular non-symbolic mode-`0600` files, and the Kotlin preflight succeeds
+  before any proof service starts;
+- the first start is only ordinary `dovecot --no-deps`. The bootstrap password
+  is generated and consumed only through pipeline stdin, the operator
+  credential is then bootstrapped, and the only full start names exactly
+  `dovecot dovecot-operator postfix oauth2-mock`;
+- the only live class selected is `DovecotOperatorStartupLiveTest`. It creates
+  an eligible disposable target through `EligibilityFileCli`, rejects
+  bare-target LOGIN and the PLAIN authorization-ID form, proves the combined
+  master LOGIN and mailbox list, and verifies the ordinary Dovecot, Postfix,
+  and OAuth endpoints; and
+- cleanup attempts bootstrap removal only with current lifecycle-lock and
+  proof-root ownership. It runs the exact project
+  `down --volumes --remove-orphans` only while lifecycle-lock ownership
+  remains current, then independently repeats both label and full exact-name
+  inventories for all three resource kinds and compares the original baseline
+  even after ownership loss. Root deletion additionally requires exact
+  token/inode ownership and proven resource absence. The lock is removed last,
+  by deleting only its validated marker and applying `rmdir` to the validated
+  lock directory, and only when every cleanup/baseline result succeeded.
+  Otherwise the lock and any ambiguous root remain as manual-recovery
+  evidence; no PID or stale-age heuristic steals them. Mandatory cleanup runs
+  in a signal-shielded child while the parent records process-group INT/TERM;
+  `down`, resource inventories, root disposition, baseline comparison, and
+  final lock release therefore finish before the parent applies signal exit
+  precedence.
+
+No command selects an unrelated service, and no unqualified
+`docker compose up` is permitted. Task 6 cannot start until this exact
+invocation passes and its teardown restores the pre-proof baseline.
+
+Expected live behavior: while the disposable target is eligible, bare-target
+SASL LOGIN with its own generated password receives a tagged `NO` within the
+fixed one-second read timeout. The operator capability contains `AUTH=LOGIN`
+and not `AUTH=PLAIN`; the explicit PLAIN authorization-ID attempt receives an
+immediate tagged `NO` or `BAD`; the combined
+`target*dashboard-operator-a` LOGIN exchange and mailbox list succeed. The
+test removes its own disposable target in `finally` and proves that target can
+no longer authenticate.
+
+Pinned Dovecot 2.4.1 source establishes that `passwd_file_sync()` stats a
+passwd file at most once per `ioloop_time` wall-clock second and detects a
+change through second-resolution modification time or file size. An immediate
+post-delete operator probe can therefore observe the prior valid snapshot.
+Cleanup accepts only `AuthenticationFailure`; `Success` alone is retryable.
+Persistent `Success` schedules exactly six conditional 250-millisecond
+inter-attempt delays (1.5 seconds of scheduled delay) across seven
+fresh-credential probes. This is sufficient to place a later request beyond
+Dovecot's one-stat-per-`ioloop_time`-second throttle. Each probe has its own
+fixed five-second total deadline. The policy adds no unconditional writer-side
+sleep, cache flush, or service restart. `ProtocolFailure` and
+`TransportFailure` fail immediately, and persistent `Success` fails after the
+seventh probe.
+
+Ordinary Dovecot has no master passdb, the operator has exactly one
+steady-state protected identity and an eligibility-backed target lookup, and
+all four selected proof services remain healthy.
+
+Expected final state: the fixed proof project has no containers or named volumes, the proof-only authority, operator secrets/hash, Maildir, logs, certificate, and private key are removed, and every pre-existing primary or Stalwart-gate container is still running with its original ID, `StartedAt`, health, and restart count. The proof never selects, stops, restarts, recreates, or otherwise mutates Stalwart or any pre-existing container.
 
 ## Task 6: Prove network isolation and stage–probe–switch–revoke rotation
 

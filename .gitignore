@@ -7,6 +7,7 @@ config/*.bak-*
 debug-dashboard/.runtime/dovecot/
 debug-dashboard/.runtime/dovecot-operator/
 debug-dashboard/.runtime/secrets/
+debug-dashboard/.runtime/task5-proof/
 .worktrees/
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,windows,macos,linux,androidstudio

@@ -33,6 +33,7 @@ class EligibilityFileTest {
     fun repositoryConfigUsesTheFixedRuntimeDirectoryAndPasswdFileBoundary() {
         val repositoryRoot = repositoryRoot()
         val productionPaths = EligibilityPaths.production()
+        val proofPaths = EligibilityPaths.task5Proof(repositoryRoot)
         val compose = Files.readString(repositoryRoot.resolve("docker-compose.yml"))
         val auth = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
         val doveadm = Files.readString(repositoryRoot.resolve("config/20-doveadm.conf"))
@@ -46,6 +47,18 @@ class EligibilityFileTest {
         assertEquals(
             repositoryRoot.resolve("debug-dashboard/.runtime/dovecot/users.lock"),
             productionPaths.lock,
+        )
+        assertEquals(
+            repositoryRoot.resolve(
+                "debug-dashboard/.runtime/task5-proof/dovecot/users",
+            ),
+            proofPaths.users,
+        )
+        assertEquals(
+            repositoryRoot.resolve(
+                "debug-dashboard/.runtime/task5-proof/dovecot/users.lock",
+            ),
+            proofPaths.lock,
         )
         assertTrue(
             Files.notExists(
@@ -69,6 +82,7 @@ class EligibilityFileTest {
                     "debug-dashboard/.runtime/dovecot/",
                     "debug-dashboard/.runtime/dovecot-operator/",
                     "debug-dashboard/.runtime/secrets/",
+                    "debug-dashboard/.runtime/task5-proof/",
                 ),
             ),
         )
@@ -77,9 +91,12 @@ class EligibilityFileTest {
                 "      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro",
             ),
         )
-        assertFalse(compose.contains(".runtime/dovecot/users:"))
-        assertFalse(compose.contains(".runtime/dovecot-operator:"))
-        assertFalse(compose.contains(".runtime/secrets:"))
+        val ordinaryDovecotService = compose
+            .substringAfter("  dovecot:\n")
+            .substringBefore("\n  dovecot-operator:")
+        assertFalse(ordinaryDovecotService.contains(".runtime/dovecot/users:"))
+        assertFalse(ordinaryDovecotService.contains(".runtime/dovecot-operator:"))
+        assertFalse(ordinaryDovecotService.contains(".runtime/secrets:"))
         assertFalse(auth.contains("userdb static"))
         assertTrue(
             auth.contains(
@@ -116,13 +133,13 @@ class EligibilityFileTest {
     }
 
     @Test
-    fun exactArgon2idEntriesCommentsAndBlankLinesRoundTripDeterministically() {
+    fun exactEightColumnArgon2idEntriesCommentsAndBlankLinesRoundTripDeterministically() {
         val source = buildString {
             append("# managed Dovecot eligibility\n")
             append("\n")
-            append("alpha@local.test:$HASH_A\n")
+            append("alpha@local.test:$HASH_A::::::\n")
             append("  # retained annotation\n")
-            append("beta+tag@sub.local.test:$HASH_B\n")
+            append("beta+tag@sub.local.test:$HASH_B::::::\n")
         }
 
         val document = EligibilityDocument.parse(source)
@@ -133,10 +150,36 @@ class EligibilityFileTest {
         )
         assertEquals(source, document.render())
         assertEquals(
-            "alpha@local.test:$HASH_A",
-            EligibilityEntry.parse("alpha@local.test:$HASH_A").render(),
+            "alpha@local.test:$HASH_A::::::",
+            EligibilityEntry.parse("alpha@local.test:$HASH_A::::::").render(),
         )
-        assertFalse(EligibilityEntry.parse("alpha@local.test:$HASH_A").toString().contains(HASH_A))
+        assertFalse(
+            EligibilityEntry.parse("alpha@local.test:$HASH_A::::::")
+                .toString()
+                .contains(HASH_A),
+        )
+    }
+
+    @Test
+    fun sharedPasswdShapeCorpusMatchesEligibilityEntryGrammar() {
+        readPasswdShapeCorpus().forEach { shape ->
+            if (shape.accepted) {
+                assertEquals(
+                    shape.record,
+                    EligibilityEntry.create(SHAPE_ADDRESS, HASH_A).render(),
+                    shape.id,
+                )
+                assertEquals(
+                    shape.record,
+                    EligibilityEntry.parse(shape.record).render(),
+                    shape.id,
+                )
+            } else {
+                assertFailsWith<IllegalArgumentException>(shape.id) {
+                    EligibilityEntry.parse(shape.record)
+                }
+            }
+        }
     }
 
     @Test
@@ -161,7 +204,7 @@ class EligibilityFileTest {
             "alpha@local.test:{ARGON2ID}hash\r",
         ).forEach { malformed ->
             assertFailsWith<IllegalArgumentException> {
-                EligibilityEntry.parse(malformed)
+                EligibilityEntry.parse("$malformed::::::")
             }
         }
     }
@@ -207,9 +250,9 @@ class EligibilityFileTest {
     @Test
     fun parserRejectsDuplicateCanonicalAddresses() {
         val duplicate = buildString {
-            append("alpha@local.test:$HASH_A\n")
+            append("alpha@local.test:$HASH_A::::::\n")
             append("# unrelated\n")
-            append("alpha@local.test:$HASH_B\n")
+            append("alpha@local.test:$HASH_B::::::\n")
         }
 
         assertFailsWith<IllegalArgumentException> {
@@ -275,26 +318,44 @@ class EligibilityFileTest {
     }
 
     @Test
+    fun ordinaryAuthorityRejectsProtectedOperatorAndManagementIdentities() {
+        listOf(
+            "dashboard-management@local.test",
+            "dashboard-management+tag@local.test",
+            "dashboard-operator-a@local.test",
+            "dashboard-operator-a+tag@local.test",
+            "dashboard-operator-b@local.test",
+            "dashboard-operator-b+tag@local.test",
+        ).forEach { protectedAddress ->
+            assertFailsWith<IllegalArgumentException>(protectedAddress) {
+                EligibilityEntry.create(protectedAddress, HASH_A)
+            }
+        }
+    }
+
+    @Test
     fun addResetAndRemovePreserveEveryUnrelatedLineAndOrder() {
         val original = EligibilityDocument.parse(
-            "# heading\n\nalpha@local.test:$HASH_A\n# tail\n",
+            "# heading\n\nalpha@local.test:$HASH_A::::::\n# tail\n",
         )
 
         val added = original.add(EligibilityEntry.create("beta@local.test", HASH_B))
         assertEquals(
-            "# heading\n\nalpha@local.test:$HASH_A\n# tail\nbeta@local.test:$HASH_B\n",
+            "# heading\n\nalpha@local.test:$HASH_A::::::\n" +
+                "# tail\nbeta@local.test:$HASH_B::::::\n",
             added.render(),
         )
 
         val reset = added.reset(EligibilityEntry.create("alpha@local.test", HASH_C))
         assertEquals(
-            "# heading\n\nalpha@local.test:$HASH_C\n# tail\nbeta@local.test:$HASH_B\n",
+            "# heading\n\nalpha@local.test:$HASH_C::::::\n" +
+                "# tail\nbeta@local.test:$HASH_B::::::\n",
             reset.render(),
         )
 
         val removed = reset.remove("alpha@local.test")
         assertEquals(
-            "# heading\n\n# tail\nbeta@local.test:$HASH_B\n",
+            "# heading\n\n# tail\nbeta@local.test:$HASH_B::::::\n",
             removed.render(),
         )
         assertFailsWith<IllegalArgumentException> {
@@ -513,7 +574,7 @@ class EligibilityFileTest {
 
         assertSame(primary, thrown)
         assertEquals(
-            "alpha@local.test:$HASH_A\n",
+            "alpha@local.test:$HASH_A::::::\n",
             Files.readString(fixture.paths.users),
         )
         assertFalse(
@@ -555,7 +616,7 @@ class EligibilityFileTest {
             Files.exists(requireNotNull(createdTemporary), LinkOption.NOFOLLOW_LINKS),
         )
         assertEquals(
-            "alpha@local.test:$HASH_A\n",
+            "alpha@local.test:$HASH_A::::::\n",
             Files.readString(fixture.paths.users),
         )
     }
@@ -576,7 +637,7 @@ class EligibilityFileTest {
             crashed.destroyForcibly()
         }
         assertEquals(
-            "alpha@local.test:$HASH_A\n",
+            "alpha@local.test:$HASH_A::::::\n",
             Files.readString(fixture.paths.users),
         )
         assertEquals(1, recognizedTemporaries(fixture.paths).size)
@@ -605,7 +666,7 @@ class EligibilityFileTest {
         }
 
         assertEquals(
-            "alpha@local.test:$HASH_B\n",
+            "alpha@local.test:$HASH_B::::::\n",
             Files.readString(fixture.paths.users),
         )
         assertEquals(
@@ -731,6 +792,70 @@ class EligibilityFileTest {
         assertTrue(processStdout.all { it == 0.toByte() })
         assertTrue(processStderr.all { it == 0.toByte() })
         assertFalse(requireNotNull(requestRef).toString().contains("new-one-time-password"))
+    }
+
+    @Test
+    fun dockerProcessRoutingDropsEveryAmbientComposeAndDockerOverride() {
+        val environment = mutableMapOf(
+            "PATH" to "/fixed/bin",
+            "COMPOSE_FILE" to "/tmp/attacker.yml",
+            "COMPOSE_PROJECT_NAME" to "attacker",
+            "COMPOSE_PROFILES" to "attacker",
+            "DOCKER_HOST" to "tcp://attacker.invalid:2375",
+            "DOCKER_CONTEXT" to "attacker",
+        )
+
+        DovecotDockerRouting.localDefault().applyTo(environment)
+
+        assertEquals(
+            mapOf(
+                "PATH" to "/fixed/bin",
+                "DOCKER_HOST" to "unix:///var/run/docker.sock",
+                "COMPOSE_FILE" to "docker-compose.yml",
+                "COMPOSE_DISABLE_ENV_FILE" to "1",
+            ),
+            environment,
+        )
+
+        val proofEnvironment = mutableMapOf(
+            "PATH" to "/fixed/bin",
+        ).apply {
+            put("DOCKER_TLS_VERIFY", "1")
+            put("COMPOSE_PROJECT_DIR", "/tmp/attacker")
+        }
+        val profile = DovecotTask5ProofProfile.load(
+            environment = mapOf(
+                "DOVECOT_LIVE_TESTS" to "1",
+                "DOVECOT_LIVE_PROFILE" to "task5-proof",
+                "COMPOSE_PROJECT_NAME" to "mail-sandbox-task5-proof",
+                "COMPOSE_DISABLE_ENV_FILE" to "1",
+                "DOCKER_HOST" to "unix:///var/run/docker.sock",
+                "COMPOSE_FILE" to (
+                    "docker-compose.yml" +
+                        java.io.File.pathSeparator +
+                        "debug-dashboard/dashboard-server/testResources/" +
+                        "dovecot-gate0c/compose.task5-proof.yml"
+                    ),
+            ),
+            repositoryRoot = repositoryRoot(),
+        )
+        DovecotDockerRouting.task5Proof(profile).applyTo(proofEnvironment)
+
+        assertEquals(
+            mapOf(
+                "PATH" to "/fixed/bin",
+                "DOCKER_HOST" to "unix:///var/run/docker.sock",
+                "COMPOSE_PROJECT_NAME" to "mail-sandbox-task5-proof",
+                "COMPOSE_DISABLE_ENV_FILE" to "1",
+                "COMPOSE_FILE" to (
+                    "docker-compose.yml" +
+                        java.io.File.pathSeparator +
+                        "debug-dashboard/dashboard-server/testResources/" +
+                        "dovecot-gate0c/compose.task5-proof.yml"
+                    ),
+            ),
+            proofEnvironment,
+        )
     }
 
     @Test
@@ -931,6 +1056,122 @@ class EligibilityFileTest {
     }
 
     @Test
+    fun entrypointRequiresExactProofPrefixAndNeverRoutesProofToNormalAuthority() {
+        val productionArgs = mutableListOf<List<String>>()
+        val proofArgs = mutableListOf<List<String>>()
+        var proofFactoryCalls = 0
+        val production = EligibilityCommandExecutor { args, _, _, _ ->
+            productionArgs += args.toList()
+            0
+        }
+        val proof = EligibilityCommandExecutor { args, _, _, _ ->
+            proofArgs += args.toList()
+            0
+        }
+        val outputBytes = ByteArrayOutputStream()
+        val output = PrintStream(
+            outputBytes,
+            true,
+            StandardCharsets.UTF_8,
+        )
+
+        output.use { sink ->
+            val proofEntrypoint = EligibilityFileCliEntrypoint(
+                environment = mapOf(
+                    "DOVECOT_LIVE_PROFILE" to "task5-proof",
+                ),
+                productionCli = production,
+                task5ProofCliFactory = {
+                    proofFactoryCalls += 1
+                    proof
+                },
+            )
+            assertEquals(
+                0,
+                proofEntrypoint.execute(
+                    args = arrayOf("task5-proof", "preflight"),
+                    stdin = ByteArrayInputStream(ByteArray(0)),
+                    stdout = sink,
+                    stderr = sink,
+                ),
+            )
+            assertEquals(
+                "Dovecot Task 5 proof preflight complete\n",
+                outputBytes.toString(StandardCharsets.UTF_8),
+            )
+            outputBytes.reset()
+            assertEquals(
+                0,
+                proofEntrypoint.execute(
+                    args = arrayOf(
+                        "task5-proof",
+                        "add",
+                        "disposable@local.test",
+                    ),
+                    stdin = ByteArrayInputStream("secret\n".toByteArray()),
+                    stdout = sink,
+                    stderr = sink,
+                ),
+            )
+            assertNotEquals(
+                0,
+                proofEntrypoint.execute(
+                    args = arrayOf("add", "normal@local.test"),
+                    stdin = ByteArrayInputStream("secret\n".toByteArray()),
+                    stdout = sink,
+                    stderr = sink,
+                ),
+            )
+            listOf(
+                arrayOf("task5-proof"),
+                arrayOf("task5-proof", "seed"),
+                arrayOf("task5-proof", "reset", "disposable@local.test"),
+                arrayOf(
+                    "task5-proof",
+                    "add",
+                    "disposable@local.test",
+                    "--path",
+                    "/tmp/users",
+                ),
+            ).forEach { args ->
+                assertNotEquals(
+                    0,
+                    proofEntrypoint.execute(
+                        args = args,
+                        stdin = ByteArrayInputStream(ByteArray(0)),
+                        stdout = sink,
+                        stderr = sink,
+                    ),
+                )
+            }
+
+            assertEquals(emptyList(), productionArgs)
+            assertEquals(
+                listOf(listOf("add", "disposable@local.test")),
+                proofArgs,
+            )
+            assertEquals(2, proofFactoryCalls)
+
+            val normalEntrypoint = EligibilityFileCliEntrypoint(
+                environment = emptyMap(),
+                productionCli = production,
+                task5ProofCliFactory = { proof },
+            )
+            assertEquals(
+                0,
+                normalEntrypoint.execute(
+                    args = arrayOf("list"),
+                    stdin = ByteArrayInputStream(ByteArray(0)),
+                    stdout = sink,
+                    stderr = sink,
+                ),
+            )
+            assertEquals(listOf(listOf("list")), productionArgs)
+            assertEquals(1, proofArgs.size)
+        }
+    }
+
+    @Test
     fun seedUsesOnlyFixedAddressInventoryHashesWithFakeBoundaryAndRefusesOverwrite() {
         val fixture = temporaryRepository(
             seed = "alpha@local.test\nbeta@local.test\n",
@@ -974,7 +1215,8 @@ class EligibilityFileTest {
             }
         }
         assertEquals(
-            "alpha@local.test:$HASH_A\nbeta@local.test:$HASH_B\n",
+            "alpha@local.test:$HASH_A::::::\n" +
+                "beta@local.test:$HASH_B::::::\n",
             Files.readString(fixture.paths.users),
         )
         assertFalse(Files.readString(fixture.paths.users).contains(secretCanary))
@@ -1015,6 +1257,182 @@ class EligibilityFileTest {
         )
         assertEquals("", stderr.toString(StandardCharsets.UTF_8))
         assertFalse(stdout.toString(StandardCharsets.UTF_8).contains("{ARGON2ID}"))
+    }
+
+    private fun readPasswdShapeCorpus(): List<PasswdShapeCase> {
+        val path = repositoryRoot().resolve(PASSWD_SHAPE_CORPUS_PATH)
+        assertTrue(
+            Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS),
+            "Shared passwd-shape corpus is missing",
+        )
+        val bytes = Files.readAllBytes(path)
+        require(
+            bytes.isNotEmpty() &&
+                bytes.all { byte ->
+                    val value = byte.toInt() and 0xff
+                    value == '\t'.code ||
+                        value == '\n'.code ||
+                        value in 0x20..0x7e
+                },
+        ) {
+            "Passwd-shape corpus must contain only printable ASCII, tabs, and LF"
+        }
+        val contents = bytes.toString(StandardCharsets.US_ASCII)
+        require(contents.endsWith('\n')) {
+            "Passwd-shape corpus must end with a newline"
+        }
+        val seenIds = mutableSetOf<String>()
+        val cases = contents.removeSuffix("\n").split('\n').mapIndexedNotNull { index, line ->
+            if (line.startsWith('#')) {
+                return@mapIndexedNotNull null
+            }
+            require(line.isNotEmpty()) {
+                "Invalid passwd-shape corpus blank row at line ${index + 1}"
+            }
+            val fields = line.split('\t', limit = 6)
+            require(fields.size == PASSWD_SHAPE_FIELD_COUNT) {
+                "Invalid passwd-shape corpus row at line ${index + 1}"
+            }
+            val accepted = when (fields[0]) {
+                "accept" -> true
+                "reject" -> false
+                else -> error(
+                    "Invalid passwd-shape corpus outcome at line ${index + 1}",
+                )
+            }
+            val id = fields[1]
+            require(PASSWD_SHAPE_ID.matches(id) && seenIds.add(id)) {
+                "Invalid or duplicate passwd-shape corpus id at line ${index + 1}"
+            }
+            val columnCountText = fields[2]
+            require(POSITIVE_DECIMAL.matches(columnCountText)) {
+                "Invalid passwd-shape column count at line ${index + 1}"
+            }
+            val columnCount = columnCountText.toInt()
+            require(columnCount in MIN_PASSWD_COLUMN_COUNT..MAX_PASSWD_COLUMN_COUNT) {
+                "Passwd-shape column count is out of bounds at line ${index + 1}"
+            }
+            val populatedUserdbColumn = fields[3].takeUnless { value ->
+                value == NO_POPULATED_USERDB_COLUMN
+            }?.let { value ->
+                require(USERDB_COLUMN.matches(value)) {
+                    "Invalid populated userdb column at line ${index + 1}"
+                }
+                value.toInt()
+            }
+            val template = fields[4]
+            require(
+                template.indexOf(ADDRESS_PLACEHOLDER).let { first ->
+                    first >= 0 && first == template.lastIndexOf(ADDRESS_PLACEHOLDER)
+                } &&
+                    template.indexOf(HASH_PLACEHOLDER).let { first ->
+                        first >= 0 && first == template.lastIndexOf(HASH_PLACEHOLDER)
+                    },
+            ) {
+                "Invalid passwd-shape corpus placeholders at line ${index + 1}"
+            }
+            val withoutKnownPlaceholders = template
+                .replace(ADDRESS_PLACEHOLDER, "")
+                .replace(HASH_PLACEHOLDER, "")
+            require(
+                "{{" !in withoutKnownPlaceholders &&
+                    "}}" !in withoutKnownPlaceholders,
+            ) {
+                "Unknown passwd-shape corpus placeholder at line ${index + 1}"
+            }
+            val columns = template.splitPreservingEmpty(':')
+            require(
+                columns.size == columnCount &&
+                    columns.getOrNull(0) == ADDRESS_PLACEHOLDER &&
+                    columns.getOrNull(1) == HASH_PLACEHOLDER,
+            ) {
+                "Passwd-shape corpus metadata does not match record $id"
+            }
+            val populatedColumns = columns.indices
+                .drop(CREDENTIAL_COLUMN_COUNT)
+                .filter { column -> columns[column].isNotEmpty() }
+            require(
+                if (populatedUserdbColumn == null) {
+                    populatedColumns.isEmpty()
+                } else {
+                    columnCount == CANONICAL_PASSWD_COLUMN_COUNT &&
+                        populatedColumns == listOf(populatedUserdbColumn)
+                },
+            ) {
+                "Passwd-shape populated-column metadata does not match record $id"
+            }
+            PasswdShapeCase(
+                accepted = accepted,
+                id = id,
+                columnCount = columnCount,
+                populatedUserdbColumn = populatedUserdbColumn,
+                record = template
+                    .replace(ADDRESS_PLACEHOLDER, SHAPE_ADDRESS)
+                    .replace(HASH_PLACEHOLDER, HASH_A),
+            )
+        }
+        require(cases.map { shape -> shape.record }.toSet().size == cases.size) {
+            "Passwd-shape corpus contains duplicate effective records"
+        }
+        requireValidPasswdShapeCoverage(cases)
+        return cases
+    }
+
+    private fun requireValidPasswdShapeCoverage(cases: List<PasswdShapeCase>) {
+        val accepted = cases.filter(PasswdShapeCase::accepted)
+        require(
+            accepted.size == 1 &&
+                accepted.single().columnCount == CANONICAL_PASSWD_COLUMN_COUNT &&
+                accepted.single().populatedUserdbColumn == null,
+        ) {
+            "Passwd-shape corpus must contain one canonical accepted record"
+        }
+        val canonicalColumnCount = accepted.single().columnCount
+        val rejected = cases.filterNot(PasswdShapeCase::accepted)
+        require(rejected.any { shape -> shape.columnCount == CREDENTIAL_COLUMN_COUNT }) {
+            "Passwd-shape corpus must cover the legacy credential-only record"
+        }
+        require(
+            rejected.any { shape ->
+                shape.columnCount == canonicalColumnCount - 1
+            },
+        ) {
+            "Passwd-shape corpus must cover adjacent delimiter underflow"
+        }
+        require(
+            rejected.any { shape ->
+                shape.columnCount == canonicalColumnCount + 1
+            },
+        ) {
+            "Passwd-shape corpus must cover adjacent delimiter overflow"
+        }
+        val rejectedCanonicalWidth = rejected.filter { shape ->
+            shape.columnCount == canonicalColumnCount
+        }
+        val userdbColumns = (
+            CREDENTIAL_COLUMN_COUNT until canonicalColumnCount
+        ).toSet()
+        require(
+            rejectedCanonicalWidth.size == userdbColumns.size &&
+                rejectedCanonicalWidth
+                    .mapNotNull(PasswdShapeCase::populatedUserdbColumn)
+                    .toSet() == userdbColumns,
+        ) {
+            "Passwd-shape corpus must cover each populated userdb column once"
+        }
+    }
+
+    private fun String.splitPreservingEmpty(delimiter: Char): List<String> {
+        val fields = mutableListOf<String>()
+        var start = 0
+        forEachIndexed { index, character ->
+            if (character == delimiter) {
+                fields.add(substring(start, index))
+                start = index + 1
+            }
+        }
+        fields.add(substring(start))
+        return fields
     }
 
     private fun temporaryRepository(
@@ -1100,7 +1518,10 @@ class EligibilityFileTest {
 
     private fun awaitPath(path: Path) {
         val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
-        while (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+        while (
+            !Files.exists(path, LinkOption.NOFOLLOW_LINKS) ||
+            Files.size(path) == 0L
+        ) {
             check(System.nanoTime() < deadline) {
                 "timed out waiting for worker synchronization"
             }
@@ -1170,6 +1591,14 @@ class EligibilityFileTest {
         val repositoryRoot: Path,
         val dashboardRoot: Path,
         val paths: EligibilityPaths,
+    )
+
+    private data class PasswdShapeCase(
+        val accepted: Boolean,
+        val id: String,
+        val columnCount: Int,
+        val populatedUserdbColumn: Int?,
+        val record: String,
     )
 
     private class LateCompletingInputStream(
@@ -1290,6 +1719,21 @@ class EligibilityFileTest {
     private class EligibilityCleanupFailure : RuntimeException()
 
     companion object {
+        private const val PASSWD_SHAPE_CORPUS_PATH =
+            "debug-dashboard/dashboard-server/testResources/" +
+                "dovecot-gate0c/passwd-shapes.txt"
+        private const val ADDRESS_PLACEHOLDER = "{{address}}"
+        private const val HASH_PLACEHOLDER = "{{hash}}"
+        private const val SHAPE_ADDRESS = "alpha@local.test"
+        private const val PASSWD_SHAPE_FIELD_COUNT = 5
+        private const val CREDENTIAL_COLUMN_COUNT = 2
+        private const val CANONICAL_PASSWD_COLUMN_COUNT = 8
+        private const val MIN_PASSWD_COLUMN_COUNT = CREDENTIAL_COLUMN_COUNT
+        private const val MAX_PASSWD_COLUMN_COUNT = 16
+        private const val NO_POPULATED_USERDB_COLUMN = "<none>"
+        private val PASSWD_SHAPE_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+        private val POSITIVE_DECIMAL = Regex("[1-9][0-9]?")
+        private val USERDB_COLUMN = Regex("[2-7]")
         private const val HASH_A =
             "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$c2FsdEE\$aGFzaEE"
         private const val HASH_B =

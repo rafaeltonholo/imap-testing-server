@@ -6,9 +6,10 @@
 - **Task 2 — Replace tracked plaintext runtime authority:** complete.
 - **Task 3 — Make OAuth decisions eligibility-aware:** complete.
 - **Task 4 — Make Postfix recipient routing eligibility-aware:** complete.
-- **Gate 0C:** in progress. Tasks 5–9 still own the
-  operator-ingress, lifecycle, and final decision work. This document does not
-  record a Gate 0C PASS.
+- **Task 5 — Add a physically separate master-only IMAP ingress:** complete.
+- **Gate 0C:** in progress. Tasks 6–9 still own isolation, rotation, mail
+  behavior, lifecycle, and the final decision. This document does not record a
+  Gate 0C PASS.
 
 ## Task 1 baseline evidence
 
@@ -114,6 +115,11 @@ The fixed production authority is
   `{ARGON2ID}$argon2id$v=19$m=<positive>,t=<positive>,p=<positive>$<salt>$<hash>`,
   with exact parameter order and bounded, unpadded standard Base64 salt and
   digest tokens;
+- renders each canonical record as `<address>:<provider-hash>::::::`: eight
+  passwd-file columns (`user`, `password`, `uid`, `gid`, `gecos`, `home`,
+  `shell`, and `extra_fields`). The six post-password fields are empty because
+  Dovecot configuration supplies the UID, GID, and home defaults; their
+  delimiters are still required so passwd-file userdb recognizes the record;
 - preserves comments, blank lines, and unrelated entries deterministically;
 - exposes only `seed`, `add <address>`, `reset <address>`,
   `remove <address>`, and `list`;
@@ -396,6 +402,144 @@ then removed. The worktree Dovecot runtime again contains only its original
 empty `users.lock`, the worktree `ssl` directory remains empty, and the primary
 `postfix-dev`, `dovecot-dev`, `oauth2-mock`, and `stalwart-dev` containers all
 remained running with zero restarts.
+
+## Task 5 isolated operator-ingress proof
+
+The operator service uses the same pinned Dovecot 2.4.1 digest as the ordinary
+service. It is profile-selected, runs IMAP only, publishes only
+`127.0.0.1:2993` to container port `31993`, and is the sole member of the
+dedicated `operator-ingress` bridge. The ordinary service never mounts the
+operator credential directory or loads a master passdb.
+
+The standalone operator configuration enables SASL LOGIN only. Its effective
+passdb order is:
+
+```text
+operator-master -> deny-direct -> eligible-target -> deny-missing
+```
+
+This order accounts for Dovecot 2.4.1 `auth_preinit` omitting a leading
+non-master `skip=unauthenticated` passdb. A verified master continuation skips
+`deny-direct`, then must find the target in the shared eligibility authority;
+a direct ordinary-password attempt stops at `deny-direct`, while an absent
+target reaches `deny-missing`. The operator userdb reads the same eligibility
+passwd file.
+
+The authority record was corrected and service-checked as the canonical
+eight-column form `<address>:<provider-hash>::::::`. The six empty
+post-password columns allow passwd-file userdb to apply the configured
+UID/GID/home defaults. Kotlin and Python consume one shared accepted/rejected
+shape corpus, including adjacent delimiter boundaries and each non-empty
+userdb column. Focused non-live verification passed `115/115`, including the
+fake lifecycle suite at `33/33`; the full OAuth
+mock/socketmap suite passed `54/54`; and the default, operator-profile, and
+proof Compose models all resolved successfully.
+
+The live lifecycle selected only project `mail-sandbox-task5-proof` and exactly
+four services:
+
+| Service | Proof publication |
+|---|---:|
+| ordinary Dovecot IMAPS | `127.0.0.1:1993` |
+| operator Dovecot IMAPS | `127.0.0.1:2993` |
+| Postfix SMTP | `127.0.0.1:21025` |
+| OAuth mock HTTP | `127.0.0.1:28080` |
+
+The reproducible entry point is
+`debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh`.
+Its checked fail-closed lifecycle accepts no arguments or ambient
+Dovecot/Compose/Docker overrides, owns setup and teardown under one trapped
+Bash process, and preserves the primary status while independently reporting
+cleanup failure. After rejecting every ambient `DOCKER_` variable, it fixes
+`DOCKER_HOST=unix:///var/run/docker.sock` for every shell Docker/Compose and
+Kotlin subprocess; the active Docker context is never a fallback.
+Direct execution through `#!/bin/bash -p` suppresses `BASH_ENV`, imported
+functions, and inherited shell options before the first body statement. That
+privileged stage rejects arguments and ambient routing, then re-executes
+`/bin/bash -p` through absolute `/usr/bin/env -i` with validated `HOME` and
+`TMPDIR`, an internal stage marker, and only the fixed trusted PATH. The clean
+stage revalidates `HOME`/`TMPDIR` and validates its raw NUL-delimited
+environment, exact PATH, traps, and function table before disabling
+tracing/automatic export and de-exporting global and function-local token
+holders. Process coverage injects a hostile
+`BASH_ENV` DEBUG trap plus exported `stat` and `docker` functions and proves
+none execute or observe either generated ownership token.
+
+Before its first Docker query, the script validates the exact physical
+`/private/tmp` parent, generates an unexported random 64-hex nonce, and
+exclusively creates the fixed mode-`0700` host-global lifecycle lock
+`/private/tmp/mail-sandbox-task5-proof.lifecycle.lock`. The lock binding is a
+readonly literal with no runtime override, so distinct checkouts, worktrees,
+and clones targeting the fixed local daemon and Compose project serialize on
+one lease. The nonce plus captured directory and mode-`0600` marker
+device/inode identities authorize every mutation. The checkout-local proof
+root is also created only by exclusive `mkdir`, then receives its own distinct
+token, marker identity, and directory identity before any child writer runs. A
+collision, symlink, unsafe parent, entropy failure, mode change, marker
+replacement (even with a copied token), or directory replacement is rejected
+without adopting or deleting foreign state.
+
+Non-live fake-command mutation and concurrent-process tests prove failed
+inventories, port collisions, incomplete baselines, foreign root insertion,
+main failures, lock/root replacement, and cleanup failures cannot advance or
+produce a false-success result. A two-physical-repository fixture shares one
+fake daemon and patched global lock: its contender performs no Docker, Kotlin,
+Compose, or proof-root mutation while the holder owns the lease, then succeeds
+after exact release. INT and TERM delivered after the global-lock `mkdir` but
+before parent ownership publication are deferred until exact owned cleanup,
+then return `130` and `143`; a failed `mkdir` that leaves an unowned path is
+reported and retained. If that critical operation also fails, its nonzero
+status remains primary over the queued signal. The signal fixtures run each
+lifecycle in a separate session and signal its entire process group, matching
+terminal delivery: critical and cleanup children inherit ignored INT/TERM
+while the parent records the first signal. Baseline `mktemp`, parent path and
+creation-state publication, and owner-only mode validation use the same
+deferred transition: INT/TERM after the directory is created cannot kill the
+allocation or mode children, and cleanup removes the recorded incomplete
+baseline before returning `130`/`143`. Signals delivered while Compose `down`
+is paused cannot
+interrupt the later inventories, baseline comparison, proof-root removal, or
+lock release. A primary `23` remains primary, while a signal becomes the exit
+status only after otherwise-successful mandatory cleanup. Root writers require
+both current lock and root ownership;
+Compose mutation requires current lock ownership. Read-only resource
+inventories and the original baseline comparison still run after ownership
+loss. The exact lock is released last, after marker/inode and exact-content
+allowlist validation, by removing only `owner` and applying `rmdir`, and only
+when all cleanup checks pass; otherwise it and any ambiguous root remain as
+manual-recovery evidence. The script uses the health-safe
+optional-state inspect template, starts only the two explicitly reviewed
+service sets, and selects only the startup live class. Initial and cleanup
+inventories require both empty project-label queries and successful full name
+listings with exact-line absence of all four fixed containers, both fixed
+networks, and both fixed volumes; near-name matches do not collide, while
+missing or different labels cannot hide an exact fixed resource.
+
+`DovecotOperatorStartupLiveTest` passed `1/1`. It proved:
+
+- an eligible disposable target's own generated password is rejected at the
+  operator endpoint;
+- `AUTH=LOGIN` is available while `AUTH=PLAIN` and the PLAIN authorization-ID
+  master form are rejected;
+- the combined `target*dashboard-operator-a` SASL LOGIN succeeds and lists
+  `INBOX`;
+- ordinary Dovecot, Postfix, and OAuth remain reachable; and
+- after the disposable target is removed, operator authentication fails.
+
+Dovecot checks a passwd file at most once per `ioloop_time` wall-clock second.
+The post-delete assertion therefore retries only a stale `Success`, using a
+fresh consumable credential per attempt and exactly six conditional
+250-millisecond delays across seven bounded probes. Authentication failure
+completes immediately; protocol, transport, and interruption failures remain
+fail-fast, with interruption status restored.
+
+After the proof, the bootstrap eligibility was removed through the Kotlin
+writer. All four proof containers, both proof networks, both named volumes,
+the proof authority, operator raw secret/hash, Maildir/log data, certificate,
+and private key were removed. Ports `1993`, `2993`, `21025`, and `28080` were
+free. The five pre-existing containers retained their exact IDs, `StartedAt`,
+running/health state, and zero restart count. No Stalwart service was selected,
+stopped, restarted, recreated, or otherwise mutated.
 
 ## Verification
 

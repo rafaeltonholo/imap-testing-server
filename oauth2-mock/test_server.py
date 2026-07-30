@@ -19,6 +19,13 @@ SERVER_PATH = Path(__file__).with_name("server.py")
 KOTLIN_WHITESPACE_FIXTURE_PATH = SERVER_PATH.with_name(
     "kotlin-whitespace-fixture.txt",
 )
+PASSWD_SHAPE_CORPUS_PATH = SERVER_PATH.parent.parent.joinpath(
+    "debug-dashboard",
+    "dashboard-server",
+    "testResources",
+    "dovecot-gate0c",
+    "passwd-shapes.txt",
+)
 SERVER_SPEC = importlib.util.spec_from_file_location("oauth2_mock_server", SERVER_PATH)
 server = importlib.util.module_from_spec(SERVER_SPEC)
 SERVER_SPEC.loader.exec_module(server)
@@ -28,6 +35,10 @@ VALID_HASH = (
     "{ARGON2ID}$argon2id$v=19$m=65536,t=3,p=1"
     "$c2FsdA$ZGlnZXN0"
 )
+
+
+def eligibility_record(address, provider_hash=VALID_HASH):
+    return f"{address}:{provider_hash}::::::"
 
 
 class MutableEligibilityReader:
@@ -409,8 +420,8 @@ class EligibilityReaderTest(unittest.TestCase):
         self.write_authority(
             "# generated authority\n"
             "\n"
-            f"eligible@local.test:{VALID_HASH}\n"
-            f"second.user+tag@local.test:{VALID_HASH}\n"
+            f"{eligibility_record('eligible@local.test')}\n"
+            f"{eligibility_record('second.user+tag@local.test')}\n"
         )
         reader = server.EligibilityReader(self.authority)
 
@@ -421,19 +432,21 @@ class EligibilityReaderTest(unittest.TestCase):
 
     def test_malformed_authority_fails_closed_for_every_identity(self):
         malformed_authorities = (
-            f"eligible@local.test:{VALID_HASH}\r\n",
-            f"ELIGIBLE@local.test:{VALID_HASH}\n",
-            "eligible@local.test:{ARGON2ID}garbage\n",
+            f"{eligibility_record('eligible@local.test')}\r\n",
+            f"{eligibility_record('ELIGIBLE@local.test')}\n",
+            f"{eligibility_record('eligible@local.test', '{ARGON2ID}garbage')}\n",
             (
-                "eligible@local.test:"
-                "{ARGON2ID}$argon2id$v=19$m=2147483648,t=3,p=1"
-                "$c2FsdA$ZGlnZXN0\n"
+                eligibility_record(
+                    "eligible@local.test",
+                    "{ARGON2ID}$argon2id$v=19$m=2147483648,t=3,p=1"
+                    "$c2FsdA$ZGlnZXN0",
+                )
+                + "\n"
             ),
             (
-                f"eligible@local.test:{VALID_HASH}\n"
-                f"eligible@local.test:{VALID_HASH}\n"
+                f"{eligibility_record('eligible@local.test')}\n"
+                f"{eligibility_record('eligible@local.test')}\n"
             ),
-            f"eligible@local.test:{VALID_HASH}:extra\n",
         )
 
         for index, contents in enumerate(malformed_authorities):
@@ -442,10 +455,252 @@ class EligibilityReaderTest(unittest.TestCase):
                 reader = server.EligibilityReader(self.authority)
                 self.assertFalse(reader.is_eligible("eligible@local.test"))
 
+    def test_shared_passwd_shape_corpus_matches_reader_grammar(self):
+        for shape in self._read_passwd_shape_corpus():
+            with self.subTest(case_id=shape["id"]):
+                self.write_authority(f"{shape['record']}\n")
+                reader = server.EligibilityReader(self.authority)
+                expected = (
+                    server.EligibilityResult.ELIGIBLE
+                    if shape["accepted"]
+                    else server.EligibilityResult.UNAVAILABLE
+                )
+                self.assertEqual(
+                    expected,
+                    reader.eligibility("eligible@local.test"),
+                )
+
+    def _read_passwd_shape_corpus(self):
+        self.assertTrue(
+            PASSWD_SHAPE_CORPUS_PATH.is_file(),
+            "shared passwd-shape corpus is missing",
+        )
+        corpus_bytes = PASSWD_SHAPE_CORPUS_PATH.read_bytes()
+        self.assertTrue(
+            corpus_bytes
+            and all(
+                byte in (0x09, 0x0A) or 0x20 <= byte <= 0x7E
+                for byte in corpus_bytes
+            ),
+            "passwd-shape corpus must contain only printable ASCII, tabs, and LF",
+        )
+        contents = corpus_bytes.decode("ascii")
+        self.assertTrue(
+            contents.endswith("\n"),
+            "passwd-shape corpus must end with a newline",
+        )
+        cases = []
+        seen_ids = set()
+        for line_number, line in enumerate(
+            contents.removesuffix("\n").split("\n"),
+            start=1,
+        ):
+            if line.startswith("#"):
+                continue
+            self.assertTrue(
+                line,
+                f"invalid passwd-shape corpus blank row at line {line_number}",
+            )
+            fields = line.split("\t")
+            self.assertEqual(
+                5,
+                len(fields),
+                f"invalid passwd-shape corpus row at line {line_number}",
+            )
+            outcome, case_id, column_count_text, populated_text, template = fields
+            self.assertIn(
+                outcome,
+                ("accept", "reject"),
+                f"invalid passwd-shape outcome at line {line_number}",
+            )
+            self.assertRegex(
+                case_id,
+                r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z",
+                f"invalid passwd-shape id at line {line_number}",
+            )
+            self.assertNotIn(
+                case_id,
+                seen_ids,
+                f"duplicate passwd-shape id at line {line_number}",
+            )
+            seen_ids.add(case_id)
+            self.assertRegex(
+                column_count_text,
+                r"\A[1-9][0-9]?\Z",
+                f"invalid passwd-shape column count at line {line_number}",
+            )
+            column_count = int(column_count_text)
+            self.assertTrue(
+                2 <= column_count <= 16,
+                f"passwd-shape column count is out of bounds at line {line_number}",
+            )
+            if populated_text == "<none>":
+                populated_column = None
+            else:
+                self.assertRegex(
+                    populated_text,
+                    r"\A[2-7]\Z",
+                    f"invalid populated userdb column at line {line_number}",
+                )
+                populated_column = int(populated_text)
+            self.assertEqual(
+                1,
+                template.count("{{address}}"),
+                f"invalid address placeholder at line {line_number}",
+            )
+            self.assertEqual(
+                1,
+                template.count("{{hash}}"),
+                f"invalid hash placeholder at line {line_number}",
+            )
+            without_known_placeholders = template.replace(
+                "{{address}}",
+                "",
+            ).replace(
+                "{{hash}}",
+                "",
+            )
+            self.assertNotIn(
+                "{{",
+                without_known_placeholders,
+                f"unknown passwd-shape placeholder at line {line_number}",
+            )
+            self.assertNotIn(
+                "}}",
+                without_known_placeholders,
+                f"unknown passwd-shape placeholder at line {line_number}",
+            )
+            columns = template.split(":")
+            self.assertEqual(
+                column_count,
+                len(columns),
+                f"passwd-shape metadata does not match record {case_id}",
+            )
+            self.assertEqual(
+                ("{{address}}", "{{hash}}"),
+                tuple(columns[:2]),
+                f"passwd-shape case {case_id} has invalid credential columns",
+            )
+            populated_columns = [
+                index
+                for index, field in enumerate(columns[2:], start=2)
+                if field
+            ]
+            if populated_column is None:
+                self.assertEqual(
+                    [],
+                    populated_columns,
+                    f"passwd-shape populated metadata does not match {case_id}",
+                )
+            else:
+                self.assertEqual(
+                    8,
+                    column_count,
+                    f"populated userdb metadata requires eight columns for {case_id}",
+                )
+                self.assertEqual(
+                    [populated_column],
+                    populated_columns,
+                    f"passwd-shape populated metadata does not match {case_id}",
+                )
+            cases.append(
+                {
+                    "accepted": outcome == "accept",
+                    "id": case_id,
+                    "column_count": column_count,
+                    "populated_column": populated_column,
+                    "record": template.replace(
+                        "{{address}}",
+                        "eligible@local.test",
+                    ).replace(
+                        "{{hash}}",
+                        VALID_HASH,
+                    ),
+                },
+            )
+        self.assertEqual(
+            len(cases),
+            len({shape["record"] for shape in cases}),
+            "passwd-shape corpus contains duplicate effective records",
+        )
+        self._assert_passwd_shape_coverage(cases)
+        return cases
+
+    def _assert_passwd_shape_coverage(self, cases):
+        accepted = [shape for shape in cases if shape["accepted"]]
+        self.assertEqual(1, len(accepted))
+        self.assertEqual(8, accepted[0]["column_count"])
+        self.assertIsNone(accepted[0]["populated_column"])
+        canonical_column_count = accepted[0]["column_count"]
+
+        rejected = [shape for shape in cases if not shape["accepted"]]
+        self.assertTrue(
+            any(shape["column_count"] == 2 for shape in rejected),
+            "passwd-shape corpus must cover the legacy credential-only record",
+        )
+        self.assertTrue(
+            any(
+                shape["column_count"] == canonical_column_count - 1
+                for shape in rejected
+            ),
+            "passwd-shape corpus must cover adjacent delimiter underflow",
+        )
+        self.assertTrue(
+            any(
+                shape["column_count"] == canonical_column_count + 1
+                for shape in rejected
+            ),
+            "passwd-shape corpus must cover adjacent delimiter overflow",
+        )
+        rejected_canonical_width = [
+            shape
+            for shape in rejected
+            if shape["column_count"] == canonical_column_count
+        ]
+        userdb_columns = set(range(2, canonical_column_count))
+        self.assertEqual(len(userdb_columns), len(rejected_canonical_width))
+        self.assertEqual(
+            userdb_columns,
+            {
+                shape["populated_column"]
+                for shape in rejected_canonical_width
+                if shape["populated_column"] is not None
+            },
+            "passwd-shape corpus must cover each populated userdb column once",
+        )
+
+    def test_protected_authority_identities_and_subaddresses_fail_closed(self):
+        protected_addresses = (
+            "dashboard-management@local.test",
+            "dashboard-management+tag@local.test",
+            "dashboard-operator-a@local.test",
+            "dashboard-operator-a+tag@local.test",
+            "dashboard-operator-b@local.test",
+            "dashboard-operator-b+tag@local.test",
+        )
+
+        for protected_address in protected_addresses:
+            with self.subTest(protected_address=protected_address):
+                self.write_authority(
+                    f"{eligibility_record('eligible@local.test')}\n"
+                    f"{eligibility_record(protected_address)}\n",
+                )
+                reader = server.EligibilityReader(self.authority)
+
+                self.assertEqual(
+                    server.EligibilityResult.UNAVAILABLE,
+                    reader.eligibility("eligible@local.test"),
+                )
+                self.assertFalse(
+                    server.EligibilityReader._is_canonical_address(
+                        protected_address,
+                    ),
+                )
+
     def test_symlink_authority_fails_closed(self):
         real_authority = self.root / "real-users"
         real_authority.write_text(
-            f"eligible@local.test:{VALID_HASH}\n",
+            f"{eligibility_record('eligible@local.test')}\n",
             encoding="utf-8",
         )
         os.chmod(real_authority, 0o600)
@@ -456,7 +711,7 @@ class EligibilityReaderTest(unittest.TestCase):
         self.assertFalse(reader.is_eligible("eligible@local.test"))
 
     def test_each_decision_reads_the_current_authority(self):
-        self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
+        self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
         reader = server.EligibilityReader(self.authority)
         self.assertTrue(reader.is_eligible("eligible@local.test"))
 
@@ -465,7 +720,7 @@ class EligibilityReaderTest(unittest.TestCase):
         self.assertFalse(reader.is_eligible("eligible@local.test"))
 
     def test_explicit_result_distinguishes_absence_from_unavailable_authority(self):
-        self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
+        self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
         reader = server.EligibilityReader(self.authority)
 
         self.assertEqual(
@@ -483,7 +738,7 @@ class EligibilityReaderTest(unittest.TestCase):
             )
 
     def test_unreadable_authority_fails_closed(self):
-        self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
+        self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
         real_open = os.open
 
         def deny_authority(path, flags, *args, **kwargs):
@@ -499,7 +754,7 @@ class EligibilityReaderTest(unittest.TestCase):
         reader = server.EligibilityReader(self.authority)
         self.assertFalse(reader.is_eligible("eligible@local.test"))
 
-        self.write_authority(f"eligible@local.test:{VALID_HASH}\n")
+        self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
         os.chmod(self.authority, 0o640)
         self.assertFalse(reader.is_eligible("eligible@local.test"))
 
@@ -560,7 +815,7 @@ class EligibilityReaderTest(unittest.TestCase):
                 self.write_authority(
                     f"{prefix}\n"
                     f"{prefix}# Kotlin whitespace comment\n"
-                    f"eligible@local.test:{VALID_HASH}\n",
+                    f"{eligibility_record('eligible@local.test')}\n",
                 )
                 reader = server.EligibilityReader(self.authority)
                 self.assertTrue(reader.is_eligible("eligible@local.test"))
@@ -574,7 +829,7 @@ class EligibilityReaderTest(unittest.TestCase):
             with self.subTest(rejected_prefix=f"U+{ord(malformed[0]):04X}"):
                 self.write_authority(
                     f"{malformed}\n"
-                    f"eligible@local.test:{VALID_HASH}\n",
+                    f"{eligibility_record('eligible@local.test')}\n",
                 )
                 reader = server.EligibilityReader(self.authority)
                 self.assertFalse(reader.is_eligible("eligible@local.test"))
@@ -693,7 +948,7 @@ class SocketMapLookupTest(unittest.TestCase):
                 authority.write_text(contents, encoding="utf-8")
                 os.chmod(authority, 0o600)
 
-            write(f"eligible@local.test:{VALID_HASH}\n")
+            write(f"{eligibility_record('eligible@local.test')}\n")
             self.assertTrue(
                 hasattr(server, "SocketMapLookup"),
                 "Task 4 socketmap lookup is not implemented",
@@ -708,7 +963,7 @@ class SocketMapLookupTest(unittest.TestCase):
                 b"NOTFOUND ",
                 lookup.lookup(b"eligible eligible@local.test"),
             )
-            write(f"replacement@local.test:{VALID_HASH}\n")
+            write(f"{eligibility_record('replacement@local.test')}\n")
             self.assertEqual(
                 b"NOTFOUND ",
                 lookup.lookup(b"eligible eligible@local.test"),

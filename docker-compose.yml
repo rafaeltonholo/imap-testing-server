@@ -23,6 +23,53 @@ services:
       retries: 5
       start_period: 15s
 
+  dovecot-operator:
+    profiles:
+      - dovecot-operator
+    image: dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2993:31993"   # Operator-only IMAPS
+    volumes:
+      - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
+      - type: bind
+        source: ./debug-dashboard/.runtime/dovecot-operator
+        target: /etc/dovecot/operator-auth
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./ssl:/etc/dovecot/ssl:ro
+      - ./vmail:/srv/vmail
+    networks:
+      - operator-ingress
+    healthcheck:
+      test:
+        - CMD
+        - sh
+        - -c
+        - >-
+          auth_status="$$(doveadm service status auth)" &&
+          printf '%s\n' "$$auth_status" |
+          grep -Eqx 'process_count: [1-9][0-9]*' &&
+          printf '%s\n' "$$auth_status" |
+          grep -qx 'throttle_secs: 0' &&
+          printf '%s\n' "$$auth_status" |
+          grep -qx 'doveadm_stop: n' &&
+          imap_login_status="$$(doveadm service status imap-login)" &&
+          printf '%s\n' "$$imap_login_status" |
+          grep -Eqx 'process_count: [1-9][0-9]*' &&
+          printf '%s\n' "$$imap_login_status" |
+          grep -qx 'throttle_secs: 0' &&
+          printf '%s\n' "$$imap_login_status" |
+          grep -qx 'doveadm_stop: n' &&
+          grep -Eq '^[[:space:]]*[0-9]+:[[:space:]]+[[:xdigit:]]{8}:7CF9[[:space:]]+[[:xdigit:]]{8}:[[:xdigit:]]{4}[[:space:]]+0A[[:space:]]'
+          /proc/net/tcp
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
   postfix:
     build: ./postfix
     restart: unless-stopped
@@ -68,3 +115,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+networks:
+  operator-ingress:
+    driver: bridge

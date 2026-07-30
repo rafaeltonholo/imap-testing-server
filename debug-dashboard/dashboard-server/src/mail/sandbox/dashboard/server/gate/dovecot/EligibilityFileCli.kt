@@ -105,6 +105,35 @@ internal fun interface EligibilityProcessRunner {
     fun run(request: EligibilityProcessRequest): EligibilityProcessResult
 }
 
+internal class DovecotDockerRouting private constructor(
+    private val composeEnvironment: Map<String, String>,
+) {
+    fun applyTo(environment: MutableMap<String, String>) {
+        environment.keys
+            .filter { key ->
+                key.startsWith("COMPOSE_") || key.startsWith("DOCKER_")
+            }
+            .forEach(environment::remove)
+        environment.putAll(composeEnvironment)
+    }
+
+    companion object {
+        fun localDefault(): DovecotDockerRouting =
+            DovecotDockerRouting(
+                mapOf(
+                    "DOCKER_HOST" to "unix:///var/run/docker.sock",
+                    "COMPOSE_FILE" to "docker-compose.yml",
+                    "COMPOSE_DISABLE_ENV_FILE" to "1",
+                ),
+            )
+
+        fun task5Proof(
+            profile: DovecotTask5ProofProfile,
+        ): DovecotDockerRouting =
+            DovecotDockerRouting(profile.dockerRoutingEnvironment)
+    }
+}
+
 internal class DovecotPasswordHasher(
     private val repositoryRoot: Path,
     private val processRunner: EligibilityProcessRunner = JvmEligibilityProcessRunner(),
@@ -200,29 +229,15 @@ internal class DovecotPasswordHasher(
 }
 
 internal class JvmEligibilityProcessRunner(
-    private val processFactory: (EligibilityProcessRequest) -> Process = { request ->
-        ProcessBuilder(request.argv)
-            .directory(request.workingDirectory.toFile())
-            .start()
-    },
+    private val dockerRouting: DovecotDockerRouting =
+        DovecotDockerRouting.localDefault(),
+    private val processFactory: ((EligibilityProcessRequest) -> Process)? = null,
     private val captureFactory: (Int) -> EligibilityProcessOutputCapture = { maximumBytes ->
         EligibilityProcessOutputCapture(maximumBytes)
     },
 ) : EligibilityProcessRunner {
     override fun run(request: EligibilityProcessRequest): EligibilityProcessResult {
-        require(
-            request.argv == listOf(
-                "docker",
-                "compose",
-                "exec",
-                "-T",
-                "dovecot",
-                "doveadm",
-                "pw",
-                "-s",
-                "ARGON2ID",
-            ),
-        ) {
+        require(isApprovedArgv(request.argv)) {
             "Eligibility process command is not approved"
         }
         require(
@@ -251,7 +266,13 @@ internal class JvmEligibilityProcessRunner(
         var stdout = ByteArray(0)
         var stderr = ByteArray(0)
         return try {
-            val startedProcess = processFactory(request)
+            val startedProcess = processFactory?.invoke(request) ?:
+                ProcessBuilder(request.argv)
+                    .directory(request.workingDirectory.toFile())
+                    .also { builder ->
+                        dockerRouting.applyTo(builder.environment())
+                    }
+                    .start()
             process = startedProcess
             val ownedStdoutCapture = captureFactory(request.maximumOutputBytes)
             stdoutCapture = ownedStdoutCapture
@@ -345,7 +366,41 @@ internal class JvmEligibilityProcessRunner(
         runCatching { process.errorStream.close() }
     }
 
+    private fun isApprovedArgv(argv: List<String>): Boolean {
+        if (argv == HASH_ARGV) return true
+        if (
+            argv.size != VERIFY_ARGV_PREFIX.size + 1 ||
+            argv.take(VERIFY_ARGV_PREFIX.size) != VERIFY_ARGV_PREFIX
+        ) {
+            return false
+        }
+        return runCatching {
+            EligibilityEntry.requireValidHash(argv.last())
+        }.isSuccess
+    }
+
     companion object {
+        private val HASH_ARGV = listOf(
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "dovecot",
+            "doveadm",
+            "pw",
+            "-s",
+            "ARGON2ID",
+        )
+        private val VERIFY_ARGV_PREFIX = listOf(
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "dovecot",
+            "doveadm",
+            "pw",
+            "-t",
+        )
         private const val MAX_ALLOWED_OUTPUT_BYTES = 64 * 1024
         private const val PROCESS_DESTROY_TIMEOUT_SECONDS = 2L
         private const val OUTPUT_JOIN_TIMEOUT_SECONDS = 2L
@@ -423,13 +478,22 @@ internal class EligibilityProcessOutputCapture(
     }
 }
 
+internal fun interface EligibilityCommandExecutor {
+    fun execute(
+        args: Array<String>,
+        stdin: InputStream,
+        stdout: PrintStream,
+        stderr: PrintStream,
+    ): Int
+}
+
 internal class EligibilityFileCli(
     private val pathsProvider: () -> EligibilityPaths = EligibilityPaths::production,
     private val hasherFactory: (Path) -> EligibilityPasswordHasher = { repositoryRoot ->
         DovecotPasswordHasher(repositoryRoot)
     },
-) {
-    fun execute(
+) : EligibilityCommandExecutor {
+    override fun execute(
         args: Array<String>,
         stdin: InputStream,
         stdout: PrintStream,
@@ -519,7 +583,7 @@ internal class EligibilityFileCli(
 
         @JvmStatic
         fun main(args: Array<String>) {
-            val exitCode = EligibilityFileCli().execute(
+            val exitCode = EligibilityFileCliEntrypoint().execute(
                 args = args,
                 stdin = System.`in`,
                 stdout = System.out,
@@ -527,6 +591,88 @@ internal class EligibilityFileCli(
             )
             exitProcess(exitCode)
         }
+    }
+}
+
+internal class EligibilityFileCliEntrypoint(
+    private val environment: Map<String, String> = System.getenv(),
+    private val productionCli: EligibilityCommandExecutor =
+        EligibilityFileCli(),
+    private val task5ProofCliFactory: () -> EligibilityCommandExecutor = {
+        val repositoryRoot = EligibilityPaths.production().repositoryRoot
+        val profile = DovecotTask5ProofProfile.load(
+            environment = environment,
+            repositoryRoot = repositoryRoot,
+        )
+        profile.requirePreparedTls()
+        EligibilityFileCli(
+            pathsProvider = profile::eligibilityPaths,
+            hasherFactory = { repositoryRoot ->
+                DovecotPasswordHasher(
+                    repositoryRoot,
+                    JvmEligibilityProcessRunner(
+                        dockerRouting =
+                            DovecotDockerRouting.task5Proof(profile),
+                    ),
+                )
+            },
+        )
+    },
+) : EligibilityCommandExecutor {
+    override fun execute(
+        args: Array<String>,
+        stdin: InputStream,
+        stdout: PrintStream,
+        stderr: PrintStream,
+    ): Int = try {
+        if (args.firstOrNull() == TASK5_PROOF_PREFIX) {
+            val delegatedArgs = args.drop(1).toTypedArray()
+            require(isApprovedTask5ProofCommand(delegatedArgs)) {
+                "Task 5 proof eligibility command is invalid"
+            }
+            val proofCli = task5ProofCliFactory()
+            if (delegatedArgs.contentEquals(arrayOf(PREFLIGHT_COMMAND))) {
+                stdout.println("Dovecot Task 5 proof preflight complete")
+                0
+            } else {
+                proofCli.execute(
+                    args = delegatedArgs,
+                    stdin = stdin,
+                    stdout = stdout,
+                    stderr = stderr,
+                )
+            }
+        } else {
+            require(environment[LIVE_PROFILE_KEY] != TASK5_PROOF_PREFIX) {
+                "Normal eligibility authority is unavailable during Task 5 proof"
+            }
+            productionCli.execute(
+                args = args,
+                stdin = stdin,
+                stdout = stdout,
+                stderr = stderr,
+            )
+        }
+    } catch (_: Exception) {
+        stderr.println("Eligibility command failed")
+        2
+    }
+
+    private fun isApprovedTask5ProofCommand(args: Array<String>): Boolean =
+        args.contentEquals(arrayOf(PREFLIGHT_COMMAND)) ||
+            args.contentEquals(arrayOf("list")) ||
+            (
+                args.size == 2 &&
+                    args[0] in setOf("add", "remove") &&
+                    runCatching {
+                        EligibilityAddress.requireCanonical(args[1])
+                    }.isSuccess
+                )
+
+    companion object {
+        private const val TASK5_PROOF_PREFIX = "task5-proof"
+        private const val PREFLIGHT_COMMAND = "preflight"
+        private const val LIVE_PROFILE_KEY = "DOVECOT_LIVE_PROFILE"
     }
 }
 

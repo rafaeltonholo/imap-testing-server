@@ -55,15 +55,29 @@ internal object EligibilityAddress {
         ) {
             "Eligibility address is invalid"
         }
+        val baseLocalPart = localPart.substringBefore('+')
+        require(
+            domain != LOCAL_MAIL_DOMAIN ||
+                baseLocalPart !in PROTECTED_LOCAL_PARTS,
+        ) {
+            "Eligibility address is reserved"
+        }
         return address
     }
+
+    private const val LOCAL_MAIL_DOMAIN = "local.test"
+    private val PROTECTED_LOCAL_PARTS = setOf(
+        "dashboard-management",
+        "dashboard-operator-a",
+        "dashboard-operator-b",
+    )
 }
 
 internal class EligibilityEntry private constructor(
     val address: String,
     private val providerHash: String,
 ) {
-    fun render(): String = "$address:$providerHash"
+    fun render(): String = "$address:$providerHash$EMPTY_USERDB_FIELDS"
 
     internal fun withHash(hash: String): EligibilityEntry = create(address, hash)
 
@@ -84,16 +98,20 @@ internal class EligibilityEntry private constructor(
         }
 
         fun parse(line: String): EligibilityEntry {
-            require(line.count { it == ':' } == 1) {
+            require(
+                line.count { it == ':' } == PASSWD_DELIMITER_COUNT &&
+                    line.endsWith(EMPTY_USERDB_FIELDS),
+            ) {
                 "Eligibility entry is invalid"
             }
             val delimiter = line.indexOf(':')
-            require(delimiter > 0 && delimiter < line.lastIndex) {
+            val hashEnd = line.length - EMPTY_USERDB_FIELDS.length
+            require(delimiter > 0 && delimiter + 1 < hashEnd) {
                 "Eligibility entry is invalid"
             }
             return create(
                 address = line.substring(0, delimiter),
-                providerHash = line.substring(delimiter + 1),
+                providerHash = line.substring(delimiter + 1, hashEnd),
             )
         }
 
@@ -166,6 +184,8 @@ internal class EligibilityEntry private constructor(
         private const val ARGON2_SEGMENT_COUNT = 6
         private const val MAX_PARAMETER_VALUE_DIGITS = 10
         private const val MAX_ENCODED_VALUE_SEGMENT_LENGTH = 1024
+        private const val PASSWD_DELIMITER_COUNT = 7
+        private const val EMPTY_USERDB_FIELDS = "::::::"
         private val ARGON2_PARAMETERS = Regex(
             "m=([1-9][0-9]{0,9}),t=([1-9][0-9]{0,9}),p=([1-9][0-9]{0,9})",
         )

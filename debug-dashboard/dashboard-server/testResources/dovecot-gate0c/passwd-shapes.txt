@@ -1,0 +1,11 @@
+# outcome	case-id	expected-column-count	populated-userdb-column-or-<none>	record template
+accept	canonical	8	<none>	{{address}}:{{hash}}::::::
+reject	legacy-two-column	2	<none>	{{address}}:{{hash}}
+reject	delimiter-underflow	7	<none>	{{address}}:{{hash}}:::::
+reject	delimiter-overflow	9	<none>	{{address}}:{{hash}}:::::::
+reject	nonempty-uid	8	2	{{address}}:{{hash}}:1000:::::
+reject	nonempty-gid	8	3	{{address}}:{{hash}}::1000::::
+reject	nonempty-gecos	8	4	{{address}}:{{hash}}:::Eligible User:::
+reject	nonempty-home	8	5	{{address}}:{{hash}}::::/srv/vmail/eligible::
+reject	nonempty-shell	8	6	{{address}}:{{hash}}:::::/bin/false:
+reject	nonempty-extra-fields	8	7	{{address}}:{{hash}}::::::allow_nets=local

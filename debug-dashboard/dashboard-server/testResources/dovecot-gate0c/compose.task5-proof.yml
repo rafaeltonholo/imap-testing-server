@@ -1,0 +1,76 @@
+services:
+  dovecot:
+    ports: !override
+      - "127.0.0.1:1993:31993"
+    volumes: !override
+      - ./config:/etc/dovecot/conf.d:ro
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/dovecot
+        target: /etc/dovecot/runtime
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/ssl
+        target: /etc/dovecot/ssl
+        read_only: true
+        bind:
+          create_host_path: false
+      - task5-proof-vmail:/srv/vmail
+      - task5-proof-logs:/var/log/dovecot
+
+  dovecot-operator:
+    profiles: !override []
+    ports: !override
+      - "127.0.0.1:2993:31993"
+    volumes: !override
+      - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/dovecot
+        target: /etc/dovecot/runtime
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/dovecot-operator
+        target: /etc/dovecot/operator-auth
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/ssl
+        target: /etc/dovecot/ssl
+        read_only: true
+        bind:
+          create_host_path: false
+      - task5-proof-vmail:/srv/vmail
+
+  postfix:
+    ports: !override
+      - "127.0.0.1:21025:25"
+    volumes: !override
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/ssl
+        target: /etc/postfix/ssl
+        read_only: true
+        bind:
+          create_host_path: false
+
+  oauth2-mock:
+    ports: !override
+      - "127.0.0.1:28080:8080"
+    volumes: !override
+      - type: bind
+        source: ./debug-dashboard/.runtime/task5-proof/dovecot
+        target: /etc/dovecot/runtime
+        read_only: true
+        bind:
+          create_host_path: false
+
+  stalwart:
+    profiles:
+      - task5-stalwart-disabled
+
+volumes:
+  task5-proof-vmail:
+  task5-proof-logs:

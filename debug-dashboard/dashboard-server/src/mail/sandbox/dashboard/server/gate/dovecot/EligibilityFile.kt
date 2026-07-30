@@ -5,7 +5,6 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.nio.file.AccessDeniedException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -25,7 +24,19 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
+private enum class EligibilityPathPurpose {
+    Production,
+    Task5Proof,
+    ;
+
+    fun runtimeRoot(dashboardRoot: Path): Path = when (this) {
+        Production -> dashboardRoot.resolve(".runtime")
+        Task5Proof -> dashboardRoot.resolve(".runtime/task5-proof")
+    }
+}
+
 internal class EligibilityPaths private constructor(
+    private val purpose: EligibilityPathPurpose,
     val repositoryRoot: Path,
     val dashboardRoot: Path,
     val runtimeRoot: Path,
@@ -33,6 +44,7 @@ internal class EligibilityPaths private constructor(
     val users: Path,
     val lock: Path,
     val seed: Path,
+    internal val trustedOwner: UserPrincipal,
 ) {
     fun revalidate() {
         requireCanonicalDirectory(repositoryRoot, "repository root")
@@ -49,7 +61,15 @@ internal class EligibilityPaths private constructor(
             "Dashboard project layout is invalid"
         }
         safetyCheck(
-            runtimeRoot == dashboardRoot.resolve(".runtime") &&
+            Files.getOwner(repositoryRoot, LinkOption.NOFOLLOW_LINKS) ==
+                trustedOwner &&
+                Files.getOwner(dashboardRoot, LinkOption.NOFOLLOW_LINKS) ==
+                trustedOwner,
+        ) {
+            "Eligibility trusted owner changed"
+        }
+        safetyCheck(
+            runtimeRoot == purpose.runtimeRoot(dashboardRoot) &&
                 dovecotDirectory == runtimeRoot.resolve("dovecot") &&
                 users == dovecotDirectory.resolve("users") &&
                 lock == dovecotDirectory.resolve("users.lock") &&
@@ -81,13 +101,25 @@ internal class EligibilityPaths private constructor(
                     "Run the eligibility command from the canonical repository or dashboard layout",
                 )
             }
-            return create(repositoryRoot)
+            return create(repositoryRoot, EligibilityPathPurpose.Production)
         }
 
         fun testing(repositoryRoot: Path): EligibilityPaths =
-            create(repositoryRoot.toAbsolutePath().normalize())
+            create(
+                repositoryRoot.toAbsolutePath().normalize(),
+                EligibilityPathPurpose.Production,
+            )
 
-        private fun create(repositoryRoot: Path): EligibilityPaths {
+        fun task5Proof(repositoryRoot: Path): EligibilityPaths =
+            create(
+                repositoryRoot.toAbsolutePath().normalize(),
+                EligibilityPathPurpose.Task5Proof,
+            )
+
+        private fun create(
+            repositoryRoot: Path,
+            purpose: EligibilityPathPurpose,
+        ): EligibilityPaths {
             requireCanonicalDirectory(repositoryRoot, "repository root")
             val dashboardRoot = repositoryRoot.resolve("debug-dashboard")
             requireCanonicalDirectory(dashboardRoot, "dashboard root")
@@ -99,9 +131,20 @@ internal class EligibilityPaths private constructor(
                 dashboardRoot.resolve("project.yaml"),
                 "dashboard project marker",
             )
-            val runtimeRoot = dashboardRoot.resolve(".runtime")
+            val runtimeRoot = purpose.runtimeRoot(dashboardRoot)
             val dovecotDirectory = runtimeRoot.resolve("dovecot")
+            val trustedOwner = Files.getOwner(
+                repositoryRoot,
+                LinkOption.NOFOLLOW_LINKS,
+            )
+            safetyCheck(
+                Files.getOwner(dashboardRoot, LinkOption.NOFOLLOW_LINKS) ==
+                    trustedOwner,
+            ) {
+                "Eligibility repository ownership is inconsistent"
+            }
             return EligibilityPaths(
+                purpose = purpose,
                 repositoryRoot = repositoryRoot,
                 dashboardRoot = dashboardRoot,
                 runtimeRoot = runtimeRoot,
@@ -109,6 +152,7 @@ internal class EligibilityPaths private constructor(
                 users = dovecotDirectory.resolve("users"),
                 lock = dovecotDirectory.resolve("users.lock"),
                 seed = repositoryRoot.resolve("config/users.seed"),
+                trustedOwner = trustedOwner,
             ).also(EligibilityPaths::revalidate)
         }
 
@@ -452,10 +496,20 @@ internal class EligibilityFile(
     }
 
     private fun ensureSafeRuntimeRoot() {
+        val runtimeBase = paths.dashboardRoot.resolve(".runtime")
+        if (Files.notExists(runtimeBase, LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                createOwnerOnlyDirectory(runtimeBase)
+                fsyncDirectory(paths.dashboardRoot)
+            } catch (_: FileAlreadyExistsException) {
+                // A concurrent runtime owner created it; validate below.
+            }
+        }
+        requireSafeRuntimeDirectory(runtimeBase)
         if (Files.notExists(paths.runtimeRoot, LinkOption.NOFOLLOW_LINKS)) {
             try {
                 createOwnerOnlyDirectory(paths.runtimeRoot)
-                fsyncDirectory(paths.dashboardRoot)
+                fsyncDirectory(requireNotNull(paths.runtimeRoot.parent))
             } catch (_: FileAlreadyExistsException) {
                 // A concurrent runtime owner created it; validate below.
             }
@@ -464,10 +518,16 @@ internal class EligibilityFile(
     }
 
     private fun requireSafeRuntimeRoot() {
-        val path = paths.runtimeRoot
+        requireSafeRuntimeDirectory(paths.dashboardRoot.resolve(".runtime"))
+        requireSafeRuntimeDirectory(paths.runtimeRoot)
+    }
+
+    private fun requireSafeRuntimeDirectory(path: Path) {
         safetyCheck(
             Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path),
+                !Files.isSymbolicLink(path) &&
+                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
+                paths.trustedOwner,
         ) {
             "Eligibility runtime root is unsafe"
         }
@@ -491,7 +551,9 @@ internal class EligibilityFile(
     private fun requireSecureDirectory(path: Path) {
         safetyCheck(
             Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path),
+                !Files.isSymbolicLink(path) &&
+                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
+                paths.trustedOwner,
         ) {
             "Eligibility directory is unsafe"
         }
@@ -525,7 +587,9 @@ internal class EligibilityFile(
     private fun requireSecureRegularFile(path: Path) {
         safetyCheck(
             Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path),
+                !Files.isSymbolicLink(path) &&
+                Files.getOwner(path, LinkOption.NOFOLLOW_LINKS) ==
+                paths.trustedOwner,
         ) {
             "Eligibility file is unsafe"
         }
@@ -565,9 +629,14 @@ internal class EligibilityFile(
         directory: Boolean,
     ) {
         val file = path.toFile()
-        file.setReadable(false, false)
-        file.setWritable(false, false)
-        file.setExecutable(false, false)
+        val removedRead = file.setReadable(false, false)
+        val removedWrite = file.setWritable(false, false)
+        val removedExecute = file.setExecutable(false, false)
+        safetyCheck(
+            removedRead && removedWrite && removedExecute,
+        ) {
+            "Could not remove broad eligibility permissions"
+        }
         safetyCheck(file.setReadable(true, true) && file.setWritable(true, true)) {
             "Could not set owner-only eligibility permissions"
         }
@@ -621,13 +690,16 @@ internal class EligibilityFile(
     private fun fsyncDirectory(directory: Path) {
         try {
             FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
-        } catch (_: UnsupportedOperationException) {
-            // Some JDK filesystem providers explicitly do not support directory channels.
-        } catch (denied: AccessDeniedException) {
-            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
-                return
-            }
-            throw IllegalStateException("Could not make eligibility directory durable", denied)
+        } catch (failure: UnsupportedOperationException) {
+            throw IllegalStateException(
+                "Could not make eligibility directory durable",
+                failure,
+            )
+        } catch (failure: java.io.IOException) {
+            throw IllegalStateException(
+                "Could not make eligibility directory durable",
+                failure,
+            )
         }
     }
 

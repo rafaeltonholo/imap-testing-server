@@ -114,6 +114,8 @@ class EligibilityReader:
     MAX_DOMAIN_LENGTH = 253
     MAX_HASH_LENGTH = 4 * 1024
     MAX_ENCODED_SEGMENT_LENGTH = 1024
+    PASSWD_DELIMITER_COUNT = 7
+    EMPTY_USERDB_FIELDS = "::::::"
     LOCAL_PART = re.compile(r"[a-z0-9](?:[a-z0-9._+%-]{0,62}[a-z0-9])?")
     DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
     ARGON2_HASH = re.compile(
@@ -213,9 +215,13 @@ class EligibilityReader:
                 or self._trim_kotlin_start(raw_line).startswith("#")
             ):
                 continue
-            if raw_line.count(":") != 1:
+            if (
+                raw_line.count(":") != self.PASSWD_DELIMITER_COUNT
+                or not raw_line.endswith(self.EMPTY_USERDB_FIELDS)
+            ):
                 raise ValueError("eligibility authority entry is invalid")
-            address, provider_hash = raw_line.split(":", 1)
+            credential_fields = raw_line[: -len(self.EMPTY_USERDB_FIELDS)]
+            address, provider_hash = credential_fields.split(":", 1)
             if (
                 not self._is_canonical_address(address)
                 or not self._is_canonical_hash(provider_hash)
@@ -272,6 +278,10 @@ class EligibilityReader:
             or not cls.LOCAL_PART.fullmatch(local_part)
             or ".." in local_part
             or not 1 <= len(domain) <= cls.MAX_DOMAIN_LENGTH
+            or (
+                domain == LOCAL_MAIL_DOMAIN
+                and local_part.split("+", 1)[0] in PROTECTED_LOCAL_PARTS
+            )
         ):
             return False
         labels = domain.split(".")
