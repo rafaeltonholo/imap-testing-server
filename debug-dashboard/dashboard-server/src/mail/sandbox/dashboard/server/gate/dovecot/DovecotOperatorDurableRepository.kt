@@ -3,6 +3,7 @@ package mail.sandbox.dashboard.server.gate.dovecot
 import java.io.EOFException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.channels.ReadableByteChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -59,6 +60,17 @@ internal class DovecotOperatorProcessLockRegistry {
     private class LockEntry {
         val lock = ReentrantLock()
         var references = 0
+    }
+}
+
+internal fun readDovecotOperatorTrailingGrowthByte(
+    channel: ReadableByteChannel,
+): Int {
+    val growthProbe = ByteArray(1)
+    return try {
+        channel.read(ByteBuffer.wrap(growthProbe))
+    } finally {
+        growthProbe.fill(0)
     }
 }
 
@@ -345,7 +357,7 @@ internal class DovecotOperatorDurableRepository(
                 }
                 repositorySafetyCheck(
                     offset == bytes.size &&
-                        channel.read(ByteBuffer.allocate(1)) < 0,
+                        readDovecotOperatorTrailingGrowthByte(channel) < 0,
                 ) {
                     "Dovecot operator file changed while being read"
                 }

@@ -298,8 +298,11 @@ class DovecotOperatorApplicationLeaseRegistryTest {
             prober = { _, _ -> DovecotOperatorProbeResult.Success },
         )
         val terminalFailure = TerminalCloseFailure()
+        val closeCalls = AtomicInteger()
         registry.acquire(DovecotOperatorId.A) {
-            throw terminalFailure
+            if (closeCalls.incrementAndGet() == 1) {
+                throw terminalFailure
+            }
         }
 
         val first = assertFailsWith<TerminalCloseFailure> {
@@ -311,6 +314,17 @@ class DovecotOperatorApplicationLeaseRegistryTest {
 
         assertSame(terminalFailure, first)
         assertSame(first, second)
+        assertEquals(1, closeCalls.get())
+
+        val activationBytes =
+            "terminal-close-rejected-activation".toByteArray()
+        assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredential(
+                DovecotOperatorId.B,
+                DovecotOperatorSecret.takeOwnership(activationBytes),
+            ).use(runtime::activateApplication)
+        }
+        assertTrue(activationBytes.all { it == 0.toByte() })
     }
 
     @Test

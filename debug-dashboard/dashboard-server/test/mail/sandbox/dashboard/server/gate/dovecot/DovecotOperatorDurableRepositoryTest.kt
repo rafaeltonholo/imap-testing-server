@@ -1,15 +1,77 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.ReadableByteChannel
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotOperatorDurableRepositoryTest {
+    @Test
+    fun trailingGrowthReadWipesItsNamedOneByteBackingArray() {
+        var growthProbeBacking: ByteArray? = null
+        val channel = object : ReadableByteChannel {
+            private var open = true
+
+            override fun read(destination: ByteBuffer): Int {
+                growthProbeBacking = destination.array()
+                destination.put(0x5a.toByte())
+                return 1
+            }
+
+            override fun isOpen(): Boolean = open
+
+            override fun close() {
+                open = false
+            }
+        }
+
+        assertEquals(
+            1,
+            readDovecotOperatorTrailingGrowthByte(channel),
+        )
+
+        assertTrue(
+            requireNotNull(growthProbeBacking)
+                .all { byte -> byte == 0.toByte() },
+        )
+    }
+
+    @Test
+    fun failedTrailingGrowthReadWipesItsNamedOneByteBackingArray() {
+        val expected = IOException("Synthetic trailing-growth read failure")
+        var growthProbeBacking: ByteArray? = null
+        val channel = object : ReadableByteChannel {
+            override fun read(destination: ByteBuffer): Int {
+                growthProbeBacking = destination.array()
+                destination.put(0x5a.toByte())
+                throw expected
+            }
+
+            override fun isOpen(): Boolean = true
+
+            override fun close() = Unit
+        }
+
+        val caught = assertFailsWith<IOException> {
+            readDovecotOperatorTrailingGrowthByte(channel)
+        }
+
+        assertSame(expected, caught)
+        assertTrue(
+            requireNotNull(growthProbeBacking)
+                .all { byte -> byte == 0.toByte() },
+        )
+    }
+
     @Test
     fun processLockRegistrySerializesWaitersAndEvictsTheIdleKey() {
         val registry = DovecotOperatorProcessLockRegistry()
