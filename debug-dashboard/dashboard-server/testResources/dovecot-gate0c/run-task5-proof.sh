@@ -142,6 +142,7 @@ TASK5_KOTLIN="$TASK5_DASHBOARD_ROOT/kotlin"
 TASK5_BASE_COMPOSE="$TASK5_REPOSITORY_ROOT/docker-compose.yml"
 TASK5_PROOF_COMPOSE_RELATIVE="debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml"
 TASK5_PROOF_COMPOSE="$TASK5_REPOSITORY_ROOT/$TASK5_PROOF_COMPOSE_RELATIVE"
+TASK5_NETWORK_ISOLATION_HELPER="$TASK5_SCRIPT_DIRECTORY/network-isolation-check.py"
 TASK5_RUNTIME_ROOT="$TASK5_DASHBOARD_ROOT/.runtime"
 TASK5_PROOF_ROOT="$TASK5_RUNTIME_ROOT/task5-proof"
 TASK5_PROOF_OWNER_MARKER="$TASK5_PROOF_ROOT/.task5-proof-owner"
@@ -192,6 +193,8 @@ if [[ "$TASK5_SCRIPT_DIRECTORY" != "$TASK5_EXPECTED_SCRIPT_DIRECTORY" ]] ||
   [[ -L "$TASK5_BASE_COMPOSE" ]] ||
   [[ ! -f "$TASK5_PROOF_COMPOSE" ]] ||
   [[ -L "$TASK5_PROOF_COMPOSE" ]] ||
+  [[ ! -f "$TASK5_NETWORK_ISOLATION_HELPER" ]] ||
+  [[ -L "$TASK5_NETWORK_ISOLATION_HELPER" ]] ||
   ! task5_directory_is_exact_physical "$TASK5_SCRIPT_DIRECTORY" ||
   ! task5_proof_ancestors_are_safe; then
   task5_error "canonical non-symbolic repository layout validation failed"
@@ -1060,7 +1063,7 @@ done < "$TASK5_BASELINE_DIRECTORY/ids"
 unset TASK5_CONTAINER_ID
 TASK5_BASELINE_READY=1
 
-for TASK5_PROOF_PORT in 1993 2993 21025 28080; do
+for TASK5_PROOF_PORT in 1993 21995 2993 21025 28080; do
   if lsof -nP -iTCP:"$TASK5_PROOF_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     task5_error "port $TASK5_PROOF_PORT is occupied; nothing will be stopped"
     false
@@ -1170,6 +1173,22 @@ task5_require_proof_root_ownership "startup live test"
   "$TASK5_KOTLIN" test \
     --include-module dashboard-server \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorStartupLiveTest
+)
+
+task5_require_proof_root_ownership "network isolation live test"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  "$TASK5_KOTLIN" test \
+    --include-module dashboard-server \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotIsolationLiveTest
+)
+
+task5_require_proof_root_ownership "operator rotation live test"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  "$TASK5_KOTLIN" test \
+    --include-module dashboard-server \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorRotationLiveTest
 )
 
 printf '%s\n' "Task 5 proof completed; mandatory cleanup follows."

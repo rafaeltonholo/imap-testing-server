@@ -58,6 +58,12 @@ class DovecotOperatorCredentialStoreTest {
         )
         assertEquals(
             repositoryRoot.resolve(
+                "debug-dashboard/.runtime/secrets/dovecot-operator-rotation",
+            ),
+            paths.rotationIntent,
+        )
+        assertEquals(
+            repositoryRoot.resolve(
                 "debug-dashboard/.runtime/secrets/dovecot-operator.lock",
             ),
             paths.lock,
@@ -224,6 +230,956 @@ class DovecotOperatorCredentialStoreTest {
     }
 
     @Test
+    fun rotationStagesProbesSwitchesDrainsAndRevokesAToBInExactOrder() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val events = mutableListOf<DovecotOperatorCommitPoint>()
+        val runtimeEvents = mutableListOf<String>()
+        var oldGenerationBlocked = false
+        val runtime = object : DovecotOperatorRotationRuntime {
+            override fun observePasswdFile(
+                target: DovecotOperatorTarget,
+                credential: DovecotOperatorCredential,
+            ): DovecotOperatorProbeResult {
+                runtimeEvents += "observe-${credential.id.reference}"
+                return when (credential.id) {
+                    DovecotOperatorId.A ->
+                        if (oldGenerationBlocked) {
+                            DovecotOperatorProbeResult.AuthenticationFailure
+                        } else {
+                            DovecotOperatorProbeResult.Success
+                        }
+                    DovecotOperatorId.B -> DovecotOperatorProbeResult.Success
+                }
+            }
+
+            override fun activateApplication(
+                credential: DovecotOperatorCredential,
+            ) {
+                runtimeEvents += "activate-${credential.id.reference}"
+            }
+
+            override fun verifyApplication(
+                target: DovecotOperatorTarget,
+                expectedId: DovecotOperatorId,
+            ): DovecotOperatorProbeResult {
+                runtimeEvents += "application-${expectedId.reference}"
+                return DovecotOperatorProbeResult.Success
+            }
+
+            override fun blockAndDrain(id: DovecotOperatorId) {
+                runtimeEvents += "drain-${id.reference}"
+                oldGenerationBlocked = true
+            }
+        }
+        val store = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_B },
+            verifier = MATCHING_VERIFIER,
+            observer = DovecotOperatorStoreObserver { point, _ ->
+                events += point
+            },
+        )
+
+        assertEquals(
+            DovecotOperatorId.B,
+            store.rotateOrRecover(
+                target = DovecotOperatorTarget.create("rotation@local.test"),
+                runtime = runtime,
+            ),
+        )
+
+        assertTrue(generated.all { it == 0.toByte() })
+        assertFalse(Files.exists(fixture.paths.slotA, LinkOption.NOFOLLOW_LINKS))
+        assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+        assertEquals("b", Files.readString(fixture.paths.active))
+        assertEquals(
+            "dashboard-operator-b:$HASH_B\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+        assertFalse(
+            Files.exists(
+                fixture.paths.rotationIntent,
+                LinkOption.NOFOLLOW_LINKS,
+            ),
+        )
+        assertEquals(
+            listOf(
+                "observe-b",
+                "activate-b",
+                "application-b",
+                "drain-a",
+                "observe-a",
+                "observe-b",
+            ),
+            runtimeEvents,
+        )
+        assertEquals(
+            listOf(
+                DovecotOperatorCommitPoint.StableLockAcquired,
+                DovecotOperatorCommitPoint.BeforeIntentReplace,
+                DovecotOperatorCommitPoint.AfterIntentReplace,
+                DovecotOperatorCommitPoint.BeforeSlotReplace,
+                DovecotOperatorCommitPoint.AfterSlotReplace,
+                DovecotOperatorCommitPoint.BeforeMasterReplace,
+                DovecotOperatorCommitPoint.AfterMasterReplace,
+                DovecotOperatorCommitPoint.StagedAccepted,
+                DovecotOperatorCommitPoint.BeforeActiveReplace,
+                DovecotOperatorCommitPoint.AfterActiveReplace,
+                DovecotOperatorCommitPoint.ApplicationVerified,
+                DovecotOperatorCommitPoint.DrainCompleted,
+                DovecotOperatorCommitPoint.BeforeMasterReplace,
+                DovecotOperatorCommitPoint.AfterMasterReplace,
+                DovecotOperatorCommitPoint.OldRejected,
+                DovecotOperatorCommitPoint.NewVerified,
+                DovecotOperatorCommitPoint.BeforeSlotDelete,
+                DovecotOperatorCommitPoint.AfterSlotDelete,
+                DovecotOperatorCommitPoint.BeforeIntentDelete,
+                DovecotOperatorCommitPoint.AfterIntentDelete,
+                DovecotOperatorCommitPoint.FinalVerified,
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun consecutiveRotationsAlternateAToBAndBToA() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "initial-a")
+        val generated = ArrayDeque(
+            listOf("rotated-b", "rotated-a").map {
+                it.toByteArray(StandardCharsets.US_ASCII)
+            },
+        )
+        val hashes = ArrayDeque(listOf(HASH_B, HASH_A))
+        val runtime = object : DovecotOperatorRotationRuntime {
+            private var rejectNext: DovecotOperatorId? = null
+
+            override fun observePasswdFile(
+                target: DovecotOperatorTarget,
+                credential: DovecotOperatorCredential,
+            ): DovecotOperatorProbeResult =
+                if (credential.id == rejectNext) {
+                    rejectNext = null
+                    DovecotOperatorProbeResult.AuthenticationFailure
+                } else {
+                    DovecotOperatorProbeResult.Success
+                }
+
+            override fun activateApplication(
+                credential: DovecotOperatorCredential,
+            ) = Unit
+
+            override fun verifyApplication(
+                target: DovecotOperatorTarget,
+                expectedId: DovecotOperatorId,
+            ): DovecotOperatorProbeResult =
+                DovecotOperatorProbeResult.Success
+
+            override fun blockAndDrain(id: DovecotOperatorId) {
+                rejectNext = id
+            }
+        }
+        val store = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated.removeFirst())
+            },
+            hasher = DovecotOperatorHashBoundary { hashes.removeFirst() },
+            verifier = MATCHING_VERIFIER,
+        )
+        val target = DovecotOperatorTarget.create("alternating@local.test")
+
+        assertEquals(DovecotOperatorId.B, store.rotateOrRecover(target, runtime))
+        assertEquals(DovecotOperatorId.A, store.rotateOrRecover(target, runtime))
+
+        assertEquals("a", Files.readString(fixture.paths.active))
+        assertEquals("rotated-a", Files.readString(fixture.paths.slotA))
+        assertFalse(Files.exists(fixture.paths.slotB, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(
+            "dashboard-operator-a:$HASH_A\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+        assertFalse(
+            Files.exists(
+                fixture.paths.rotationIntent,
+                LinkOption.NOFOLLOW_LINKS,
+            ),
+        )
+        assertTrue(generated.isEmpty())
+        assertTrue(hashes.isEmpty())
+    }
+
+    @Test
+    fun convergenceRetriesOnlyInverseResultsWithFreshWipedCredentials() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val sleeps = mutableListOf<Long>()
+        val aliases = mutableListOf<ByteArray>()
+        val staged = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.AuthenticationFailure,
+                DovecotOperatorProbeResult.AuthenticationFailure,
+                DovecotOperatorProbeResult.Success,
+            ),
+        )
+        val application = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.AuthenticationFailure,
+                DovecotOperatorProbeResult.Success,
+            ),
+        )
+        val oldRejection = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.Success,
+                DovecotOperatorProbeResult.Success,
+                DovecotOperatorProbeResult.AuthenticationFailure,
+            ),
+        )
+        val newVerification = ArrayDeque(
+            listOf(
+                DovecotOperatorProbeResult.AuthenticationFailure,
+                DovecotOperatorProbeResult.Success,
+            ),
+        )
+        var activated = false
+        var drained = false
+        val runtime = object : DovecotOperatorRotationRuntime {
+            override fun observePasswdFile(
+                target: DovecotOperatorTarget,
+                credential: DovecotOperatorCredential,
+            ): DovecotOperatorProbeResult {
+                credential.withSecretBytes { aliases += it }
+                return when {
+                    credential.id == DovecotOperatorId.B && !activated ->
+                        staged.removeFirst()
+                    credential.id == DovecotOperatorId.A && drained ->
+                        oldRejection.removeFirst()
+                    credential.id == DovecotOperatorId.B && drained ->
+                        newVerification.removeFirst()
+                    else -> error("unexpected convergence phase")
+                }
+            }
+
+            override fun activateApplication(
+                credential: DovecotOperatorCredential,
+            ) {
+                assertEquals(DovecotOperatorId.B, credential.id)
+                activated = true
+            }
+
+            override fun verifyApplication(
+                target: DovecotOperatorTarget,
+                expectedId: DovecotOperatorId,
+            ): DovecotOperatorProbeResult = application.removeFirst()
+
+            override fun blockAndDrain(id: DovecotOperatorId) {
+                assertEquals(DovecotOperatorId.A, id)
+                drained = true
+            }
+        }
+        val store = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_B },
+            verifier = MATCHING_VERIFIER,
+            rotationSleeper =
+                DovecotOperatorRotationSleeper(sleeps::add),
+        )
+
+        assertEquals(
+            DovecotOperatorId.B,
+            store.rotateOrRecover(
+                DovecotOperatorTarget.create("retry@local.test"),
+                runtime,
+            ),
+        )
+
+        assertEquals(List(6) { 250L }, sleeps)
+        assertEquals(8, aliases.size)
+        assertTrue(aliases.all { bytes -> bytes.all { it == 0.toByte() } })
+        assertTrue(generated.all { it == 0.toByte() })
+        assertTrue(staged.isEmpty())
+        assertTrue(application.isEmpty())
+        assertTrue(oldRejection.isEmpty())
+        assertTrue(newVerification.isEmpty())
+    }
+
+    @Test
+    fun failedOldRejectionRetainsIntentAndBothRawSlotsForForwardRecovery() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val sleeps = mutableListOf<Long>()
+        var drained = false
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary { HASH_B },
+                verifier = MATCHING_VERIFIER,
+                rotationSleeper =
+                    DovecotOperatorRotationSleeper(sleeps::add),
+            ).rotateOrRecover(
+                target =
+                    DovecotOperatorTarget.create("retained@local.test"),
+                runtime = object : DovecotOperatorRotationRuntime {
+                    override fun observePasswdFile(
+                        target: DovecotOperatorTarget,
+                        credential: DovecotOperatorCredential,
+                    ): DovecotOperatorProbeResult =
+                        if (
+                            credential.id == DovecotOperatorId.A &&
+                            drained
+                        ) {
+                            DovecotOperatorProbeResult.Success
+                        } else {
+                            DovecotOperatorProbeResult.Success
+                        }
+
+                    override fun activateApplication(
+                        credential: DovecotOperatorCredential,
+                    ) = Unit
+
+                    override fun verifyApplication(
+                        target: DovecotOperatorTarget,
+                        expectedId: DovecotOperatorId,
+                    ): DovecotOperatorProbeResult =
+                        DovecotOperatorProbeResult.Success
+
+                    override fun blockAndDrain(id: DovecotOperatorId) {
+                        drained = true
+                    }
+                },
+            )
+        }
+
+        assertTrue(
+            failure.message.orEmpty().contains(
+                "remained accepted",
+                ignoreCase = true,
+            ),
+        )
+        assertEquals(List(6) { 250L }, sleeps)
+        assertTrue(generated.all { it == 0.toByte() })
+        assertEquals("a:b", Files.readString(fixture.paths.rotationIntent))
+        assertEquals("b", Files.readString(fixture.paths.active))
+        assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+        assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+        assertEquals(
+            "dashboard-operator-b:$HASH_B\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+
+        assertEquals(
+            DovecotOperatorId.B,
+            loaderOnlyStore(fixture).recoverRotation(
+                target =
+                    DovecotOperatorTarget.create("retained@local.test"),
+                runtime = RecordingRotationRuntime(),
+            ),
+        )
+        assertFalse(Files.exists(fixture.paths.slotA, LinkOption.NOFOLLOW_LINKS))
+        assertFalse(
+            Files.exists(
+                fixture.paths.rotationIntent,
+                LinkOption.NOFOLLOW_LINKS,
+            ),
+        )
+    }
+
+    @Test
+    fun recoveryRollsBackBeforeTheSwitchAndCompletesForwardAfterTheSwitch() {
+        listOf(
+            DovecotOperatorCommitPoint.AfterMasterReplace to
+                DovecotOperatorId.A,
+            DovecotOperatorCommitPoint.AfterActiveReplace to
+                DovecotOperatorId.B,
+        ).forEach { (crashPoint, expected) ->
+            val fixture = temporaryRepository()
+            bootstrap(fixture, "old-secret")
+            val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+            val target =
+                DovecotOperatorTarget.create("recovery@local.test")
+            val crashRuntime = RecordingRotationRuntime()
+            val crashing = DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary { HASH_B },
+                verifier = MATCHING_VERIFIER,
+                observer = DovecotOperatorStoreObserver { point, _ ->
+                    if (point == crashPoint) throw SimulatedStoreFailure()
+                },
+            )
+            assertFailsWith<SimulatedStoreFailure> {
+                crashing.rotateOrRecover(target, crashRuntime)
+            }
+
+            val recoveryRuntime = RecordingRotationRuntime()
+            val recovered = DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    error("recovery must not generate another credential")
+                },
+                hasher = DovecotOperatorHashBoundary {
+                    error("recovery must not hash another credential")
+                },
+                verifier = MATCHING_VERIFIER,
+            ).recoverRotation(target, recoveryRuntime)
+
+            assertEquals(expected, recovered, crashPoint.name)
+            assertFalse(
+                Files.exists(
+                    fixture.paths.rotationIntent,
+                    LinkOption.NOFOLLOW_LINKS,
+                ),
+                crashPoint.name,
+            )
+            if (expected == DovecotOperatorId.A) {
+                assertEquals("a", Files.readString(fixture.paths.active))
+                assertEquals("old-secret", Files.readString(fixture.paths.slotA))
+                assertFalse(
+                    Files.exists(
+                        fixture.paths.slotB,
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertEquals(
+                    "dashboard-operator-a:$HASH_A\n",
+                    Files.readString(fixture.paths.masterUsers),
+                )
+                assertEquals(emptyList(), recoveryRuntime.events)
+            } else {
+                assertEquals("b", Files.readString(fixture.paths.active))
+                assertEquals("new-secret", Files.readString(fixture.paths.slotB))
+                assertFalse(
+                    Files.exists(
+                        fixture.paths.slotA,
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertEquals(
+                    "dashboard-operator-b:$HASH_B\n",
+                    Files.readString(fixture.paths.masterUsers),
+                )
+                assertEquals(
+                    listOf(
+                        "activate-b",
+                        "application-b",
+                        "drain-a",
+                        "observe-a",
+                        "observe-b",
+                    ),
+                    recoveryRuntime.events,
+                )
+            }
+            assertTrue(generated.all { it == 0.toByte() })
+        }
+    }
+
+    @Test
+    fun applicationLeaseRegistrySelectsTheNewIdAndForceClosesOldSessions() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        var oldTransportCloseCount = 0
+        val oldLease = registry.acquire(DovecotOperatorId.A) {
+            oldTransportCloseCount += 1
+        }
+
+        registry.activate(DovecotOperatorId.B)
+
+        assertFailsWith<IllegalStateException> {
+            registry.acquire(DovecotOperatorId.A) {}
+        }
+        val newLease = registry.acquire(DovecotOperatorId.B) {}
+        assertTrue(oldLease.isOpen)
+        assertTrue(newLease.isOpen)
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+
+        assertFalse(oldLease.isOpen)
+        assertTrue(newLease.isOpen)
+        assertEquals(1, oldTransportCloseCount)
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.B))
+        newLease.close()
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.B))
+    }
+
+    @Test
+    fun failedSessionCloseRemainsTrackedAndIsRetriedBeforeDrainCompletes() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        var closeAttempts = 0
+        val lease = registry.acquire(DovecotOperatorId.A) {
+            closeAttempts += 1
+            if (closeAttempts == 1) {
+                throw SimulatedStoreFailure()
+            }
+        }
+
+        assertFailsWith<SimulatedStoreFailure> {
+            registry.blockAndDrain(DovecotOperatorId.A)
+        }
+        assertTrue(lease.isOpen)
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+
+        assertFalse(lease.isOpen)
+        assertEquals(2, closeAttempts)
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun onlyExplicitRecoveryCleansARecognizedOwnerOnlyAbandonedTemporary() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val abandoned = fixture.paths.rotationIntent.resolveSibling(
+            "${fixture.paths.rotationIntent.fileName}.tmp-" +
+                "00000000-0000-0000-0000-000000000001",
+        )
+        writeOwnerOnly(abandoned, "a:b")
+        val events = mutableListOf<DovecotOperatorCommitPoint>()
+        val store = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                error("recovery must not generate")
+            },
+            hasher = DovecotOperatorHashBoundary {
+                error("recovery must not hash")
+            },
+            verifier = MATCHING_VERIFIER,
+            observer = DovecotOperatorStoreObserver { point, _ ->
+                events += point
+            },
+        )
+
+        assertFailsWith<IllegalStateException> { store.bootstrap() }
+        assertTrue(Files.exists(abandoned, LinkOption.NOFOLLOW_LINKS))
+
+        assertEquals(
+            DovecotOperatorId.A,
+            store.recoverRotation(
+                target = DovecotOperatorTarget.create("recovery@local.test"),
+                runtime = RecordingRotationRuntime(),
+            ),
+        )
+        assertFalse(Files.exists(abandoned, LinkOption.NOFOLLOW_LINKS))
+        assertEquals("a", Files.readString(fixture.paths.active))
+        assertEquals(
+            listOf(
+                DovecotOperatorCommitPoint.StableLockAcquired,
+                DovecotOperatorCommitPoint.StableLockAcquired,
+                DovecotOperatorCommitPoint.BeforeTemporaryDelete,
+                DovecotOperatorCommitPoint.AfterTemporaryDelete,
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun leasedRuntimeCopiesActivationAndVerifiesThroughTheSelectedGeneration() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val probedIds = mutableListOf<DovecotOperatorId>()
+        val probedAliases = mutableListOf<ByteArray>()
+        val runtime = DovecotOperatorLeasedRotationRuntime(
+            leases = registry,
+            prober = { _, credential ->
+                probedIds += credential.id
+                credential.withSecretBytes { bytes ->
+                    probedAliases += bytes
+                }
+                DovecotOperatorProbeResult.Success
+            },
+        )
+        val activationBytes = "leased-new-secret".toByteArray()
+        DovecotOperatorCredential(
+            DovecotOperatorId.B,
+            DovecotOperatorSecret.takeOwnership(activationBytes),
+        ).use(runtime::activateApplication)
+
+        assertTrue(activationBytes.all { it == 0.toByte() })
+        assertEquals(
+            DovecotOperatorProbeResult.Success,
+            runtime.verifyApplication(
+                target =
+                    DovecotOperatorTarget.create("lease@local.test"),
+                expectedId = DovecotOperatorId.B,
+            ),
+        )
+        assertEquals(listOf(DovecotOperatorId.B), probedIds)
+        assertTrue(
+            probedAliases.single().all { it == 0.toByte() },
+            "Application probe credential must be wiped after its lease",
+        )
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.B))
+        runtime.close()
+    }
+
+    @Test
+    fun freshStoreRecoveryConvergesFromEveryObservedDurableBoundary() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val snapshots = mutableListOf<OperatorStateSnapshot>()
+        val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        val store = DovecotOperatorCredentialStore(
+            paths = fixture.paths,
+            generator = DovecotOperatorSecretGenerator {
+                DovecotOperatorSecret.takeOwnership(generated)
+            },
+            hasher = DovecotOperatorHashBoundary { HASH_B },
+            verifier = MATCHING_VERIFIER,
+            observer = DovecotOperatorStoreObserver { point, _ ->
+                snapshots += snapshot(point, fixture.paths)
+            },
+        )
+        store.rotateOrRecover(
+            target = DovecotOperatorTarget.create("snapshot@local.test"),
+            runtime = RecordingRotationRuntime(),
+        )
+
+        val expectedPoints = listOf(
+            DovecotOperatorCommitPoint.StableLockAcquired,
+            DovecotOperatorCommitPoint.BeforeIntentReplace,
+            DovecotOperatorCommitPoint.AfterIntentReplace,
+            DovecotOperatorCommitPoint.BeforeSlotReplace,
+            DovecotOperatorCommitPoint.AfterSlotReplace,
+            DovecotOperatorCommitPoint.BeforeMasterReplace,
+            DovecotOperatorCommitPoint.AfterMasterReplace,
+            DovecotOperatorCommitPoint.StagedAccepted,
+            DovecotOperatorCommitPoint.BeforeActiveReplace,
+            DovecotOperatorCommitPoint.AfterActiveReplace,
+            DovecotOperatorCommitPoint.ApplicationVerified,
+            DovecotOperatorCommitPoint.DrainCompleted,
+            DovecotOperatorCommitPoint.BeforeMasterReplace,
+            DovecotOperatorCommitPoint.AfterMasterReplace,
+            DovecotOperatorCommitPoint.OldRejected,
+            DovecotOperatorCommitPoint.NewVerified,
+            DovecotOperatorCommitPoint.BeforeSlotDelete,
+            DovecotOperatorCommitPoint.AfterSlotDelete,
+            DovecotOperatorCommitPoint.BeforeIntentDelete,
+            DovecotOperatorCommitPoint.AfterIntentDelete,
+            DovecotOperatorCommitPoint.FinalVerified,
+        )
+        assertEquals(expectedPoints, snapshots.map { it.point })
+
+        try {
+            snapshots.forEachIndexed { index, snapshot ->
+                val recoveredFixture = temporaryRepository()
+                restore(snapshot, recoveredFixture.paths)
+                val expected = snapshot.activeId()
+                val recovered = DovecotOperatorCredentialStore(
+                    paths = recoveredFixture.paths,
+                    generator = DovecotOperatorSecretGenerator {
+                        error("snapshot recovery must not generate")
+                    },
+                    hasher = DovecotOperatorHashBoundary {
+                        error("snapshot recovery must not hash")
+                    },
+                    verifier = MATCHING_VERIFIER,
+                ).recoverRotation(
+                    target =
+                        DovecotOperatorTarget.create(
+                            "snapshot@local.test",
+                        ),
+                    runtime = RecordingRotationRuntime(),
+                )
+
+                assertEquals(
+                    expected,
+                    recovered,
+                    "snapshot $index at ${snapshot.point}",
+                )
+                assertEquals(
+                    expected.reference,
+                    Files.readString(recoveredFixture.paths.active),
+                )
+                assertTrue(
+                    Files.exists(
+                        recoveredFixture.paths.slot(expected),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertFalse(
+                    Files.exists(
+                        recoveredFixture.paths.slot(expected.otherForTest()),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertFalse(
+                    Files.exists(
+                        recoveredFixture.paths.rotationIntent,
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                )
+                assertTrue(
+                    recognizedTemporaries(recoveredFixture.paths).isEmpty(),
+                )
+            }
+        } finally {
+            snapshots.forEach(OperatorStateSnapshot::close)
+        }
+        assertTrue(generated.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun repeatedGeneratedSecretFailsBeforeHashingOrDurableRotationState() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "same-secret")
+        val generated = "same-secret".toByteArray(StandardCharsets.US_ASCII)
+        var hashCalls = 0
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary {
+                    hashCalls += 1
+                    HASH_B
+                },
+                verifier = MATCHING_VERIFIER,
+            ).rotateOrRecover(
+                target = DovecotOperatorTarget.create("repeat@local.test"),
+                runtime = RecordingRotationRuntime(),
+            )
+        }
+
+        assertEquals(0, hashCalls)
+        assertFalse(failure.stackTraceToString().contains("same-secret"))
+        assertTrue(generated.all { it == 0.toByte() })
+        assertFalse(
+            Files.exists(
+                fixture.paths.rotationIntent,
+                LinkOption.NOFOLLOW_LINKS,
+            ),
+        )
+        assertFalse(Files.exists(fixture.paths.slotB, LinkOption.NOFOLLOW_LINKS))
+        assertEquals("a", Files.readString(fixture.paths.active))
+        assertEquals(
+            "dashboard-operator-a:$HASH_A\n",
+            Files.readString(fixture.paths.masterUsers),
+        )
+    }
+
+    @Test
+    fun finalProjectionRequiresTheOriginalIntentToRemainUnchanged() {
+        val fixture = temporaryRepository()
+        bootstrap(fixture, "old-secret")
+        val generated = "new-secret".toByteArray(StandardCharsets.US_ASCII)
+        var oldBlocked = false
+        val runtime = object : DovecotOperatorRotationRuntime {
+            override fun observePasswdFile(
+                target: DovecotOperatorTarget,
+                credential: DovecotOperatorCredential,
+            ): DovecotOperatorProbeResult = when (credential.id) {
+                DovecotOperatorId.A ->
+                    if (oldBlocked) {
+                        DovecotOperatorProbeResult.AuthenticationFailure
+                    } else {
+                        DovecotOperatorProbeResult.Success
+                    }
+                DovecotOperatorId.B -> DovecotOperatorProbeResult.Success
+            }
+
+            override fun activateApplication(
+                credential: DovecotOperatorCredential,
+            ) = Unit
+
+            override fun verifyApplication(
+                target: DovecotOperatorTarget,
+                expectedId: DovecotOperatorId,
+            ): DovecotOperatorProbeResult =
+                DovecotOperatorProbeResult.Success
+
+            override fun blockAndDrain(id: DovecotOperatorId) {
+                oldBlocked = true
+                writeOwnerOnly(fixture.paths.rotationIntent, "b:a")
+            }
+        }
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotOperatorCredentialStore(
+                paths = fixture.paths,
+                generator = DovecotOperatorSecretGenerator {
+                    DovecotOperatorSecret.takeOwnership(generated)
+                },
+                hasher = DovecotOperatorHashBoundary { HASH_B },
+                verifier = MATCHING_VERIFIER,
+            ).rotateOrRecover(
+                DovecotOperatorTarget.create("intent@local.test"),
+                runtime,
+            )
+        }
+
+        assertFalse(failure.stackTraceToString().contains("new-secret"))
+        assertTrue(generated.all { it == 0.toByte() })
+        assertEquals(
+            "b:a",
+            Files.readString(fixture.paths.rotationIntent),
+        )
+    }
+
+    @Test
+    fun malformedImpossibleAndUnsafeRotationStatesFailClosed() {
+        val arrangements = mutableListOf<Pair<String, (DovecotOperatorPaths) -> Unit>>(
+            "duplicate-intent" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:a")
+            },
+            "oversized-intent" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b\n")
+            },
+            "reversed-master" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "new-secret")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-b:$HASH_B\n" +
+                        "dashboard-operator-a:$HASH_A\n",
+                )
+            },
+            "duplicate-master" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "new-secret")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-a:$HASH_A\n",
+                )
+            },
+            "three-masters" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "new-secret")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_B\n" +
+                        "dashboard-operator-a:$HASH_A\n",
+                )
+            },
+            "post-switch-old-master-only" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "new-secret")
+                writeOwnerOnly(paths.active, "b")
+            },
+            "post-switch-two-masters-without-old-raw" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "new-secret")
+                writeOwnerOnly(paths.active, "b")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_B\n",
+                )
+                Files.delete(paths.slotA)
+            },
+            "pre-switch-two-masters-without-new-raw" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_B\n",
+                )
+            },
+            "identical-old-and-new-raw-slots" to { paths ->
+                writeOwnerOnly(paths.rotationIntent, "a:b")
+                writeOwnerOnly(paths.slotB, "old-secret")
+                writeOwnerOnly(
+                    paths.masterUsers,
+                    "dashboard-operator-a:$HASH_A\n" +
+                        "dashboard-operator-b:$HASH_B\n",
+                )
+            },
+        )
+        if (supportsSymbolicLinks()) {
+            arrangements += "symbolic-intent" to { paths ->
+                val target = paths.rotationIntent.resolveSibling(
+                    "external-intent",
+                )
+                writeOwnerOnly(target, "a:b")
+                Files.createSymbolicLink(
+                    paths.rotationIntent,
+                    target.fileName,
+                )
+            }
+        }
+
+        arrangements.forEach { (label, arrange) ->
+            val fixture = temporaryRepository()
+            bootstrap(fixture, "old-secret")
+            arrange(fixture.paths)
+            val runtime = RecordingRotationRuntime()
+
+            val failure = assertFailsWith<IllegalStateException>(label) {
+                loaderOnlyStore(fixture).recoverRotation(
+                    target =
+                        DovecotOperatorTarget.create(
+                            "corruption@local.test",
+                        ),
+                    runtime = runtime,
+                )
+            }
+
+            assertTrue(runtime.events.isEmpty(), label)
+            assertFalse(failure.stackTraceToString().contains("old-secret"))
+            assertFalse(failure.stackTraceToString().contains("new-secret"))
+        }
+
+        if (supportsPosix(temporaryRepository().repositoryRoot)) {
+            val wrongIntentMode = temporaryRepository()
+            bootstrap(wrongIntentMode, "old-secret")
+            writeOwnerOnly(wrongIntentMode.paths.rotationIntent, "a:b")
+            Files.setPosixFilePermissions(
+                wrongIntentMode.paths.rotationIntent,
+                PosixFilePermissions.fromString("rw-r-----"),
+            )
+            assertFailsWith<IllegalStateException> {
+                loaderOnlyStore(wrongIntentMode).recoverRotation(
+                    DovecotOperatorTarget.create("mode@local.test"),
+                    RecordingRotationRuntime(),
+                )
+            }
+
+            listOf(
+                "not-a-uuid",
+                "00000000-0000-0000-0000-000000000001",
+            ).forEachIndexed { index, suffix ->
+                val unsafeTemporary = temporaryRepository()
+                bootstrap(unsafeTemporary, "old-secret")
+                val path = unsafeTemporary.paths.rotationIntent.resolveSibling(
+                    "${unsafeTemporary.paths.rotationIntent.fileName}.tmp-$suffix",
+                )
+                writeOwnerOnly(path, "a:b")
+                if (index == 1) {
+                    Files.setPosixFilePermissions(
+                        path,
+                        PosixFilePermissions.fromString("rw-r-----"),
+                    )
+                }
+                assertFailsWith<IllegalStateException> {
+                    loaderOnlyStore(unsafeTemporary).recoverRotation(
+                        DovecotOperatorTarget.create("temp@local.test"),
+                        RecordingRotationRuntime(),
+                    )
+                }
+                assertTrue(Files.exists(path, LinkOption.NOFOLLOW_LINKS))
+            }
+        }
+    }
+
+    @Test
     fun existingPartialUnknownAndMultipleIdentityStatesFailClosedWithoutGeneration() {
         val fixtures = listOf<(DovecotOperatorPaths) -> Unit>(
             { paths -> writeOwnerOnly(paths.slotA, "secret-a") },
@@ -323,7 +1279,7 @@ class DovecotOperatorCredentialStoreTest {
     }
 
     @Test
-    fun failureBeforeAtomicReplaceDurablyDeletesItsExactTemporary() {
+    fun failureBeforeAtomicReplaceRetainsItsTemporaryUntilExplicitRecovery() {
         val fixture = temporaryRepository()
         val store = DovecotOperatorCredentialStore(
             paths = fixture.paths,
@@ -344,6 +1300,18 @@ class DovecotOperatorCredentialStoreTest {
         assertFalse(Files.exists(fixture.paths.slotA, LinkOption.NOFOLLOW_LINKS))
         assertFalse(Files.exists(fixture.paths.active, LinkOption.NOFOLLOW_LINKS))
         assertFalse(Files.exists(fixture.paths.masterUsers, LinkOption.NOFOLLOW_LINKS))
+        assertEquals(1, recognizedTemporaries(fixture.paths).size)
+        assertFailsWith<IllegalStateException> {
+            loaderOnlyStore(fixture).bootstrap()
+        }
+        assertEquals(1, recognizedTemporaries(fixture.paths).size)
+
+        assertFailsWith<IllegalStateException> {
+            loaderOnlyStore(fixture).recoverRotation(
+                DovecotOperatorTarget.create("recovery@local.test"),
+                RecordingRotationRuntime(),
+            )
+        }
         assertTrue(recognizedTemporaries(fixture.paths).isEmpty())
     }
 
@@ -807,6 +1775,47 @@ class DovecotOperatorCredentialStoreTest {
                 }
             }
 
+    private fun snapshot(
+        point: DovecotOperatorCommitPoint,
+        paths: DovecotOperatorPaths,
+    ): OperatorStateSnapshot {
+        val files = mutableMapOf<String, ByteArray>()
+        if (Files.isDirectory(paths.runtimeRoot, LinkOption.NOFOLLOW_LINKS)) {
+            Files.walk(paths.runtimeRoot).use { entries ->
+                entries
+                    .filter {
+                        Files.isRegularFile(
+                            it,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                    }
+                    .forEach { file ->
+                        files[paths.runtimeRoot.relativize(file).toString()] =
+                            Files.readAllBytes(file)
+                    }
+            }
+        }
+        return OperatorStateSnapshot(point, files)
+    }
+
+    private fun restore(
+        snapshot: OperatorStateSnapshot,
+        paths: DovecotOperatorPaths,
+    ) {
+        ensureOwnedDirectories(paths)
+        snapshot.files.forEach { (relative, bytes) ->
+            val target = paths.runtimeRoot.resolve(relative)
+            target.parent.createDirectories()
+            Files.write(target, bytes)
+            if (supportsPosix(target)) {
+                Files.setPosixFilePermissions(
+                    target,
+                    PosixFilePermissions.fromString("rw-------"),
+                )
+            }
+        }
+    }
+
     private fun assertOwnerOnlyDirectory(path: Path) {
         assertTrue(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
         assertFalse(Files.isSymbolicLink(path))
@@ -862,6 +1871,71 @@ class DovecotOperatorCredentialStoreTest {
         val repositoryRoot: Path,
         val paths: DovecotOperatorPaths,
     )
+
+    private class OperatorStateSnapshot(
+        val point: DovecotOperatorCommitPoint,
+        val files: Map<String, ByteArray>,
+    ) : AutoCloseable {
+        fun activeId(): DovecotOperatorId {
+            val active = files.entries.single { (relative, _) ->
+                relative.endsWith("/dovecot-operator-active")
+            }.value
+            return DovecotOperatorId.fromReference(
+                active.toString(StandardCharsets.US_ASCII),
+            )
+        }
+
+        override fun close() {
+            files.values.forEach { it.fill(0) }
+        }
+    }
+
+    private fun DovecotOperatorId.otherForTest(): DovecotOperatorId =
+        when (this) {
+            DovecotOperatorId.A -> DovecotOperatorId.B
+            DovecotOperatorId.B -> DovecotOperatorId.A
+        }
+
+    private class RecordingRotationRuntime :
+        DovecotOperatorRotationRuntime {
+        val events = mutableListOf<String>()
+        private var oldGenerationBlocked = false
+
+        override fun observePasswdFile(
+            target: DovecotOperatorTarget,
+            credential: DovecotOperatorCredential,
+        ): DovecotOperatorProbeResult {
+            events += "observe-${credential.id.reference}"
+            return when (credential.id) {
+                DovecotOperatorId.A ->
+                    if (oldGenerationBlocked) {
+                        DovecotOperatorProbeResult.AuthenticationFailure
+                    } else {
+                        DovecotOperatorProbeResult.Success
+                    }
+                DovecotOperatorId.B -> DovecotOperatorProbeResult.Success
+            }
+        }
+
+        override fun activateApplication(
+            credential: DovecotOperatorCredential,
+        ) {
+            events += "activate-${credential.id.reference}"
+        }
+
+        override fun verifyApplication(
+            target: DovecotOperatorTarget,
+            expectedId: DovecotOperatorId,
+        ): DovecotOperatorProbeResult {
+            events += "application-${expectedId.reference}"
+            return DovecotOperatorProbeResult.Success
+        }
+
+        override fun blockAndDrain(id: DovecotOperatorId) {
+            events += "drain-${id.reference}"
+            oldGenerationBlocked = true
+        }
+    }
 
     private class SimulatedStoreFailure : RuntimeException()
 

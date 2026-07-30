@@ -25,6 +25,7 @@ internal enum class DovecotReadinessBoundary(
     val diagnosticLabel: String,
 ) {
     ORDINARY_IMAPS("ordinary-imaps"),
+    ORDINARY_POP3S("ordinary-pop3s"),
     OPERATOR_IMAPS("operator-imaps"),
     SMTP("smtp"),
     OAUTH_HEALTH("oauth-health"),
@@ -38,6 +39,7 @@ internal class DovecotLiveTestEnvironment private constructor(
     internal val profile: DovecotTask5ProofProfile,
     val loopbackAddress: String,
     val ordinaryImapsPort: Int,
+    val ordinaryPop3sPort: Int,
     val operatorImapsPort: Int,
     val smtpPort: Int,
     val oauthPort: Int,
@@ -116,6 +118,7 @@ internal class DovecotLiveTestEnvironment private constructor(
                 profile = profile,
                 loopbackAddress = profile.loopbackAddress,
                 ordinaryImapsPort = profile.ordinaryImapsPort,
+                ordinaryPop3sPort = profile.ordinaryPop3sPort,
                 operatorImapsPort = profile.operatorImapsPort,
                 smtpPort = profile.smtpPort,
                 oauthPort = profile.oauthPort,
@@ -135,10 +138,17 @@ private object JvmDovecotTopologyReadinessProbe :
         DovecotReadinessBoundary.ORDINARY_IMAPS -> tlsGreetingReady(
             pinnedSslContext(environment.profile),
             environment.ordinaryImapsPort,
+            "* OK",
+        )
+        DovecotReadinessBoundary.ORDINARY_POP3S -> tlsGreetingReady(
+            pinnedSslContext(environment.profile),
+            environment.ordinaryPop3sPort,
+            "+OK",
         )
         DovecotReadinessBoundary.OPERATOR_IMAPS -> tlsGreetingReady(
             pinnedSslContext(environment.profile),
             environment.operatorImapsPort,
+            "* OK",
         )
         DovecotReadinessBoundary.SMTP ->
             smtpGreetingReady(environment.smtpPort)
@@ -175,6 +185,7 @@ private object JvmDovecotTopologyReadinessProbe :
     private fun tlsGreetingReady(
         sslContext: SSLContext,
         port: Int,
+        expectedPrefix: String,
     ): Boolean {
         val socket = sslContext.socketFactory.createSocket() as SSLSocket
         return try {
@@ -182,7 +193,7 @@ private object JvmDovecotTopologyReadinessProbe :
             socket.connect(loopbackEndpoint(port), SOCKET_TIMEOUT_MILLIS)
             socket.startHandshake()
             readBoundedLine(socket.inputStream).useBytes { greeting ->
-                greeting.startsWithAscii("* OK")
+                greeting.startsWithAscii(expectedPrefix)
             }
         } finally {
             socket.close()

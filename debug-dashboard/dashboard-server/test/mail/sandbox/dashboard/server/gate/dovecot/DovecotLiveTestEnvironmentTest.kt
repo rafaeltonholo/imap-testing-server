@@ -39,9 +39,20 @@ class DovecotLiveTestEnvironmentTest {
 
         assertEquals("127.0.0.1", live.loopbackAddress)
         assertEquals(1993, live.ordinaryImapsPort)
+        assertEquals(21995, live.ordinaryPop3sPort)
         assertEquals(2993, live.operatorImapsPort)
         assertEquals(21025, live.smtpPort)
         assertEquals(28080, live.oauthPort)
+        assertEquals(
+            listOf(
+                "ordinary-imaps",
+                "ordinary-pop3s",
+                "operator-imaps",
+                "smtp",
+                "oauth-health",
+            ),
+            DovecotReadinessBoundary.entries.map { it.diagnosticLabel },
+        )
         assertEquals(
             repositoryRoot.resolve(
                 "debug-dashboard/.runtime/task5-proof/ssl/tls.crt",
@@ -227,6 +238,7 @@ class DovecotLiveTestEnvironmentTest {
               dovecot:
                 ports: !override
                   - "127.0.0.1:1993:31993"
+                  - "127.0.0.1:21995:31990"
                 volumes: !override
                   - ./config:/etc/dovecot/conf.d:ro
                   - type: bind
@@ -284,10 +296,18 @@ class DovecotLiveTestEnvironmentTest {
               oauth2-mock:
                 ports: !override
                   - "127.0.0.1:28080:8080"
+                extra_hosts: !override
+                  - "task6-host-gateway:host-gateway"
                 volumes: !override
                   - type: bind
                     source: ./debug-dashboard/.runtime/task5-proof/dovecot
                     target: /etc/dovecot/runtime
+                    read_only: true
+                    bind:
+                      create_host_path: false
+                  - type: bind
+                    source: ./debug-dashboard/dashboard-server/testResources/dovecot-gate0c/network-isolation-check.py
+                    target: /proof/network-isolation-check.py
                     read_only: true
                     bind:
                       create_host_path: false

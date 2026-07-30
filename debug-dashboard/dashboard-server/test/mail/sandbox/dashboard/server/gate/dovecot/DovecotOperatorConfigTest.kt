@@ -34,6 +34,10 @@ class DovecotOperatorConfigTest {
         "debug-dashboard/dashboard-server/testResources/" +
             "dovecot-gate0c/run-task5-proof.sh",
     )
+    private val networkIsolationHelperPath = repositoryRoot.resolve(
+        "debug-dashboard/dashboard-server/testResources/" +
+            "dovecot-gate0c/network-isolation-check.py",
+    )
     private val implementationPlanPath = repositoryRoot.resolve(
         "docs/superpowers/plans/2026-07-23-debug-dashboard-gate-0c-dovecot.md",
     )
@@ -624,40 +628,58 @@ class DovecotOperatorConfigTest {
         )
         assertEquals(
             mapOf(
-                "dovecot" to PortPublication(
-                    hostIp = "127.0.0.1",
-                    published = "1993",
-                    target = 31993,
-                    protocol = "tcp",
-                    mode = "ingress",
+                "dovecot" to listOf(
+                    PortPublication(
+                        hostIp = "127.0.0.1",
+                        published = "1993",
+                        target = 31993,
+                        protocol = "tcp",
+                        mode = "ingress",
+                    ),
+                    PortPublication(
+                        hostIp = "127.0.0.1",
+                        published = "21995",
+                        target = 31990,
+                        protocol = "tcp",
+                        mode = "ingress",
+                    ),
                 ),
-                "dovecot-operator" to PortPublication(
-                    hostIp = "127.0.0.1",
-                    published = "2993",
-                    target = 31993,
-                    protocol = "tcp",
-                    mode = "ingress",
+                "dovecot-operator" to listOf(
+                    PortPublication(
+                        hostIp = "127.0.0.1",
+                        published = "2993",
+                        target = 31993,
+                        protocol = "tcp",
+                        mode = "ingress",
+                    ),
                 ),
-                "postfix" to PortPublication(
-                    hostIp = "127.0.0.1",
-                    published = "21025",
-                    target = 25,
-                    protocol = "tcp",
-                    mode = "ingress",
+                "postfix" to listOf(
+                    PortPublication(
+                        hostIp = "127.0.0.1",
+                        published = "21025",
+                        target = 25,
+                        protocol = "tcp",
+                        mode = "ingress",
+                    ),
                 ),
-                "oauth2-mock" to PortPublication(
-                    hostIp = "127.0.0.1",
-                    published = "28080",
-                    target = 8080,
-                    protocol = "tcp",
-                    mode = "ingress",
+                "oauth2-mock" to listOf(
+                    PortPublication(
+                        hostIp = "127.0.0.1",
+                        published = "28080",
+                        target = 8080,
+                        protocol = "tcp",
+                        mode = "ingress",
+                    ),
                 ),
             ),
             services.mapValues { (_, value) ->
                 value.jsonObject.requiredArray("ports")
                     .map(::portPublication)
-                    .single()
             },
+        )
+        assertEquals(
+            setOf("default", "operator-ingress"),
+            resolved.requiredObject("networks").keys,
         )
 
         val proofRoot = repositoryRoot.resolve(
@@ -687,6 +709,26 @@ class DovecotOperatorConfigTest {
             proofRoot.resolve("dovecot").toString(),
             source("oauth2-mock", "/etc/dovecot/runtime"),
         )
+        assertEquals(
+            networkIsolationHelperPath.toString(),
+            source("oauth2-mock", "/proof/network-isolation-check.py"),
+        )
+        val helperMount = services.requiredObject("oauth2-mock")
+            .requiredArray("volumes")
+            .map { it.jsonObject }
+            .single {
+                it.requiredString("target") == "/proof/network-isolation-check.py"
+            }
+        assertTrue(helperMount["read_only"]?.jsonPrimitive?.boolean == true)
+        assertEquals(emptySet(), helperMount.requiredObject("bind").keys)
+        assertEquals(
+            listOf("task6-host-gateway=host-gateway"),
+            services.requiredObject("oauth2-mock")
+                .requiredArray("extra_hosts")
+                .map { it.jsonPrimitive.content },
+        )
+        assertTrue(Files.isRegularFile(networkIsolationHelperPath))
+        assertFalse(Files.isSymbolicLink(networkIsolationHelperPath))
         listOf(
             "dovecot" to "/etc/dovecot/ssl",
             "dovecot-operator" to "/etc/dovecot/ssl",

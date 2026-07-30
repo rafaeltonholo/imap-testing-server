@@ -17,6 +17,7 @@ internal class DovecotTask5ProofProfile private constructor(
     val composeOverride: Path,
     val loopbackAddress: String,
     val ordinaryImapsPort: Int,
+    val ordinaryPop3sPort: Int,
     val operatorImapsPort: Int,
     val smtpPort: Int,
     val oauthPort: Int,
@@ -177,6 +178,7 @@ internal class DovecotTask5ProofProfile private constructor(
         private const val FIXED_PROJECT = "mail-sandbox-task5-proof"
         private const val FIXED_LOOPBACK = "127.0.0.1"
         private const val ORDINARY_IMAPS_PORT = 1993
+        private const val ORDINARY_POP3S_PORT = 21995
         private const val OPERATOR_IMAPS_PORT = 2993
         private const val SMTP_PORT = 21025
         private const val OAUTH_PORT = 28080
@@ -276,6 +278,7 @@ internal class DovecotTask5ProofProfile private constructor(
                 composeOverride = override,
                 loopbackAddress = FIXED_LOOPBACK,
                 ordinaryImapsPort = ORDINARY_IMAPS_PORT,
+                ordinaryPop3sPort = ORDINARY_POP3S_PORT,
                 operatorImapsPort = OPERATOR_IMAPS_PORT,
                 smtpPort = SMTP_PORT,
                 oauthPort = OAUTH_PORT,

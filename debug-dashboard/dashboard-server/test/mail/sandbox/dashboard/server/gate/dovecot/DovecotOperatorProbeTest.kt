@@ -19,6 +19,36 @@ import kotlin.test.assertTrue
 
 class DovecotOperatorProbeTest {
     @Test
+    fun fullMailboxReadModeRequiresAReadOnlyInboxOpenBeforeSuccess() {
+        val fixture = probeFixture(
+            response = (
+                "* OK Dovecot ready\r\n" +
+                    "+ VXNlcm5hbWU6\r\n" +
+                    "+ UGFzc3dvcmQ6\r\n" +
+                    "A001 OK Logged in\r\n" +
+                    "* LIST (\\HasNoChildren) \".\" INBOX\r\n" +
+                    "A002 OK List completed\r\n" +
+                    "* 0 EXISTS\r\n" +
+                    "A003 OK [READ-ONLY] Examine completed\r\n"
+                ).toByteArray(),
+            secret = "read-probe-secret",
+            requireMailboxRead = true,
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.Success,
+            fixture.probe.probe(TARGET, fixture.credential),
+        )
+        assertEquals(
+            "A003 EXAMINE \"INBOX\"\r\n",
+            fixture.transport.output.snapshots.last()
+                .toString(StandardCharsets.US_ASCII),
+        )
+        assertEquals(5, fixture.transport.output.snapshots.size)
+        assertClosedAndWiped(fixture, "read-probe-secret")
+    }
+
+    @Test
     fun fragmentedAuthenticateLoginChallengesUseOnlyTheCombinedUsernameForm() {
         val canary = "ProbeSecret-._~012345"
         val fixture = probeFixture(
@@ -493,6 +523,7 @@ class DovecotOperatorProbeTest {
         secret: String,
         inputFactory: (ByteArray) -> InputStream = ::ByteArrayInputStream,
         clock: DovecotOperatorProbeClock = DovecotOperatorProbeClock(System::nanoTime),
+        requireMailboxRead: Boolean = false,
     ): ProbeFixture {
         val transport = RecordingTransport(inputFactory(response))
         val secretBytes = secret.toByteArray(StandardCharsets.US_ASCII)
@@ -507,6 +538,7 @@ class DovecotOperatorProbeTest {
                     transport
                 },
                 clock = clock,
+                requireMailboxRead = requireMailboxRead,
             ),
             transport = transport,
             credential = credential,

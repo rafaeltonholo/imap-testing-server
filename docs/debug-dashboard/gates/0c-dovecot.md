@@ -7,9 +7,12 @@
 - **Task 3 — Make OAuth decisions eligibility-aware:** complete.
 - **Task 4 — Make Postfix recipient routing eligibility-aware:** complete.
 - **Task 5 — Add a physically separate master-only IMAP ingress:** complete.
-- **Gate 0C:** in progress. Tasks 6–9 still own isolation, rotation, mail
-  behavior, lifecycle, and the final decision. This document does not record a
-  Gate 0C PASS.
+- **Task 6 — Prove network isolation and credential rotation:** implementation
+  and non-live verification complete; the checked Docker Desktop lifecycle is
+  pending controller execution.
+- **Gate 0C:** in progress. Pending Task 6 live evidence and Tasks 7–9 still
+  own isolation proof, mail behavior, lifecycle, and the final decision. This
+  document does not record a Gate 0C PASS.
 
 ## Task 1 baseline evidence
 
@@ -540,6 +543,92 @@ and private key were removed. Ports `1993`, `2993`, `21025`, and `28080` were
 free. The five pre-existing containers retained their exact IDs, `StartedAt`,
 running/health state, and zero restart count. No Stalwart service was selected,
 stopped, restarted, recreated, or otherwise mutated.
+
+## Task 6 isolation and rotation implementation
+
+The existing `DovecotOperatorCredentialStore` remains the sole credential
+writer and holds its process plus file lock from state read through final
+verification. Rotation uses the fixed, unmounted, owner-`0600`
+`dovecot-operator-rotation` intent with the complete grammar `a:b` or `b:a`.
+The public boundary is limited to `rotateOrRecover(target, runtime)` and
+`recoverRotation(target, runtime)`.
+
+The implemented A/B sequence is:
+
+1. generate and hash a distinct inactive credential;
+2. durably publish intent, inactive raw slot, and ordered old/new hashes;
+3. require a bounded fresh-credential IMAP `LIST` plus read-only `EXAMINE`
+   probe;
+4. switch the active reference, copy the credential into the application
+   generation holder, and verify a fresh application-owned lease;
+5. block and synchronously drain all adapter-owned old-generation sessions;
+6. publish only the new hash, require bounded old rejection and new
+   acceptance, then delete the old raw slot; and
+7. verify the stable projection while the original intent still exists,
+   delete intent last, and strictly re-read the one-slot/one-hash result.
+
+No auth-cache flush, service restart, or recreation is part of convergence.
+Each passwd-file observation has at most seven attempts and six conditional
+250-millisecond delays. Acceptance retries only authentication failure;
+rejection retries only success. Protocol, transport, and interruption fail
+immediately, and each attempt owns and wipes a fresh consumable credential.
+
+Recovery is deterministic: active-old rolls back and active-new completes
+forward. It rejects malformed, reversed, duplicate, symbolic, wrong-mode,
+oversized, impossible, changed-intent, and identical-raw-slot states. Failed
+session closes remain tracked for a later drain attempt. Failed atomic writes
+retain their exact canonical temporary; only explicit recovery may remove a
+recognized owner-only bounded temporary, with observer points around that
+deletion. Snapshot recovery from every durable and semantic observer boundary
+converges using a fresh store.
+
+The proof override adds only ordinary POP3S
+`127.0.0.1:21995 -> 31990`, a read-only fixed network helper in the existing
+OAuth container, and the explicit `task6-host-gateway` host-gateway alias.
+The helper takes one operator-ingress IPv4 and all discovered non-loopback host
+IPv4 addresses through bounded stdin. From the default network it requires
+ordinary Dovecot as a positive control, then rejects operator DNS, direct
+operator-ingress IP, Docker Desktop gateway names, the explicit host-gateway
+alias, and every supplied host address to port `2993`. The Kotlin live matrix
+also requires exact runtime publications and network membership, rejects
+non-loopback host access to `1993` and `2993`, and proves the master credential
+inactive through ordinary IMAPS, ordinary POP3S, Postfix SMTP SASL, and OAuth.
+
+### Task 6 non-live evidence and pending live proof
+
+Focused test-driven runs first exposed missing read-probe support and four
+additional fail-closed gaps: failed lease closes were dropped, the original
+intent was not revalidated before deletion, identical A/B raw slots could be
+accepted during recovery, and a failed pre-replace write deleted its temporary
+outside explicit recovery. The final focused runs passed:
+
+- credential store and application leases: `27/27`;
+- fixed operator probe, including read-only mailbox open: `13/13`;
+- fixed proof profile/readiness: `5/5`;
+- proof Compose static selectors: `2/2`;
+- fake checked lifecycle: `33/33`; and
+- network-isolation helper: `14/14`.
+
+The combined non-live Dovecot run, excluding selected `*LiveTest` classes and
+the daemon-backed effective-config methods, passed `117/117` with zero skips.
+The two Task 6 proof-Compose methods were run separately and passed `2/2`.
+The wider `dashboard-server` non-live run passed `382/382` after also excluding
+the unrelated production browser gate that requires generated
+`DASHBOARD_WEB_ASSETS`.
+
+Task 6 live evidence is **pending**, not passed. No Docker daemon or live
+service operation was performed while implementing this task. A controller
+must run the single checked lifecycle:
+
+```bash
+debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
+```
+
+That lifecycle owns startup, runs startup then isolation then rotation live
+classes, and performs mandatory cleanup and baseline comparison. If any
+bridge, host-gateway, LAN, ordinary-protocol, SMTP, or OAuth path accepts or
+reaches the operator credential/port contrary to the matrix, Task 6 is
+`BLOCKED/STOP`; the assertion must not be weakened or skipped.
 
 ## Verification
 

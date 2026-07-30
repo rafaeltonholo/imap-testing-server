@@ -75,6 +75,7 @@ internal class DovecotOperatorProbe(
         DovecotOperatorProbeClock(System::nanoTime),
     private val watchdog: DovecotOperatorProbeWatchdog =
         JvmDovecotOperatorProbeWatchdog,
+    private val requireMailboxRead: Boolean = false,
 ) {
     fun probe(
         target: DovecotOperatorTarget,
@@ -187,6 +188,25 @@ internal class DovecotOperatorProbe(
                 )
             ) {
                 TaggedCompletion.Ok -> {
+                    if (requireMailboxRead) {
+                        writeFixedCommand(
+                            output = opened.outputStream,
+                            command = EXAMINE_INBOX_COMMAND,
+                            deadline = deadline,
+                        )
+                        when (
+                            readTaggedCompletion(
+                                input = opened.input,
+                                tag = EXAMINE_TAG,
+                                deadline = deadline,
+                            )
+                        ) {
+                            TaggedCompletion.Ok -> Unit
+                            TaggedCompletion.No,
+                            TaggedCompletion.Bad,
+                            -> return DovecotOperatorProbeResult.ProtocolFailure
+                        }
+                    }
                     requireBeforeDeadline(deadline)
                     if (timedOut.get()) {
                         throw SocketTimeoutException(
@@ -468,6 +488,7 @@ internal class DovecotOperatorProbe(
         private val GREETING_OK = ascii("* OK")
         private val LOGIN_TAG = ascii("A001")
         private val LIST_TAG = ascii("A002")
+        private val EXAMINE_TAG = ascii("A003")
         private val LIST_RESPONSE_PREFIX = ascii("* LIST")
         private val STATUS_OK = ascii("OK")
         private val STATUS_NO = ascii("NO")
@@ -479,6 +500,8 @@ internal class DovecotOperatorProbe(
         private val MASTER_SEPARATOR = ascii("*")
         private val CRLF = ascii("\r\n")
         private val LIST_COMMAND = ascii("A002 LIST \"\" \"INBOX\"\r\n")
+        private val EXAMINE_INBOX_COMMAND =
+            ascii("A003 EXAMINE \"INBOX\"\r\n")
         private val BASE64_ENCODER = Base64.getEncoder()
         private const val MAX_AUTH_RESPONSE_BYTES = 1024
         private fun ascii(value: String): ByteArray =

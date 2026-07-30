@@ -449,50 +449,111 @@ Expected final state: the fixed proof project has no containers or named volumes
 
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotIsolationLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorRotationLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorApplicationLeaseRegistry.kt`
+- Create: `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/network-isolation-check.py`
+- Create: `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/test_network_isolation_check.py`
+- Modify: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStore.kt`
+- Modify: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorProbe.kt`
+- Modify: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/dovecot/DovecotTask5ProofProfile.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorCredentialStoreTest.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorProbeTest.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotOperatorConfigTest.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironment.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotLiveTestEnvironmentTest.kt`
+- Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/dovecot/DovecotTask5ProofLifecycleTest.kt`
+- Modify: `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml`
+- Modify: `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh`
 - Modify: `docs/debug-dashboard/gates/0c-dovecot.md`
 
-- [ ] Write live tests for this negative matrix:
+- [ ] Extend the existing `DovecotOperatorCredentialStore` as the sole writer
+  under its existing `withStableLock`; do not add another lock or credential
+  writer. Add one fixed, unmounted, owner-`0600` rotation-intent file below
+  the existing secrets directory. Its complete grammar is the three ASCII
+  bytes `a:b` or `b:a`, without a newline.
 
-  - ordinary Dovecot endpoint rejects master syntax/credential;
-  - operator endpoint accepts the master credential only when targeting an eligible disposable user;
-  - arbitrary, protected, deleted, and master-as-self targets fail;
-  - ordinary user password cannot become master auth;
-  - master credential fails through POP3, SMTP SASL, and OAuth;
-  - operator has no POP3/LMTP/SMTP publication;
-  - non-loopback host interfaces cannot reach ordinary or operator ports;
-  - containers on the default Compose network cannot resolve/reach `dovecot-operator`;
-  - Docker host-gateway/LAN paths cannot loop back into `127.0.0.1:2993`.
+- [ ] Expose only the narrow
+  `rotateOrRecover(target, runtime)` / `recoverRotation(target, runtime)`
+  boundary. A stable state has no intent, exactly one matching raw slot,
+  active reference, and master hash. With intent `old:new`, `active=old`
+  always recovers backward and `active=new` always recovers forward. Accept
+  only one stable master entry or two unique entries in deterministic
+  `old,new` order. Unknown, duplicate, reversed, malformed, impossible,
+  symbolic, wrong-owner, wrong-mode, or oversized state fails closed.
 
-Use the actual Docker Desktop network path; do not assert that the container observes `127.0.0.1`.
+- [ ] Rotate in this order:
 
-- [ ] If any default-network/host-gateway path reaches the operator, tighten the network/firewall architecture and rerun. If it cannot be isolated while remaining usable by the host Ktor process, mark `STOP`.
+  1. generate the inactive raw value, reject equality with the old value, and
+     hash it through the stdin-only boundary;
+  2. durably publish intent, then the inactive owner-`0600` raw slot, then the
+     ordered old+new hash file;
+  3. boundedly observe a staged full LIST/read probe;
+  4. atomically switch active, synchronously copy the new credential into the
+     narrow application lease holder, and verify a fresh application-owned
+     lease/session selects the new ID;
+  5. block new old-generation leases and boundedly drain/close all existing
+     adapter-owned old sessions;
+  6. publish the new-only hash, boundedly observe old
+     `AuthenticationFailure`, then new `Success`;
+  7. only then durably delete the old raw slot, verify the stable-new
+     projection while intent remains, delete intent as the last durable
+     mutation, and strictly verify one raw/hash/active result.
 
-- [ ] Implement one exclusive rotation lock and crash-recoverable A/B state machine:
+- [ ] Do not invoke `doveadm auth cache flush`, restart, or recreate a service
+  for convergence. Each positive or negative passwd-file observation gets at
+  most seven attempts and six conditional 250-millisecond delays. Await
+  accept retries only `AuthenticationFailure`; await reject retries only
+  `Success`; protocol, transport, and interruption fail immediately, with
+  interruption status restored. Every attempt creates and closes a fresh
+  consumable credential.
 
-  1. choose the inactive protected identity;
-  2. generate its new raw value, hash it through the stdin-only path, and durably write the inactive mode-`0600` secret;
-  3. atomically replace `master-users` with both old and staged hashes, flush operator auth cache, and prove a full list/read probe for a disposable target using the staged identity;
-  4. atomically switch `dovecot-operator-active`, reload the dependent adapter, and prove an application-path target operation uses the new slot;
-  5. prevent new use of the old slot, wait for or force-close every adapter-owned old-slot IMAP session within a bounded drain window, atomically remove the old hash from `master-users`, flush auth cache, and delete the old raw-secret file;
-  6. negatively verify the captured old credential and positively verify the new one;
-  7. finish with exactly one hash, one raw secret, and one matching active reference.
+- [ ] Emit observer points before/after every durable replace and delete, plus
+  staged acceptance, application verification, drain completion, old
+  rejection, new verification, and final strict state. Snapshot tests recreate
+  a fresh store at every point. Before the active switch, explicit recovery
+  rolls back. After it, recovery idempotently completes forward. Only explicit
+  recovery may delete canonical owner-only
+  `<fixed>.tmp-<canonical-UUID>` files; suspicious or unsafe temporaries are
+  retained and fail closed.
 
-Before the active-reference switch, recovery removes an abandoned staged slot. After the switch, recovery completes old-slot revocation; it never switches back merely because cleanup was interrupted. Tests inject a crash at every boundary, reject symlink/path/mode corruption, prove no adapter-owned old-slot session survives completion, and prove no secret enters logs, argv, SQLite, receipts, or gate evidence.
+- [ ] Write the live negative matrix:
 
-- [ ] Run:
+  - ordinary IMAPS rejects master syntax/credential;
+  - operator master succeeds only for an eligible disposable target;
+  - arbitrary, protected, deleted, inactive-master, and master-as-self targets
+    fail through a fixed raw SASL LOGIN helper;
+  - a target ordinary password cannot become master authentication;
+  - the master credential fails through ordinary POP3S, Postfix SMTP SASL,
+    and OAuth introspection/authorization;
+  - operator runtime publication is exactly IMAPS `31993` and its only network
+    is `operator-ingress`;
+  - every discovered non-loopback host IPv4 rejects ordinary `1993` and
+    operator `2993`;
+  - from the existing proof `oauth2-mock` on the default network, ordinary
+    Dovecot resolution/connect is a positive control, operator DNS and direct
+    ingress-IP access fail, and `host.docker.internal`,
+    `gateway.docker.internal`, the explicit `task6-host-gateway` alias, plus
+    every host LAN IPv4 cannot reach host port `2993`.
+
+- [ ] Reuse only the checked
+  `debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh`
+  lifecycle and Compose project `mail-sandbox-task5-proof`. Add proof-only
+  `127.0.0.1:21995:31990` for the ordinary POP3S negative, reserve/check it
+  with the existing fixed ports, and mount the fixed network helper read-only
+  into the existing `oauth2-mock`. Add no service, project, network, or volume.
+  The lifecycle runs startup, isolation, then rotation live classes before its
+  existing mandatory cleanup and baseline checks.
+
+- [ ] Run the single checked lifecycle:
 
 ```bash
-docker compose ps
-docker compose exec -T dovecot doveadm service status imap-login
-docker compose exec -T dovecot-operator doveadm service status imap-login
-cd debug-dashboard
-DOVECOT_LIVE_TESTS=1 \
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotIsolationLiveTest'
-DOVECOT_LIVE_TESTS=1 \
-./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorRotationLiveTest'
+debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
 ```
 
-Expected: the isolation matrix and every rotation/crash-recovery case pass.
+Expected: all non-live checks, startup proof, isolation matrix, and rotation
+proof pass, followed by mandatory cleanup. Until a controller executes this
+Docker Desktop path, record live Task 6 evidence as pending rather than passed.
+If any direct bridge, host-gateway, or LAN path reaches operator port `2993`
+or `31993`, report `BLOCKED/STOP`; do not weaken or skip the assertion.
 
 ## Task 7: Prove operator mail behavior and shared Maildir safety
 

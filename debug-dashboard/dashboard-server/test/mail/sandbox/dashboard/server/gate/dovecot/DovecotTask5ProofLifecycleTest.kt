@@ -11,6 +11,7 @@ import kotlin.io.path.createDirectories
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class DovecotTask5ProofLifecycleTest {
@@ -32,6 +33,10 @@ class DovecotTask5ProofLifecycleTest {
     private val proofProfileSource = repositoryRoot.resolve(
         "debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/" +
             "server/gate/dovecot/DovecotTask5ProofProfile.kt",
+    )
+    private val networkIsolationHelper = repositoryRoot.resolve(
+        "debug-dashboard/dashboard-server/testResources/" +
+            "dovecot-gate0c/network-isolation-check.py",
     )
 
     @Test
@@ -142,6 +147,18 @@ class DovecotTask5ProofLifecycleTest {
         assertFalse("TASK5_LIFECYCLE_LOCK_OVERRIDE" in source)
         assertFalse("TASK5_FAKE_" in source)
         assertFalse("export TASK5_LIFECYCLE_LOCK_TOKEN" in source)
+        assertTrue(
+            "TASK5_NETWORK_ISOLATION_HELPER=" +
+                "\"\$TASK5_SCRIPT_DIRECTORY/network-isolation-check.py\"" in source,
+        )
+        assertTrue(
+            "[[ ! -f \"\$TASK5_NETWORK_ISOLATION_HELPER\" ]]" in source,
+        )
+        assertTrue(
+            "[[ -L \"\$TASK5_NETWORK_ISOLATION_HELPER\" ]]" in source,
+        )
+        assertTrue(Files.isRegularFile(networkIsolationHelper))
+        assertFalse(Files.isSymbolicLink(networkIsolationHelper))
 
         val ambientOverrideRejection = source.indexOf(
             "DOVECOT_* | COMPOSE_* | DOCKER_*",
@@ -245,6 +262,39 @@ class DovecotTask5ProofLifecycleTest {
         val proofPreflight = source.indexOf("-- task5-proof preflight")
         assertTrue(proofRootCreation > previousBoundary)
         assertTrue(proofPreflight > proofRootCreation)
+
+        val proofPortLoop = assertNotNull(
+            Regex("""for TASK5_PROOF_PORT in ([0-9 ]+); do""")
+                .find(source),
+            "The lifecycle must reserve one fixed proof-port set",
+        ).groupValues[1].trim().split(Regex("""\s+"""))
+        assertEquals(
+            listOf("1993", "21995", "2993", "21025", "28080"),
+            proofPortLoop,
+        )
+
+        val startupTest = source.indexOf(
+            "--include-classes " +
+                "mail.sandbox.dashboard.server.gate.dovecot." +
+                "DovecotOperatorStartupLiveTest",
+        )
+        val isolationTest = source.indexOf(
+            "--include-classes " +
+                "mail.sandbox.dashboard.server.gate.dovecot." +
+                "DovecotIsolationLiveTest",
+        )
+        val rotationTest = source.indexOf(
+            "--include-classes " +
+                "mail.sandbox.dashboard.server.gate.dovecot." +
+                "DovecotOperatorRotationLiveTest",
+        )
+        val completion = source.indexOf(
+            """printf '%s\n' "Task 5 proof completed; mandatory cleanup follows."""",
+        )
+        assertTrue(startupTest > proofPreflight)
+        assertTrue(isolationTest > startupTest)
+        assertTrue(rotationTest > isolationTest)
+        assertTrue(completion > rotationTest)
     }
 
     @Test
@@ -472,6 +522,35 @@ class DovecotTask5ProofLifecycleTest {
                     "up --detach --build --force-recreate --wait " +
                         "dovecot dovecot-operator postfix oauth2-mock",
                 ),
+            )
+            assertEquals(
+                listOf(
+                    "lsof -nP -iTCP:1993 -sTCP:LISTEN",
+                    "lsof -nP -iTCP:21995 -sTCP:LISTEN",
+                    "lsof -nP -iTCP:2993 -sTCP:LISTEN",
+                    "lsof -nP -iTCP:21025 -sTCP:LISTEN",
+                    "lsof -nP -iTCP:28080 -sTCP:LISTEN",
+                ),
+                result.commands.filter { it.startsWith("lsof ") },
+            )
+            assertOrdered(
+                result.commands,
+                "kotlin test --include-module dashboard-server " +
+                    "--include-classes " +
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                    "DovecotOperatorStartupLiveTest",
+                "kotlin test --include-module dashboard-server " +
+                    "--include-classes " +
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                    "DovecotIsolationLiveTest",
+                "kotlin test --include-module dashboard-server " +
+                    "--include-classes " +
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                    "DovecotOperatorRotationLiveTest",
+                "kotlin run --module dashboard-server --main-class " +
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                    "EligibilityFileCli -- task5-proof remove " +
+                    "task5-bootstrap@local.test",
             )
             assertTrue(
                 result.commands.none { "task5-fake-secret" in it },
@@ -2146,6 +2225,10 @@ class DovecotTask5ProofLifecycleTest {
                     resourceDirectory.resolve("compose.task5-proof.yml"),
                     "services: {}\n",
                 )
+                Files.writeString(
+                    resourceDirectory.resolve("network-isolation-check.py"),
+                    "# fixed test fixture\n",
+                )
                 val script = resourceDirectory.resolve("run-task5-proof.sh")
                 Files.writeString(script, scriptContent)
                 makeExecutable(script)
@@ -2485,7 +2568,7 @@ class DovecotTask5ProofLifecycleTest {
             |printf '%s\n' "lsof §*" >> "§TASK5_FAKE_LOG"
             |case "§TASK5_FAKE_SCENARIO" in
             |  port-collision)
-            |    case "§*" in *"-iTCP:2993"*) exit 0 ;; esac
+            |    case "§*" in *"-iTCP:21995"*) exit 0 ;; esac
             |    ;;
             |  port-query-fails)
             |    case "§*" in *"-iTCP:1993"*) exit 2 ;; esac

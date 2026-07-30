@@ -2,6 +2,7 @@ services:
   dovecot:
     ports: !override
       - "127.0.0.1:1993:31993"
+      - "127.0.0.1:21995:31990"
     volumes: !override
       - ./config:/etc/dovecot/conf.d:ro
       - type: bind
@@ -59,10 +60,18 @@ services:
   oauth2-mock:
     ports: !override
       - "127.0.0.1:28080:8080"
+    extra_hosts: !override
+      - "task6-host-gateway:host-gateway"
     volumes: !override
       - type: bind
         source: ./debug-dashboard/.runtime/task5-proof/dovecot
         target: /etc/dovecot/runtime
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./debug-dashboard/dashboard-server/testResources/dovecot-gate0c/network-isolation-check.py
+        target: /proof/network-isolation-check.py
         read_only: true
         bind:
           create_host_path: false
