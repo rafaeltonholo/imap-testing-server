@@ -239,14 +239,9 @@ def _deadline_expired(_signal_number, _frame):
     raise DeadlineExpired
 
 
-def evaluate(data, arguments):
+def _evaluate_without_deadline(data, arguments):
     if arguments:
         return 2, "INVALID_INVOCATION"
-    previous_handler = signal.signal(signal.SIGALRM, _deadline_expired)
-    previous_timer = signal.setitimer(
-        signal.ITIMER_REAL,
-        MAX_WALL_SECONDS,
-    )
     try:
         operator_ip, host_ips = parse_input(data)
         diagnostic = network_diagnostic(operator_ip, host_ips)
@@ -254,23 +249,52 @@ def evaluate(data, arguments):
         return 2, "INVALID_INPUT"
     except BaseException:
         return 1, "CHECK_ERROR"
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer[0] > 0:
-            signal.setitimer(
-                signal.ITIMER_REAL,
-                previous_timer[0],
-                previous_timer[1],
-            )
     if diagnostic is not None:
         return 1, diagnostic
     return 0, "OK"
 
 
+def _arm_deadline():
+    previous_handler = signal.signal(signal.SIGALRM, _deadline_expired)
+    previous_timer = signal.setitimer(
+        signal.ITIMER_REAL,
+        MAX_WALL_SECONDS,
+    )
+    return previous_handler, previous_timer
+
+
+def _restore_deadline(previous_handler, previous_timer):
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous_handler)
+    if previous_timer[0] > 0:
+        signal.setitimer(
+            signal.ITIMER_REAL,
+            previous_timer[0],
+            previous_timer[1],
+        )
+
+
+def evaluate(data, arguments):
+    previous_handler, previous_timer = _arm_deadline()
+    try:
+        return _evaluate_without_deadline(data, arguments)
+    finally:
+        _restore_deadline(previous_handler, previous_timer)
+
+
 def main():
-    data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    status, output = evaluate(data, tuple(sys.argv[1:]))
+    previous_handler, previous_timer = _arm_deadline()
+    try:
+        arguments = tuple(sys.argv[1:])
+        if arguments:
+            status, output = 2, "INVALID_INVOCATION"
+        else:
+            data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+            status, output = _evaluate_without_deadline(data, arguments)
+    except BaseException:
+        status, output = 1, "CHECK_ERROR"
+    finally:
+        _restore_deadline(previous_handler, previous_timer)
     sys.stdout.write(output + "\n")
     sys.stdout.flush()
     return status

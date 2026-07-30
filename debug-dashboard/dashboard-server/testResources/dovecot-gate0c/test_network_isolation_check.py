@@ -728,6 +728,49 @@ class NetworkIsolationEvaluationTest(unittest.TestCase):
             self.assertEqual(b"", result.stderr)
             self.assertNotIn(b"secret", result.stdout + result.stderr)
 
+    def test_cli_wall_deadline_includes_blocked_stdin_read(self):
+        class BlockingInput:
+            def read(self, _maximum_bytes):
+                time.sleep(0.2)
+                return self.valid_input
+
+            def __init__(self, valid_input):
+                self.valid_input = valid_input
+
+        stdin = mock.Mock()
+        stdin.buffer = BlockingInput(self.valid_input)
+        stdout = mock.Mock()
+        started = time.monotonic()
+        with mock.patch.object(
+            self.helper,
+            "MAX_WALL_SECONDS",
+            0.02,
+            create=True,
+        ), mock.patch.object(
+            self.helper.sys,
+            "stdin",
+            stdin,
+        ), mock.patch.object(
+            self.helper.sys,
+            "stdout",
+            stdout,
+        ), mock.patch.object(
+            self.helper.sys,
+            "argv",
+            ["network-isolation-check.py"],
+        ), mock.patch.object(
+            self.helper,
+            "network_diagnostic",
+            return_value=None,
+        ):
+            status = self.helper.main()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(1, status)
+        self.assertLess(elapsed, 0.15)
+        stdout.write.assert_called_once_with("CHECK_ERROR\n")
+        stdout.flush.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
