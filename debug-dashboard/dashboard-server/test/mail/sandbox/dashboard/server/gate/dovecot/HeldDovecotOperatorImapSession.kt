@@ -5,6 +5,7 @@ import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
@@ -13,6 +14,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 internal class HeldDovecotOperatorImapSession private constructor(
@@ -96,7 +98,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
     }
 
     private fun closeFromDeadline() {
-        if (abortAndClose(transport)) {
+        abortAndClose(transport) {
             closed.set(true)
         }
     }
@@ -563,10 +565,44 @@ internal class HeldDovecotOperatorImapSession private constructor(
 
         private fun abortAndClose(
             transport: DovecotOperatorTransport,
+            onSuccess: () -> Unit = {},
         ): Boolean {
-            val aborted = runCatching { transport.abort() }.isSuccess
-            val closed = runCatching { transport.close() }.isSuccess
-            return aborted || closed
+            val succeeded = AtomicBoolean()
+            val attemptsFinished = CountDownLatch(2)
+            fun start(
+                actionName: String,
+                action: () -> Unit,
+            ) {
+                Thread(
+                    {
+                        try {
+                            action()
+                            succeeded.set(true)
+                            onSuccess()
+                        } catch (_: Throwable) {
+                            // Proof cancellation preserves its redacted result.
+                        } finally {
+                            attemptsFinished.countDown()
+                        }
+                    },
+                    "dovecot-held-session-$actionName-" +
+                        CANCELLATION_THREAD_SEQUENCE.incrementAndGet(),
+                ).also {
+                    it.isDaemon = true
+                    it.start()
+                }
+            }
+            start("abort", transport::abort)
+            start("close", transport::close)
+            try {
+                attemptsFinished.await(
+                    CANCELLATION_WAIT_MILLIS,
+                    TimeUnit.MILLISECONDS,
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            return succeeded.get()
         }
 
         private fun throwOpenFailure(failure: Throwable?): Nothing {
@@ -623,7 +659,9 @@ internal class HeldDovecotOperatorImapSession private constructor(
         private const val MAX_RESPONSE_LINES = 64
         private const val MAX_AUTH_RESPONSE_BYTES = 1024
         private const val MAX_MESSAGE_BYTES = 16 * 1024
+        private const val CANCELLATION_WAIT_MILLIS = 50L
         private const val USABILITY_NOOP_TAG = "A003"
+        private val CANCELLATION_THREAD_SEQUENCE = AtomicInteger()
         private val REQUIRED_MESSAGE_HEADERS = listOf(
             "From",
             "To",
