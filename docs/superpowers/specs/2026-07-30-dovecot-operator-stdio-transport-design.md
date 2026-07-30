@@ -252,13 +252,29 @@ admitted raw call then owns the one best-effort deferred close. A repeated
 public close while that request is deferred or in progress, or after it failed,
 also returns a fixed failure.
 
-The lifecycle uses a separate authorized close request after sealing. Per
-direction, the gate records the active raw-call count and exactly one of open,
-deferred, in-progress, succeeded, or failed. An idle open direction is claimed
-under the gate and closed outside it. An active direction is marked deferred
-without waiting for the raw stream monitor; its last admitted raw call claims
-and performs the close outside every gate and signal lock. No caller waits for
-an admitted call to drain, and no helper thread or executor is created.
+The lifecycle uses a separate two-phase authorized close after sealing. It
+already owns the lifecycle lock, then acquires the abort-signal monitor and
+stream gate in the fixed order `lifecycle → signal → gate`. Under signal and
+gate it either observes an acknowledged unreaped abort and refuses the request,
+or atomically reserves the direction and returns a one-shot `PreparedClose`.
+Both locks are released before `PreparedClose` performs raw close. Raw close is
+therefore never invoked under signal or gate, and a prepared close cannot be
+completed twice.
+
+Per direction, the gate records the active raw-call count and exactly one of
+open, deferred, in-progress, succeeded, or failed. Preparing an idle open
+direction claims it under the gate; completing that claim closes it outside the
+gate. Preparing an active direction marks it deferred without waiting for the
+raw stream monitor; its last admitted raw call claims and performs the close
+outside every gate and signal lock. No caller waits for an admitted call to
+drain, and no helper thread or executor is created.
+
+The internal process-transport factory accepts a
+`beforeLifecycleCloseAuthorization(direction)` checkpoint that is invoked
+immediately before each lifecycle authorization, outside signal and gate. Its
+production default is a no-op. It exists solely so latch-driven unit tests can
+place an abort acknowledgement on either side of the authorization
+linearization point; it adds no production wait, actor, or behavior.
 
 Idle normal close and registration cleanup retain the graceful ordering only
 when stdin close is synchronously successful:
@@ -286,20 +302,29 @@ handshake's reaped result and records signal acknowledgement before releasing
 the monitor, then releases it before entering the lifecycle lock.
 
 On an abort-first path, the complete process handshake happens before either
-lifecycle stream-close request. On a close-first path, any already admitted
-protocol write remains inside raw stdin, but the guarded lifecycle close
-defers raw close rather than blocking on that stream monitor. The abort can
-still destroy, force, and reap the child without acquiring the lifecycle lock.
-The lifecycle owner cannot cache a terminal outcome while that handshake
-remains in flight. Once it observes the acknowledged result, it performs no
-500-ms natural-exit wait and no repeated destroy, force, or process wait. If
-the result is reaped, it requests each stream close once. If the result is
-unreaped before a lifecycle close request, it atomically clears both retained
-stream references and caches `reaped=false`, `naturalExit=false`,
-`terminationRequired=true`, `streamsClosed=false`, and `exitCode=null` without
-making a new raw-close request. A close request already deferred before that
-outcome may still execute exactly once after its admitted raw call exits, but
-that late close cannot upgrade the cached outcome.
+lifecycle stream-close authorization. On a close-first path, any already
+admitted protocol write remains inside raw stdin, but a prepared lifecycle
+close defers raw close rather than blocking on that stream monitor. The abort
+can still destroy, force, and reap the child without acquiring the lifecycle
+lock. Holding signal through the handshake makes each signal-plus-gate
+authorization the linearization point: an abort acknowledged before it with
+`reaped=false` prevents that direction from being claimed or deferred; a
+direction prepared first may complete once outside the locks.
+
+The lifecycle owner cannot cache a terminal outcome while the handshake
+remains in flight. Once it observes an acknowledged reaped result, it performs
+no 500-ms natural-exit wait and no repeated destroy, force, or process wait,
+then authorizes each remaining stream close once. An acknowledged
+`reaped=false` result observed at stdin authorization, the post-stdin
+pre-natural-wait check, stdout authorization, process-termination selection, or
+the final signal-completion snapshot instead overrides every performed or
+natural result. The transport clears both retained stream references and
+caches exactly `reaped=false`, `naturalExit=false`,
+`terminationRequired=true`, `streamsClosed=false`, and `exitCode=null`.
+After that observation it makes no new stream-close, destroy, force, process
+wait, or exit-value request. A close already prepared or deferred before the
+false acknowledgement may still execute exactly once, but its completion
+cannot upgrade the canonical cached outcome.
 
 Regular normal-close and registration-cleanup lifecycle destroy is selected
 under the same signal monitor, then executed by the selecting thread while it
@@ -312,10 +337,13 @@ wall-clock bound on the whole close call: an idle raw JDK process-stream
 would require another actor, which this transport intentionally prohibits.
 
 All callers share one cached terminal outcome. Signal acknowledgement precedes
-terminal-outcome caching. If abort preemption wins or races an unfinished
-normal close, that outcome records that termination was required, so the normal
-close cannot succeed even if the child then exits with code zero. A normal
-probe/session close succeeds only after natural exit with code zero, no
+terminal-outcome caching. The final signal-completion snapshot rechecks the
+stored abort result; `false` replaces the whole performed outcome with the
+canonical five-field failure rather than merging with a concurrent natural
+exit or successful stream close. If reaped abort preemption wins or races an
+unfinished normal close, the outcome records that termination was required, so
+the normal close cannot succeed even if the child then exits with code zero. A
+normal probe/session close succeeds only after natural exit with code zero, no
 termination signal, and both lifecycle stream-close requests already
 synchronously successful at the terminal snapshot.
 Timeout/abort and registration-failure cleanup accept any exit code, but still

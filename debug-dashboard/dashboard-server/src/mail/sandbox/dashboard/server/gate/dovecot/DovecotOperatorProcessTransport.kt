@@ -110,6 +110,11 @@ internal fun interface DovecotOperatorProcessStarter {
     fun start(profile: DovecotOperatorLaunchProfile): Process
 }
 
+internal enum class DovecotOperatorProcessStreamDirection {
+    Stdin,
+    Stdout,
+}
+
 internal class JvmDovecotOperatorProcessStarter(
     private val inheritedEnvironment: () -> Map<String, String> = {
         System.getenv()
@@ -135,6 +140,8 @@ internal class JvmDockerExecDovecotOperatorTransportFactory(
     private val profile: DovecotOperatorLaunchProfile,
     private val starter: DovecotOperatorProcessStarter =
         JvmDovecotOperatorProcessStarter(),
+    private val beforeLifecycleCloseAuthorization:
+        (DovecotOperatorProcessStreamDirection) -> Unit = {},
 ) : DovecotOperatorTransportFactory {
     override fun open(
         registerAllocated: (DovecotOperatorTransport) -> Unit,
@@ -145,7 +152,12 @@ internal class JvmDockerExecDovecotOperatorTransportFactory(
             restoreInterruptFrom(failure)
             throw IOException(START_FAILURE_MESSAGE)
         }
-        val transport = ManagedDovecotOperatorProcessTransport(process)
+        val transport =
+            ManagedDovecotOperatorProcessTransport(
+                process = process,
+                beforeLifecycleCloseAuthorization =
+                    beforeLifecycleCloseAuthorization,
+            )
         try {
             transport.mapProcessStreams()
         } catch (failure: Throwable) {
@@ -212,39 +224,45 @@ private class ProcessStreamAdmissionGate {
         }
     }
 
-    private fun <Stream : AutoCloseable> requestClose(
+    private fun <Stream : AutoCloseable> prepareClose(
         direction: Direction<Stream>,
         lifecycleAuthorized: Boolean,
-    ): CloseRequest {
-        val claimed = synchronized(lock) {
+    ): PreparedClose =
+        synchronized(lock) {
             if (!lifecycleAuthorized && sealed) {
-                return CloseRequest.RejectedAfterSeal
+                return@synchronized PreparedClose {
+                    CloseRequest.RejectedAfterSeal
+                }
             }
             when (direction.closeState) {
                 CloseState.Open -> {
                     if (direction.activeCalls == 0) {
                         direction.closeState = CloseState.InProgress
-                        true
+                        PreparedClose {
+                            closeClaimed(direction)
+                        }
                     } else {
                         direction.closeState = CloseState.Deferred
-                        false
+                        PreparedClose {
+                            CloseRequest.DeferredOrInProgress
+                        }
                     }
                 }
                 CloseState.Succeeded ->
-                    return CloseRequest.SynchronouslyClosed
+                    PreparedClose {
+                        CloseRequest.SynchronouslyClosed
+                    }
                 CloseState.Deferred,
                 CloseState.InProgress,
-                -> return CloseRequest.DeferredOrInProgress
+                -> PreparedClose {
+                    CloseRequest.DeferredOrInProgress
+                }
                 CloseState.Failed ->
-                    return CloseRequest.Failed
+                    PreparedClose {
+                        CloseRequest.Failed
+                    }
             }
         }
-        return if (claimed) {
-            closeClaimed(direction)
-        } else {
-            CloseRequest.DeferredOrInProgress
-        }
-    }
 
     private fun <Stream : AutoCloseable> release(
         direction: Direction<Stream>,
@@ -292,6 +310,38 @@ private class ProcessStreamAdmissionGate {
         }
     }
 
+    inner class PreparedClose internal constructor(
+        private val completion: () -> CloseRequest,
+    ) {
+        private val completionLock = Any()
+        private var available = true
+
+        fun complete(): Boolean =
+            completeRequest() == CloseRequest.SynchronouslyClosed
+
+        fun completeForCallerClose() {
+            when (completeRequest()) {
+                CloseRequest.SynchronouslyClosed -> Unit
+                CloseRequest.RejectedAfterSeal ->
+                    throw IOException(CLOSED_MESSAGE)
+                CloseRequest.DeferredOrInProgress,
+                CloseRequest.Failed,
+                -> throw IOException(CLOSE_FAILURE_MESSAGE)
+            }
+        }
+
+        private fun completeRequest(): CloseRequest {
+            val oneShot = synchronized(completionLock) {
+                check(available) {
+                    "Prepared stream close was already completed"
+                }
+                available = false
+                completion
+            }
+            return oneShot()
+        }
+    }
+
     inner class GuardedInputStream internal constructor(
         private val direction: Direction<InputStream>,
     ) : InputStream() {
@@ -307,28 +357,17 @@ private class ProcessStreamAdmissionGate {
                 raw.read(bytes, offset, length)
             }
 
-        override fun close() {
-            when (
-                requestClose(
-                    direction = direction,
-                    lifecycleAuthorized = false,
-                )
-            ) {
-                CloseRequest.SynchronouslyClosed -> Unit
-                CloseRequest.RejectedAfterSeal ->
-                    throw IOException(CLOSED_MESSAGE)
-                CloseRequest.DeferredOrInProgress,
-                CloseRequest.Failed,
-                -> throw IOException(CLOSE_FAILURE_MESSAGE)
-            }
-        }
+        override fun close() =
+            prepareClose(
+                direction = direction,
+                lifecycleAuthorized = false,
+            ).completeForCallerClose()
 
-        fun requestCloseForLifecycle(): Boolean =
-            requestClose(
+        fun prepareCloseForLifecycle(): PreparedClose =
+            prepareClose(
                 direction = direction,
                 lifecycleAuthorized = true,
-            ) ==
-                CloseRequest.SynchronouslyClosed
+            )
     }
 
     inner class GuardedOutputStream internal constructor(
@@ -352,28 +391,17 @@ private class ProcessStreamAdmissionGate {
             call(direction) { raw -> raw.flush() }
         }
 
-        override fun close() {
-            when (
-                requestClose(
-                    direction = direction,
-                    lifecycleAuthorized = false,
-                )
-            ) {
-                CloseRequest.SynchronouslyClosed -> Unit
-                CloseRequest.RejectedAfterSeal ->
-                    throw IOException(CLOSED_MESSAGE)
-                CloseRequest.DeferredOrInProgress,
-                CloseRequest.Failed,
-                -> throw IOException(CLOSE_FAILURE_MESSAGE)
-            }
-        }
+        override fun close() =
+            prepareClose(
+                direction = direction,
+                lifecycleAuthorized = false,
+            ).completeForCallerClose()
 
-        fun requestCloseForLifecycle(): Boolean =
-            requestClose(
+        fun prepareCloseForLifecycle(): PreparedClose =
+            prepareClose(
                 direction = direction,
                 lifecycleAuthorized = true,
-            ) ==
-                CloseRequest.SynchronouslyClosed
+            )
     }
 
     class Direction<Stream : AutoCloseable>(
@@ -390,7 +418,7 @@ private class ProcessStreamAdmissionGate {
         Failed,
     }
 
-    private enum class CloseRequest {
+    enum class CloseRequest {
         SynchronouslyClosed,
         DeferredOrInProgress,
         Failed,
@@ -409,6 +437,8 @@ private class ProcessStreamAdmissionGate {
 
 private class ManagedDovecotOperatorProcessTransport(
     private val process: Process,
+    private val beforeLifecycleCloseAuthorization:
+        (DovecotOperatorProcessStreamDirection) -> Unit,
 ) : DovecotOperatorTransport {
     private val streamGate = ProcessStreamAdmissionGate()
     private val lifecycleLock = Any()
@@ -516,17 +546,23 @@ private class ManagedDovecotOperatorProcessTransport(
                     terminationSignal = TerminationSignal.Completed
                     completion
                 }
-                performed.copy(
-                    reaped =
-                        performed.reaped ||
-                            signalCompletion.abortReaped == true,
-                    terminationRequired =
-                        performed.terminationRequired ||
-                            signalCompletion.signal ==
-                            TerminationSignal.AbortAcknowledged ||
-                            signalCompletion.signal ==
-                            TerminationSignal.LifecycleDestroy,
-                ).also { completed ->
+                val completed =
+                    if (signalCompletion.abortReaped == false) {
+                        canonicalUnreapedAbortOutcome()
+                    } else {
+                        performed.copy(
+                            reaped =
+                                performed.reaped ||
+                                    signalCompletion.abortReaped == true,
+                            terminationRequired =
+                                performed.terminationRequired ||
+                                    signalCompletion.signal ==
+                                    TerminationSignal.AbortAcknowledged ||
+                                    signalCompletion.signal ==
+                                    TerminationSignal.LifecycleDestroy,
+                        )
+                    }
+                completed.also {
                     terminationOutcome = completed
                 }
             }
@@ -612,35 +648,35 @@ private class ManagedDovecotOperatorProcessTransport(
                 false
             }
 
-        fun failedUnreapedAbortOutcome(): TerminationOutcome {
-            childStdin = null
-            childStdout = null
-            return TerminationOutcome(
-                reaped = false,
-                naturalExit = false,
-                terminationRequired = true,
-                streamsClosed = false,
-                exitCode = null,
-            )
-        }
-
         return try {
             var acknowledgedAbortReaped =
                 acknowledgedAbortReaped()
             if (acknowledgedAbortReaped == false) {
-                return failedUnreapedAbortOutcome()
+                return canonicalUnreapedAbortOutcome()
             }
-            val stdinClosed = try {
-                childStdin?.requestCloseForLifecycle() ?: true
-            } finally {
-                childStdin = null
+            val stdinAuthorization =
+                prepareLifecycleClose(
+                    DovecotOperatorProcessStreamDirection.Stdin,
+                ) {
+                    childStdin?.prepareCloseForLifecycle()
+                }
+            val stdinClosed = when (stdinAuthorization) {
+                LifecycleCloseAuthorization.UnreapedAbort ->
+                    return canonicalUnreapedAbortOutcome()
+                is LifecycleCloseAuthorization.Prepared -> try {
+                    stdinAuthorization.preparedClose
+                        ?.complete()
+                        ?: true
+                } finally {
+                    childStdin = null
+                }
             }
             if (acknowledgedAbortReaped == null) {
                 acknowledgedAbortReaped =
                     acknowledgedAbortReaped()
             }
             if (acknowledgedAbortReaped == false) {
-                return failedUnreapedAbortOutcome()
+                return canonicalUnreapedAbortOutcome()
             }
             val naturalExit =
                 if (
@@ -651,10 +687,22 @@ private class ManagedDovecotOperatorProcessTransport(
                 } else {
                     false
                 }
-            val stdoutClosed = try {
-                childStdout?.requestCloseForLifecycle() ?: true
-            } finally {
-                childStdout = null
+            val stdoutAuthorization =
+                prepareLifecycleClose(
+                    DovecotOperatorProcessStreamDirection.Stdout,
+                ) {
+                    childStdout?.prepareCloseForLifecycle()
+                }
+            val stdoutClosed = when (stdoutAuthorization) {
+                LifecycleCloseAuthorization.UnreapedAbort ->
+                    return canonicalUnreapedAbortOutcome()
+                is LifecycleCloseAuthorization.Prepared -> try {
+                    stdoutAuthorization.preparedClose
+                        ?.complete()
+                        ?: true
+                } finally {
+                    childStdout = null
+                }
             }
 
             var reaped =
@@ -662,6 +710,9 @@ private class ManagedDovecotOperatorProcessTransport(
             if (!reaped) {
                 val selection = selectProcessTermination()
                 if (selection.abortReaped != null) {
+                    if (!selection.abortReaped) {
+                        return canonicalUnreapedAbortOutcome()
+                    }
                     reaped = selection.abortReaped
                 } else if (selection.lifecycleDestroySelected) {
                     try {
@@ -712,17 +763,46 @@ private class ManagedDovecotOperatorProcessTransport(
         }
     }
 
-    private fun acknowledgedAbortReaped(): Boolean? =
-        synchronized(terminationSignalLock) {
-            if (
-                terminationSignal ==
-                TerminationSignal.AbortAcknowledged
-            ) {
-                checkNotNull(abortHandshakeReaped)
+    private fun prepareLifecycleClose(
+        direction: DovecotOperatorProcessStreamDirection,
+        prepare: () -> ProcessStreamAdmissionGate.PreparedClose?,
+    ): LifecycleCloseAuthorization {
+        beforeLifecycleCloseAuthorization(direction)
+        return synchronized(terminationSignalLock) {
+            if (acknowledgedAbortReapedLocked() == false) {
+                LifecycleCloseAuthorization.UnreapedAbort
             } else {
-                null
+                LifecycleCloseAuthorization.Prepared(prepare())
             }
         }
+    }
+
+    private fun acknowledgedAbortReaped(): Boolean? =
+        synchronized(terminationSignalLock) {
+            acknowledgedAbortReapedLocked()
+        }
+
+    private fun acknowledgedAbortReapedLocked(): Boolean? =
+        if (
+            terminationSignal ==
+            TerminationSignal.AbortAcknowledged
+        ) {
+            checkNotNull(abortHandshakeReaped)
+        } else {
+            null
+        }
+
+    private fun canonicalUnreapedAbortOutcome(): TerminationOutcome {
+        childStdin = null
+        childStdout = null
+        return TerminationOutcome(
+            reaped = false,
+            naturalExit = false,
+            terminationRequired = true,
+            streamsClosed = false,
+            exitCode = null,
+        )
+    }
 
     private fun selectProcessTermination(): ProcessTerminationSelection =
         synchronized(terminationSignalLock) {
@@ -791,6 +871,15 @@ private class ManagedDovecotOperatorProcessTransport(
         val signal: TerminationSignal,
         val abortReaped: Boolean?,
     )
+
+    private sealed interface LifecycleCloseAuthorization {
+        data object UnreapedAbort : LifecycleCloseAuthorization
+
+        data class Prepared(
+            val preparedClose:
+                ProcessStreamAdmissionGate.PreparedClose?,
+        ) : LifecycleCloseAuthorization
+    }
 
     private data class ProcessTerminationSelection(
         val lifecycleDestroySelected: Boolean,

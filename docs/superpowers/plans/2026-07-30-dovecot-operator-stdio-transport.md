@@ -269,6 +269,30 @@ git commit -m "test: define fixed Dovecot operator process launch"
   states remain terminal failure even if raw close later succeeds. Do not add a
   drain wait, thread, executor, or worker.
 
+- [ ] Make each lifecycle stream close a two-phase authorization. While already
+  holding the lifecycle lock, acquire the abort-signal monitor and then the
+  stream gate (`lifecycle → signal → gate`). Under those locks, either observe
+  an acknowledged `reaped=false` abort and refuse the request, or atomically
+  reserve the direction and return a one-shot `PreparedClose`. Release signal
+  and gate before completing that prepared close; raw stream close must never
+  run under either lock. Immediately before each authorization, invoke the
+  factory-injected internal
+  `beforeLifecycleCloseAuthorization(direction)` checkpoint outside signal and
+  gate. Its production default is a no-op; it exists only for deterministic
+  latch-driven unit schedules and adds no wait, actor, or runtime behavior.
+
+- [ ] Add deterministic regressions for an unreaped abort acknowledged
+  (a) after the old precheck but before stdin authorization, (b) during the
+  500-ms natural wait but before stdout authorization with a read already
+  admitted, and (c) while an already claimed raw stdout close is blocked before
+  terminal caching. The first two must make no new direction-close request;
+  the third may complete its already claimed close. In every case cache exactly
+  `reaped=false`, `naturalExit=false`, `terminationRequired=true`,
+  `streamsClosed=false`, and `exitCode=null`. A stored false result observed at
+  either authorization, the post-stdin pre-wait check, process selection, or
+  final signal-completion snapshot overrides every generic or natural result.
+  Repeated close/abort calls perform no additional stream or process work.
+
 - [ ] Keep public wrapper `close()` separate from the lifecycle-authorized
   close request. After the shared gate is sealed, a stale wrapper close returns
   a fixed redacted `IOException` and cannot request raw close. Before sealing,
