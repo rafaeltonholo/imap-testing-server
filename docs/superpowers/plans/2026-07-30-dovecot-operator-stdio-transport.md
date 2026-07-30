@@ -218,30 +218,37 @@ git commit -m "test: define fixed Dovecot operator process launch"
 - [ ] Implement only the natural-close branch and re-run those cases GREEN.
 
 - [ ] Add termination tests: normal close and registration cleanup close stdout
-  before `destroy()` and its 250-ms wait; an abort winner calls `destroy()`
-  outside the lifecycle lock and acknowledges that attempt before terminal
-  outcome caching, then performs the 500/250/250-ms bounded reap sequence
-  without a second `destroy()`. Force once if still alive. Every mode requires
-  successful close attempts for both mapped streams and a reaped child; abort
-  and registration cleanup may accept a nonzero exit. Preserve RED.
+  before `destroy()` and its 250-ms wait. An abort winner instead completes a
+  pre-stream process handshake outside the lifecycle lock: call `destroy()`,
+  wait at most 250 ms, force once if still alive, and make one final reap
+  attempt of at most 250 ms. Store that result and acknowledge the completed
+  handshake before terminal outcome caching; the lifecycle path then closes
+  both streams without a 500-ms natural-exit wait or any repeated
+  destroy/force/wait work. Every mode requires successful close attempts for
+  both mapped streams and a reaped child; abort and registration cleanup may
+  accept a nonzero exit. Preserve RED.
 
 - [ ] Implement the bounded destroy/force/reap branch and re-run those cases
   GREEN.
 
 - [ ] Add state tests for concurrent idempotent close/abort, abort preemption of
   a protocol writer holding the process-stdin monitor, close-first natural-zero
-  completion waiting for an in-flight abort destroy acknowledgement, a racing
-  abort making a normal outcome termination-required, cached
+  completion waiting for an in-flight abort handshake acknowledgement, a
+  racing abort making a normal outcome termination-required, cached
   registration-cleanup failure, and permanent non-reusability after any failed
-  close. Repeated callers must not rerun stream or process lifecycle work.
-  Preserve RED.
+  close. Cover both asynchronous `destroy()` return and `destroy()` throwing
+  `Error` while close is blocked on the child-stdin monitor; in both cases the
+  abort winner must complete its force/final-reap handshake before that monitor
+  is manually released. Repeated callers must not rerun stream or process
+  lifecycle work. Preserve RED.
 
 - [ ] Implement the synchronized idempotent terminal outcome plus the one-shot
-  abort signal monitor. Hold that monitor through the winning destroy attempt,
-  acknowledge before release, release it before entering the lifecycle lock,
-  and use it for lifecycle destroy selection and terminal signal completion.
-  Clear each terminal stream reference after its sole close attempt, and re-run
-  those cases GREEN.
+  abort signal monitor. Hold that monitor through the winning bounded
+  destroy/wait/force/final-reap handshake, store its reaped result, acknowledge
+  before release, release it before entering the lifecycle lock, and use the
+  stored result for lifecycle destroy selection and terminal signal
+  completion. Clear each terminal stream reference after its sole close
+  attempt, and re-run those cases GREEN.
 
 - [ ] Add tests for caller-interrupt preservation, no new worker/thread,
   failed stream-close acceptance, discarded stderr, and fixed/redacted

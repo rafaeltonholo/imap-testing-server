@@ -238,22 +238,29 @@ post-allocation registration-failure cleanup use the graceful ordering:
    at most 250 ms.
 
 An abort that wins the one-shot signal holds a dedicated signal-coordination
-monitor while calling `destroy()` outside the lifecycle lock. On an abort-first
-path, this happens before either stream-close attempt and lets the child signal
-release a protocol writer that holds the JDK process-stdin stream monitor. On a
-close-first path, stream cleanup may already be underway, but the lifecycle
-owner cannot cache a terminal outcome while the abort attempt remains in
-flight. The winning abort records signal acknowledgement only after the destroy
-attempt returns or throws, then releases the signal monitor before entering the
-lifecycle lock. Regular lifecycle destroy is selected under the same signal
-monitor, then executed by the selecting thread while it owns the lifecycle
-lock.
+monitor while completing a bounded process handshake outside the lifecycle
+lock: call `destroy()`, wait at most 250 ms, force once if the child is still
+alive, and make one final reap attempt of at most 250 ms. The final reap attempt
+still occurs if `destroy()` or `destroyForcibly()` throws. The abort stores the
+handshake's reaped result and records signal acknowledgement before releasing
+the monitor, then releases it before entering the lifecycle lock.
 
-The lifecycle owner still closes stdin, waits at most 500 ms with stdout open,
-closes stdout, and, when the acknowledged abort already owns the process
-signal, waits at most 250 ms without issuing a second `destroy()`. If needed, it
-forces and reaps for at most 250 ms. Thus every mode retains the same fixed
-one-second aggregate wait bound and creates no cleanup thread.
+On an abort-first path, the complete process handshake happens before either
+stream-close attempt. On a close-first path, stream cleanup may already be
+blocked on a protocol writer holding the JDK process-stdin stream monitor, but
+the abort can still destroy, force, and reap the child without acquiring the
+lifecycle lock. The lifecycle owner cannot cache a terminal outcome while that
+handshake remains in flight. Once it observes the acknowledged result, it
+closes each stream once and performs no 500-ms natural-exit wait and no repeated
+destroy, force, or process wait. A stored unreaped result remains a failed abort
+rather than authorizing a second termination sequence.
+
+Regular normal-close and registration-cleanup lifecycle destroy is selected
+under the same signal monitor, then executed by the selecting thread while it
+owns the lifecycle lock. Their graceful `stdin → 500 ms → stdout → destroy →
+250 ms → force → 250 ms` ordering remains unchanged. No path exceeds the
+existing fixed one-second aggregate process-wait bound, the abort handshake
+itself waits at most 500 ms, and the transport creates no cleanup thread.
 
 All callers share one cached terminal outcome. Signal acknowledgement precedes
 terminal-outcome caching. If abort preemption wins or races an unfinished

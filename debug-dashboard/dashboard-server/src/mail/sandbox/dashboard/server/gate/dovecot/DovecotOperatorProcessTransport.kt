@@ -185,6 +185,7 @@ private class ManagedDovecotOperatorProcessTransport(
     private var terminationOutcome: TerminationOutcome? = null
     private val terminationSignalLock = Any()
     private var terminationSignal = TerminationSignal.Available
+    private var abortHandshakeReaped: Boolean? = null
 
     @Volatile
     private var terminal = false
@@ -220,14 +221,11 @@ private class ManagedDovecotOperatorProcessTransport(
         synchronized(terminationSignalLock) {
             if (terminationSignal == TerminationSignal.Available) {
                 terminationSignal = TerminationSignal.AbortInFlight
-                try {
-                    process.destroy()
-                } catch (failure: Throwable) {
-                    restoreInterrupt = failure is InterruptedException
-                } finally {
-                    terminationSignal =
-                        TerminationSignal.AbortAcknowledged
-                }
+                val handshake = performAbortProcessHandshake()
+                abortHandshakeReaped = handshake.reaped
+                restoreInterrupt = handshake.restoreInterrupt
+                terminationSignal =
+                    TerminationSignal.AbortAcknowledged
             }
         }
         try {
@@ -274,16 +272,24 @@ private class ManagedDovecotOperatorProcessTransport(
             terminationOutcome ?: run {
                 terminal = true
                 val performed = performTermination(mode)
-                val signal = synchronized(terminationSignalLock) {
-                    val completedSignal = terminationSignal
+                val signalCompletion = synchronized(terminationSignalLock) {
+                    val completion = TerminationSignalCompletion(
+                        signal = terminationSignal,
+                        abortReaped = abortHandshakeReaped,
+                    )
                     terminationSignal = TerminationSignal.Completed
-                    completedSignal
+                    completion
                 }
                 performed.copy(
+                    reaped =
+                        performed.reaped ||
+                            signalCompletion.abortReaped == true,
                     terminationRequired =
                         performed.terminationRequired ||
-                            signal == TerminationSignal.AbortAcknowledged ||
-                            signal == TerminationSignal.LifecycleDestroy,
+                            signalCompletion.signal ==
+                            TerminationSignal.AbortAcknowledged ||
+                            signalCompletion.signal ==
+                            TerminationSignal.LifecycleDestroy,
                 ).also { completed ->
                     terminationOutcome = completed
                 }
@@ -303,6 +309,50 @@ private class ManagedDovecotOperatorProcessTransport(
         if (!accepted) {
             throw IOException(failureMessage)
         }
+    }
+
+    private fun performAbortProcessHandshake(): AbortProcessHandshake {
+        var restoreInterrupt = Thread.currentThread().isInterrupted
+
+        fun rememberInterruption(failure: Throwable) {
+            if (failure is InterruptedException) {
+                restoreInterrupt = true
+            }
+        }
+
+        fun awaitProcess(timeoutMillis: Long): Boolean =
+            try {
+                process.waitFor(
+                    timeoutMillis,
+                    TimeUnit.MILLISECONDS,
+                )
+            } catch (failure: InterruptedException) {
+                rememberInterruption(failure)
+                false
+            } catch (_: Throwable) {
+                false
+            }
+
+        try {
+            process.destroy()
+        } catch (failure: Throwable) {
+            rememberInterruption(failure)
+            // Continue to the bounded force/reap sequence.
+        }
+        var reaped = awaitProcess(DESTROY_WAIT_MILLIS)
+        if (!reaped) {
+            try {
+                process.destroyForcibly()
+            } catch (failure: Throwable) {
+                rememberInterruption(failure)
+                // The final bounded reap attempt is still mandatory.
+            }
+            reaped = awaitProcess(FORCE_WAIT_MILLIS)
+        }
+        return AbortProcessHandshake(
+            reaped = reaped,
+            restoreInterrupt = restoreInterrupt,
+        )
     }
 
     private fun performTermination(
@@ -336,48 +386,53 @@ private class ManagedDovecotOperatorProcessTransport(
             }
 
         return try {
+            var acknowledgedAbortReaped =
+                acknowledgedAbortReaped()
             val stdinClosed = try {
                 closeQuietly(childStdin)
             } finally {
                 childStdin = null
             }
-            val naturalExit = awaitProcess(NATURAL_EXIT_WAIT_MILLIS)
+            if (acknowledgedAbortReaped == null) {
+                acknowledgedAbortReaped =
+                    acknowledgedAbortReaped()
+            }
+            val naturalExit =
+                if (acknowledgedAbortReaped == null) {
+                    awaitProcess(NATURAL_EXIT_WAIT_MILLIS)
+                } else {
+                    false
+                }
             val stdoutClosed = try {
                 closeQuietly(childStdout)
             } finally {
                 childStdout = null
             }
 
-            var reaped = naturalExit
+            var reaped =
+                acknowledgedAbortReaped ?: naturalExit
             if (!reaped) {
-                val lifecycleDestroySelected =
-                    synchronized(terminationSignalLock) {
-                        if (terminationSignal == TerminationSignal.Available) {
-                            terminationSignal =
-                                TerminationSignal.LifecycleDestroy
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                if (lifecycleDestroySelected) {
+                val selection = selectProcessTermination()
+                if (selection.abortReaped != null) {
+                    reaped = selection.abortReaped
+                } else if (selection.lifecycleDestroySelected) {
                     try {
                         process.destroy()
                     } catch (failure: Throwable) {
                         rememberInterruption(failure)
                         // Continue to the bounded force/reap sequence.
                     }
+                    reaped = awaitProcess(DESTROY_WAIT_MILLIS)
+                    if (!reaped) {
+                        try {
+                            process.destroyForcibly()
+                        } catch (failure: Throwable) {
+                            rememberInterruption(failure)
+                            // The final bounded reap attempt is still mandatory.
+                        }
+                        reaped = awaitProcess(FORCE_WAIT_MILLIS)
+                    }
                 }
-                reaped = awaitProcess(DESTROY_WAIT_MILLIS)
-            }
-            if (!reaped) {
-                try {
-                    process.destroyForcibly()
-                } catch (failure: Throwable) {
-                    rememberInterruption(failure)
-                    // The final bounded reap attempt is still mandatory.
-                }
-                reaped = awaitProcess(FORCE_WAIT_MILLIS)
             }
 
             val exitCode =
@@ -409,6 +464,46 @@ private class ManagedDovecotOperatorProcessTransport(
         }
     }
 
+    private fun acknowledgedAbortReaped(): Boolean? =
+        synchronized(terminationSignalLock) {
+            if (
+                terminationSignal ==
+                TerminationSignal.AbortAcknowledged
+            ) {
+                checkNotNull(abortHandshakeReaped)
+            } else {
+                null
+            }
+        }
+
+    private fun selectProcessTermination(): ProcessTerminationSelection =
+        synchronized(terminationSignalLock) {
+            if (
+                terminationSignal ==
+                TerminationSignal.AbortAcknowledged
+            ) {
+                ProcessTerminationSelection(
+                    lifecycleDestroySelected = false,
+                    abortReaped = checkNotNull(abortHandshakeReaped),
+                )
+            } else if (
+                terminationSignal ==
+                TerminationSignal.Available
+            ) {
+                terminationSignal =
+                    TerminationSignal.LifecycleDestroy
+                ProcessTerminationSelection(
+                    lifecycleDestroySelected = true,
+                    abortReaped = null,
+                )
+            } else {
+                ProcessTerminationSelection(
+                    lifecycleDestroySelected = false,
+                    abortReaped = null,
+                )
+            }
+        }
+
     private companion object {
         const val CLOSED_MESSAGE =
             "Dovecot operator process transport is closed"
@@ -437,6 +532,21 @@ private class ManagedDovecotOperatorProcessTransport(
         val terminationRequired: Boolean,
         val streamsClosed: Boolean,
         val exitCode: Int?,
+    )
+
+    private data class AbortProcessHandshake(
+        val reaped: Boolean,
+        val restoreInterrupt: Boolean,
+    )
+
+    private data class TerminationSignalCompletion(
+        val signal: TerminationSignal,
+        val abortReaped: Boolean?,
+    )
+
+    private data class ProcessTerminationSelection(
+        val lifecycleDestroySelected: Boolean,
+        val abortReaped: Boolean?,
     )
 }
 
