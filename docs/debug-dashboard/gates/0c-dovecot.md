@@ -10,8 +10,8 @@
 - **Task 6 — Prove network isolation and credential rotation:** implementation
   and non-live verification complete; the checked Docker Desktop lifecycle is
   pending controller execution.
-- **Gate 0C:** in progress. Pending Task 6 live evidence and Tasks 7–9 still
-  own isolation proof, mail behavior, lifecycle, and the final decision. This
+- **Gate 0C:** in progress. Task 6 live isolation/rotation evidence is pending;
+  Tasks 7–9 still own mail behavior, lifecycle, and the final decision. This
   document does not record a Gate 0C PASS.
 
 ## Task 1 baseline evidence
@@ -548,10 +548,14 @@ stopped, restarted, recreated, or otherwise mutated.
 
 The existing `DovecotOperatorCredentialStore` remains the sole credential
 writer and holds its process plus file lock from state read through final
-verification. Rotation uses the fixed, unmounted, owner-`0600`
-`dovecot-operator-rotation` intent with the complete grammar `a:b` or `b:a`.
-The public boundary is limited to `rotateOrRecover(target, runtime)` and
-`recoverRotation(target, runtime)`.
+verification. Its durable repository now owns the typed bounded reads, atomic
+replace/delete operations, temporary recovery, permission checks, directory
+fsyncs, and a ref-counted process-lock registry that evicts idle path keys. A
+pure rotation projection classifies the accepted durable states into explicit
+rollback or forward phases before mutation. Rotation uses the fixed, unmounted,
+owner-`0600` `dovecot-operator-rotation` intent with the complete grammar `a:b`
+or `b:a`. The public boundary remains limited to
+`rotateOrRecover(target, runtime)` and `recoverRotation(target, runtime)`.
 
 The implemented A/B sequence is:
 
@@ -573,19 +577,27 @@ The isolation proof does not treat an empty new Maildir as a successful read.
 After adding its disposable eligible target, it uses the same pinned operator
 transport to append one deterministic, complete RFC 5322 message, closes that
 seed session, and then gives the strict full-read probe a separately loaded
-credential. The APPEND helper has one five-second deadline, bounds the message
-at 16 KiB, validates its required headers before opening a transport, and
-always closes the credential and wipes the message buffer. The caller also
-closes the seed session and repeats the credential/payload cleanup in
+credential. The APPEND helper has one five-second total deadline beginning
+before byte-oriented message validation and asynchronous transport allocation
+and continuing through every authentication, write, flush, APPEND, and response
+read. A watchdog aborts blocked I/O, the bounded opener rejects exhausted
+capacity, late or duplicate allocations self-close, and successful completion
+atomically disarms the remaining deadline. Invalid timeout and all other
+pre-open failures still close the credential and wipe the caller's message.
+The message remains bounded at 16 KiB and requires exactly one of every fixed
+header without first materializing the payload as an immutable string. The
+caller also closes the seed session and repeats credential/payload cleanup in
 `finally`. Eligibility cleanup removes the target; the checked disposable
-lifecycle owns removal of its Maildir volume. An empty or malformed UID search
-continues to fail closed.
+lifecycle owns removal of its Maildir volume. Zero `EXISTS` and `RECENT`
+notifications are valid mailbox metadata, while zero or leading-zero `FETCH`
+sequence numbers and an empty or malformed UID search fail closed.
 
 The rotation proof holds an actual authenticated old-ID IMAP session rather
 than a callback-only stand-in. It appends the deterministic read fixture,
-proves that session with a bounded `NOOP`, registers its real close operation
-with the old-generation application lease, and requires the drained transport
-to be both closed and unusable before old credential revocation.
+proves every `NOOP` write, flush, and read under one watchdog-backed deadline,
+registers its real close operation with the old-generation application lease,
+and checks the closed transport under a separate bounded watchdog before old
+credential revocation.
 
 No auth-cache flush, service restart, or recreation is part of convergence.
 Each passwd-file observation has at most seven attempts and six conditional
@@ -594,18 +606,32 @@ rejection retries only success. Protocol, transport, and interruption fail
 immediately, and each attempt owns and wipes a fresh consumable credential.
 The lease registry admits at most 15 ordinary application sessions and
 reserves the sixteenth tracked slot for the one fresh verification lease.
-Old-session closes are submitted concurrently and share a single one-second
-drain deadline; timeout or any close failure stops rotation before revocation
-and leaves the failed lease tracked for explicit retry.
+Application-generation publication and registry activation occur under one
+atomic boundary. Runtime close has terminal open/closing/closed state, rejects
+and wipes every activation once close begins, and makes concurrent or later
+close callers observe the retained terminal outcome. A generation cannot be
+activated during its drain. All callers joining one lease close observe the
+same attempt, so an ordinary close racing a drain is not a false drain failure.
+Old-session closes are submitted concurrently in a per-drain bounded daemon
+session and all drain callers share the first caller's one-second deadline;
+timeout or any close failure stops rotation before revocation and leaves the
+failed lease tracked for explicit retry. Uncooperative callbacks therefore
+cannot consume a global close-executor capacity needed by later drains.
 
 Recovery is deterministic: active-old rolls back and active-new completes
 forward. It rejects malformed, reversed, duplicate, symbolic, wrong-mode,
 oversized, impossible, changed-intent, and identical-raw-slot states. Failed
-session closes remain tracked for a later drain attempt. Failed atomic writes
-retain their exact canonical temporary; only explicit recovery may remove a
-recognized owner-only bounded temporary, with observer points around that
-deletion. Snapshot recovery from every durable and semantic observer boundary
-converges using a fresh store.
+session closes remain tracked for a later drain attempt. Active-old recovery
+first publishes old-only hashes, then repeatedly proves the staged credential
+is rejected and the old credential is accepted with fresh wiped credentials
+before deleting the staged raw slot or intent. A failed inverse proof retains
+both for explicit retry, including when a restart finds the master file already
+old-only. Strict hash verification precedes runtime calls or mutation for every
+recoverable projection, including corrupt and misrouted slots. Failed atomic
+writes retain their exact canonical temporary; only explicit recovery may
+remove a recognized owner-only bounded temporary, with observer points around
+that deletion. Snapshot recovery from every durable and semantic observer
+boundary converges using a fresh store.
 
 The proof override adds only ordinary POP3S
 `127.0.0.1:21995 -> 31990`, a read-only fixed network helper in the existing
@@ -618,33 +644,52 @@ alias, and every supplied host address to port `2993`. The Kotlin live matrix
 also requires exact runtime publications and network membership, rejects
 non-loopback host access to `1993` and `2993`, and proves the master credential
 inactive through ordinary IMAPS, ordinary POP3S, Postfix SMTP SASL, and OAuth.
+IMAP and POP3 rejection count as permanent only for their exact tagged
+`[AUTHENTICATIONFAILED]` and `-ERR [AUTH]` response forms; unavailable,
+temporary, server, bare, malformed, and misleading responses are indeterminate.
+OAuth introspection requires one actual JSON boolean `"active": false`;
+authorization denial requires the exact fixed
+`http://127.0.0.1/callback` origin and path without a port, user information, or
+fragment, then parses percent-decoded unique query fields and requires exact
+`error=access_denied` plus `state=task6` without any decoded `code` key. A fixed
+loopback HTTP/1.0 client applies one watchdog-backed deadline across connect,
+request write and flush, status, headers, and body. It bounds the status line,
+each header line, cumulative header bytes and count, `Location`, declared or
+close-delimited body, and rejects duplicate framing headers or transfer
+encoding. Request headers and every owned response-body buffer are wiped on
+failure, rejection, and close. The fixed Python network helper arms its
+process-local wall deadline before argument processing and the bounded stdin
+read, so a blocked producer cannot escape the deadline. The two live scenarios
+now retain only orchestration; protocol, HTTP, mailbox, process, topology,
+held-session, and deadline logic are separate focused components.
 
 ### Task 6 non-live evidence and pending live proof
 
-Focused test-driven runs exposed missing read-probe support, the impossible
-empty-mailbox isolation flow, and four additional fail-closed gaps: failed
-lease closes were dropped, the original intent was not revalidated before
-deletion, identical A/B raw slots could be accepted during recovery, and a
-failed pre-replace write deleted its temporary outside explicit recovery. The
-current focused runs passed:
+Focused test-driven runs and reciprocal review exposed missing read-probe
+support, the impossible empty-mailbox isolation flow, unsafe rollback deletion
+before inverse authentication, corrupt or misrouted durable states reaching
+runtime work, non-terminal lease/runtime and held-session close outcomes,
+overly permissive authentication and OAuth response classification, and HTTP
+operations without one total deadline or complete header/body bounds. The
+current 12-class reciprocal run passed `102/102`:
 
-- credential store and application leases: `33/33`;
-- fixed operator probe, including non-empty UID search and bounded
-  `Message-ID` header fetch: `16/16`;
-- isolation orchestration plus held-session cleanup: `17/17`;
-- fixed proof profile/readiness: `5/5`;
-- proof Compose static selectors: `2/2`;
-- fake checked lifecycle: `33/33`; and
-- network-isolation helper: `20/20`.
+- credential recovery, rotation projection, durable repository, and
+  application leases: `50/50`;
+- exact auth classification and the fixed operator probe: `19/19`;
+- OAuth redirect/JSON validation and bounded HTTP transport: `7/7`;
+- held-session, deadline, and mailbox contracts: `15/15`; and
+- bounded process and topology proofs: `11/11`.
+
+The network-isolation helper's independent Python suite passed `21/21`.
 
 Under the no-Docker verification boundary, the non-live Dovecot class run
-passed `143/143` and the 13 non-daemon static/config selectors passed `13/13`,
-for `156/156` with zero skips. The four effective-configuration selectors
+passed `179/179` and the 13 non-daemon static/config selectors passed `13/13`,
+for `192/192` with zero skips. The four effective-configuration selectors
 that invoke `docker run` were not executed. The wider `dashboard-server`
-non-live run passed `408/408`, plus those same `13/13` selectors, for
-`421/421`; it excluded all `*LiveTest` classes, the production browser gate
-that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed
-Docker-backed config class from the broad scan.
+non-live run passed `444/444`, plus those same `13/13` selectors, for
+`457/457`; it excluded all `*LiveTest` classes, the production browser gate
+that requires generated `DASHBOARD_WEB_ASSETS`, and the mixed Docker-backed
+config class from the broad scan.
 
 Task 6 live evidence is **pending**, not passed. No Docker daemon or live
 service operation was performed while implementing this task. A controller
