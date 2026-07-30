@@ -9,6 +9,7 @@ import kotlin.concurrent.withLock
 
 internal class DovecotOperatorApplicationLeaseRegistry(
     initialActive: DovecotOperatorId,
+    private val beforeDrainCloseWorkers: () -> Unit = {},
 ) {
     private val lock = ReentrantLock()
     private var active = initialActive
@@ -34,10 +35,55 @@ internal class DovecotOperatorApplicationLeaseRegistry(
     ): DovecotOperatorApplicationLease =
         acquire(id, closeSession, verification = true)
 
+    fun reserveOpening(
+        id: DovecotOperatorId,
+        cancelOpening: () -> Unit,
+    ): DovecotOperatorOpeningLeaseReservation =
+        reserveOpening(id, cancelOpening, verification = false)
+
+    internal fun reserveVerificationOpening(
+        id: DovecotOperatorId,
+        cancelOpening: () -> Unit,
+    ): DovecotOperatorOpeningLeaseReservation =
+        reserveOpening(id, cancelOpening, verification = true)
+
     private fun acquire(
         id: DovecotOperatorId,
         closeSession: () -> Unit,
         verification: Boolean,
+    ): DovecotOperatorApplicationLease =
+        register(id, verification) {
+            DovecotOperatorApplicationLease(
+                id = id,
+                closeSession = closeSession,
+                release = ::release,
+            )
+        }
+
+    private fun reserveOpening(
+        id: DovecotOperatorId,
+        cancelOpening: () -> Unit,
+        verification: Boolean,
+    ): DovecotOperatorOpeningLeaseReservation {
+        val lease = register(id, verification) {
+            DovecotOperatorApplicationLease.opening(
+                id = id,
+                cancelOpening = cancelOpening,
+                release = ::release,
+            )
+        }
+        return DovecotOperatorOpeningLeaseReservation(
+            lease = lease,
+            recheck = ::recheckReservation,
+            bind = ::bindReservation,
+            commit = ::commitReservation,
+        )
+    }
+
+    private fun register(
+        id: DovecotOperatorId,
+        verification: Boolean,
+        createLease: () -> DovecotOperatorApplicationLease,
     ): DovecotOperatorApplicationLease = lock.withLock {
         check(!activationClosed && id == active && id !in blocked) {
             "Dovecot operator application generation is unavailable"
@@ -54,11 +100,7 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         ) {
             "Dovecot operator application lease capacity is exhausted"
         }
-        DovecotOperatorApplicationLease(
-            id = id,
-            closeSession = closeSession,
-            release = ::release,
-        ).also { lease ->
+        createLease().also { lease ->
             leases.getValue(id).add(lease)
             if (verification) {
                 verificationLeases.add(lease)
@@ -90,16 +132,24 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         var leader = false
         val attempt = lock.withLock {
             blocked.add(id)
-            drainAttempts[id] ?: DrainAttempt(
-                deadlineNanos = System.nanoTime() + DRAIN_TIMEOUT.toNanos(),
-                leases = leases.getValue(id).toList(),
-            ).also { created ->
-                drainAttempts[id] = created
-                leader = true
+            drainAttempts[id] ?: run {
+                val drainingLeases = leases.getValue(id).toList()
+                drainingLeases.forEach { lease ->
+                    lease.markDraining()
+                }
+                DrainAttempt(
+                    deadlineNanos =
+                        System.nanoTime() + DRAIN_TIMEOUT.toNanos(),
+                    leases = drainingLeases,
+                ).also { created ->
+                    drainAttempts[id] = created
+                    leader = true
+                }
             }
         }
         if (leader) {
             val failure = try {
+                beforeDrainCloseWorkers()
                 DovecotOperatorLeaseCloseSession(
                     maximumWorkers = maxOf(1, attempt.leases.size),
                 ).use { session ->
@@ -139,6 +189,45 @@ internal class DovecotOperatorApplicationLeaseRegistry(
         lock.withLock {
             leases.getValue(lease.id).remove(lease)
             verificationLeases.remove(lease)
+        }
+    }
+
+    private fun recheckReservation(
+        lease: DovecotOperatorApplicationLease,
+    ) {
+        lock.withLock {
+            requireReservationAvailable(lease)
+            lease.recheckReservation()
+        }
+    }
+
+    private fun bindReservation(
+        lease: DovecotOperatorApplicationLease,
+        closeSession: () -> Unit,
+    ) {
+        lock.withLock {
+            requireReservationAvailable(lease)
+            lease.bindOpening(closeSession)
+        }
+    }
+
+    private fun commitReservation(
+        lease: DovecotOperatorApplicationLease,
+    ): DovecotOperatorApplicationLease = lock.withLock {
+        requireReservationAvailable(lease)
+        lease.commitOpening()
+    }
+
+    private fun requireReservationAvailable(
+        lease: DovecotOperatorApplicationLease,
+    ) {
+        check(
+            !activationClosed &&
+                lease.id == active &&
+                lease.id !in blocked &&
+                lease in leases.getValue(lease.id),
+        ) {
+            "Dovecot operator opening lease reservation is unavailable"
         }
     }
 
@@ -186,48 +275,281 @@ internal class DovecotOperatorApplicationLeaseRegistry(
     }
 }
 
-internal class DovecotOperatorApplicationLease internal constructor(
+internal class DovecotOperatorOpeningLeaseReservation internal constructor(
+    private val lease: DovecotOperatorApplicationLease,
+    private val recheck:
+        (DovecotOperatorApplicationLease) -> Unit,
+    private val bind:
+        (DovecotOperatorApplicationLease, () -> Unit) -> Unit,
+    private val commit:
+        (DovecotOperatorApplicationLease) ->
+            DovecotOperatorApplicationLease,
+) : AutoCloseable {
+    fun recheck() {
+        recheck(lease)
+    }
+
+    fun bind(closeSession: () -> Unit) {
+        bind(lease, closeSession)
+    }
+
+    fun commit(): DovecotOperatorApplicationLease = commit(lease)
+
+    override fun close() {
+        lease.releaseOpeningByOwner()
+    }
+
+    override fun toString(): String =
+        "DovecotOperatorOpeningLeaseReservation(id=${lease.id.name})"
+}
+
+internal class DovecotOperatorApplicationLease private constructor(
     internal val id: DovecotOperatorId,
-    private val closeSession: () -> Unit,
+    private var binding: LeaseBinding,
     private val release: (DovecotOperatorApplicationLease) -> Unit,
 ) : AutoCloseable {
     private val stateLock = Any()
+    private var draining = false
     private var closed = false
     private var closeAttempt: CloseAttempt? = null
+    private var openingReleaseAttempt: CloseAttempt? = null
+    private var openingCancellationRequested = false
+    private var openingCancellationSucceeded = false
+
+    internal constructor(
+        id: DovecotOperatorId,
+        closeSession: () -> Unit,
+        release: (DovecotOperatorApplicationLease) -> Unit,
+    ) : this(
+        id = id,
+        binding = LeaseBinding.Committed(closeSession),
+        release = release,
+    )
 
     val isOpen: Boolean
         get() = synchronized(stateLock) { !closed }
 
-    override fun close() {
+    internal fun markDraining() {
+        synchronized(stateLock) {
+            if (!closed) {
+                draining = true
+                if (binding is LeaseBinding.Opening) {
+                    openingCancellationRequested = true
+                }
+            }
+        }
+    }
+
+    internal fun recheckReservation() {
+        synchronized(stateLock) {
+            check(
+                !closed &&
+                    !draining &&
+                    (
+                        binding is LeaseBinding.Opening ||
+                            binding is LeaseBinding.Bound
+                        ),
+            ) {
+                "Dovecot operator opening lease reservation is unavailable"
+            }
+        }
+    }
+
+    internal fun bindOpening(closeSession: () -> Unit) {
+        synchronized(stateLock) {
+            check(
+                !closed &&
+                    !draining &&
+                    binding is LeaseBinding.Opening,
+            ) {
+                "Dovecot operator opening lease reservation cannot bind"
+            }
+            binding = LeaseBinding.Bound(closeSession)
+        }
+    }
+
+    internal fun commitOpening(): DovecotOperatorApplicationLease {
+        synchronized(stateLock) {
+            val current = binding
+            check(
+                !closed &&
+                    !draining &&
+                    current is LeaseBinding.Bound,
+            ) {
+                "Dovecot operator opening lease reservation cannot commit"
+            }
+            binding = LeaseBinding.Committed(current.closeSession)
+        }
+        return this
+    }
+
+    internal fun releaseOpeningByOwner() {
         var leader = false
         val attempt = synchronized(stateLock) {
             if (closed) return
-            closeAttempt ?: CloseAttempt().also { created ->
-                closeAttempt = created
+            if (binding !is LeaseBinding.Opening) {
+                return@synchronized null
+            }
+            draining = true
+            openingReleaseAttempt ?: CloseAttempt().also { created ->
+                openingReleaseAttempt = created
                 leader = true
             }
         }
+        if (attempt == null) {
+            close()
+            return
+        }
         if (leader) {
             val failure = try {
-                closeSession()
                 release(this)
                 null
             } catch (failure: Throwable) {
                 failure
             }
-            if (failure == null) {
-                synchronized(stateLock) {
+            synchronized(stateLock) {
+                if (failure == null) {
                     closed = true
+                    attempt.complete(null)
+                    if (openingCancellationSucceeded) {
+                        closeAttempt?.complete(null)
+                    }
+                } else {
+                    attempt.complete(failure)
+                    if (openingReleaseAttempt === attempt) {
+                        openingReleaseAttempt = null
+                    }
                 }
             }
-            attempt.complete(failure)
-            synchronized(stateLock) {
+        }
+        attempt.await()?.let { throw it }
+    }
+
+    override fun close() {
+        val registration = synchronized(stateLock) {
+            when (val current = binding) {
+                is LeaseBinding.Opening -> {
+                    if (!closed) {
+                        draining = true
+                        openingCancellationRequested = true
+                    }
+                    if (closed && !openingCancellationRequested) return
+                    val existing = closeAttempt
+                    val attempt =
+                        existing ?: CloseAttempt().also { created ->
+                            closeAttempt = created
+                        }
+                    CloseRegistration(
+                        attempt = attempt,
+                        leader =
+                            existing == null &&
+                                !openingCancellationSucceeded,
+                        openingCancellation =
+                            current.cancelOpening.takeIf {
+                                existing == null &&
+                                    !openingCancellationSucceeded
+                            },
+                        closeSession = null,
+                    )
+                }
+                is LeaseBinding.Bound -> {
+                    if (closed) return
+                    draining = true
+                    val existing = closeAttempt
+                    val attempt =
+                        existing ?: CloseAttempt().also { created ->
+                            closeAttempt = created
+                        }
+                    CloseRegistration(
+                        attempt = attempt,
+                        leader = existing == null,
+                        openingCancellation = null,
+                        closeSession =
+                            current.closeSession.takeIf { existing == null },
+                    )
+                }
+                is LeaseBinding.Committed -> {
+                    if (closed) return
+                    draining = true
+                    val existing = closeAttempt
+                    val attempt =
+                        existing ?: CloseAttempt().also { created ->
+                            closeAttempt = created
+                        }
+                    CloseRegistration(
+                        attempt = attempt,
+                        leader = existing == null,
+                        openingCancellation = null,
+                        closeSession =
+                            current.closeSession.takeIf { existing == null },
+                    )
+                }
+            }
+        }
+        if (registration.leader) {
+            val openingCancellation = registration.openingCancellation
+            if (openingCancellation != null) {
+                cancelOpening(
+                    attempt = registration.attempt,
+                    cancel = openingCancellation,
+                )
+            } else {
+                closeBoundLease(
+                    attempt = registration.attempt,
+                    closeSession = requireNotNull(registration.closeSession),
+                )
+            }
+        }
+        registration.attempt.await()?.let { throw it }
+    }
+
+    private fun cancelOpening(
+        attempt: CloseAttempt,
+        cancel: () -> Unit,
+    ) {
+        val failure = try {
+            cancel()
+            null
+        } catch (failure: Throwable) {
+            failure
+        }
+        synchronized(stateLock) {
+            if (failure == null) {
+                openingCancellationSucceeded = true
+                if (closed) {
+                    attempt.complete(null)
+                }
+            } else {
+                attempt.complete(failure)
                 if (closeAttempt === attempt) {
                     closeAttempt = null
                 }
             }
         }
-        attempt.await()?.let { throw it }
+    }
+
+    private fun closeBoundLease(
+        attempt: CloseAttempt,
+        closeSession: () -> Unit,
+    ) {
+        val failure = try {
+            closeSession()
+            release(this)
+            null
+        } catch (failure: Throwable) {
+            failure
+        }
+        synchronized(stateLock) {
+            if (failure == null) {
+                closed = true
+            }
+        }
+        attempt.complete(failure)
+        synchronized(stateLock) {
+            if (closeAttempt === attempt) {
+                closeAttempt = null
+            }
+        }
     }
 
     override fun toString(): String =
@@ -255,6 +577,40 @@ internal class DovecotOperatorApplicationLease internal constructor(
     }
 
     private data class CloseOutcome(val failure: Throwable?)
+
+    private data class CloseRegistration(
+        val attempt: CloseAttempt,
+        val leader: Boolean,
+        val openingCancellation: (() -> Unit)?,
+        val closeSession: (() -> Unit)?,
+    )
+
+    private sealed interface LeaseBinding {
+        data class Opening(
+            val cancelOpening: () -> Unit,
+        ) : LeaseBinding
+
+        data class Bound(
+            val closeSession: () -> Unit,
+        ) : LeaseBinding
+
+        data class Committed(
+            val closeSession: () -> Unit,
+        ) : LeaseBinding
+    }
+
+    companion object {
+        fun opening(
+            id: DovecotOperatorId,
+            cancelOpening: () -> Unit,
+            release: (DovecotOperatorApplicationLease) -> Unit,
+        ): DovecotOperatorApplicationLease =
+            DovecotOperatorApplicationLease(
+                id = id,
+                binding = LeaseBinding.Opening(cancelOpening),
+                release = release,
+            )
+    }
 }
 
 internal fun interface DovecotOperatorCredentialProber {
