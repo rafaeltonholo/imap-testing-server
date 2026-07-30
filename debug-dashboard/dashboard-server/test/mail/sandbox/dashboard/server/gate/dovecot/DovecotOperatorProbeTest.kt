@@ -1155,18 +1155,113 @@ class DovecotOperatorProbeTest {
         assertTrue(transport.output.snapshots.isEmpty())
     }
 
+    @Test
+    fun callerInterruptedAfterSuccessSelectionReturnsTransportFailure() {
+        val selected = AtomicReference<DovecotOperatorProbeResult>()
+        val fixture = probeFixture(
+            response = successfulReadPrefixBeforeExamineState()
+                .toByteArray(StandardCharsets.US_ASCII),
+            secret = "interrupted-success-selection-secret",
+            beforeResultNormalization = { result ->
+                selected.set(result)
+                Thread.currentThread().interrupt()
+            },
+        )
+
+        val result = probeWithCapturedInterrupt(fixture)
+
+        assertEquals(DovecotOperatorProbeResult.Success, selected.get())
+        assertEquals(DovecotOperatorProbeResult.TransportFailure, result)
+        assertClosedAndWiped(
+            fixture,
+            "interrupted-success-selection-secret",
+        )
+        assertProbeReleased(fixture)
+    }
+
+    @Test
+    fun callerInterruptedAfterEarlyAuthenticationSelectionReturnsTransportFailure() {
+        val selected = AtomicReference<DovecotOperatorProbeResult>()
+        val fixture = probeFixture(
+            response = (
+                "* OK ready\r\n" +
+                    "+ VXNlcm5hbWU6\r\n" +
+                    "+ UGFzc3dvcmQ6\r\n" +
+                    "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+            secret = "interrupted-auth-selection-secret",
+            beforeResultNormalization = { result ->
+                selected.set(result)
+                Thread.currentThread().interrupt()
+            },
+        )
+
+        val result = probeWithCapturedInterrupt(fixture)
+
+        assertEquals(
+            DovecotOperatorProbeResult.AuthenticationFailure,
+            selected.get(),
+        )
+        assertEquals(DovecotOperatorProbeResult.TransportFailure, result)
+        assertClosedAndWiped(fixture, "interrupted-auth-selection-secret")
+        assertProbeReleased(fixture)
+    }
+
+    @Test
+    fun callerInterruptedAfterProtocolCatchReturnsTransportFailure() {
+        val selected = AtomicReference<DovecotOperatorProbeResult>()
+        val fixture = probeFixture(
+            response = "* BAD invalid greeting\r\n"
+                .toByteArray(StandardCharsets.US_ASCII),
+            secret = "interrupted-protocol-selection-secret",
+            beforeResultNormalization = { result ->
+                selected.set(result)
+                Thread.currentThread().interrupt()
+            },
+        )
+
+        val result = probeWithCapturedInterrupt(fixture)
+
+        assertEquals(
+            DovecotOperatorProbeResult.ProtocolFailure,
+            selected.get(),
+        )
+        assertEquals(DovecotOperatorProbeResult.TransportFailure, result)
+        assertClosedAndWiped(
+            fixture,
+            "interrupted-protocol-selection-secret",
+        )
+        assertProbeReleased(fixture)
+    }
+
+    private fun probeWithCapturedInterrupt(
+        fixture: ProbeFixture,
+    ): DovecotOperatorProbeResult {
+        try {
+            val result = fixture.probe.probe(TARGET, fixture.credential)
+            assertTrue(Thread.currentThread().isInterrupted)
+            return result
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
     private fun probeFixture(
         response: ByteArray,
         secret: String,
         inputFactory: (ByteArray) -> InputStream = ::ByteArrayInputStream,
         clock: DovecotOperatorProbeClock = DovecotOperatorProbeClock(System::nanoTime),
         requireMailboxRead: Boolean = false,
+        beforeResultNormalization: (DovecotOperatorProbeResult) -> Unit = {},
     ): ProbeFixture {
         val transport = RecordingTransport(inputFactory(response))
         val secretBytes = secret.toByteArray(StandardCharsets.US_ASCII)
         val credential = DovecotOperatorCredential(
             DovecotOperatorId.A,
             DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val workers = DovecotBoundedOperationWorkers(
+            nanoTime = clock::nanoTime,
         )
         return ProbeFixture(
             probe = DovecotOperatorProbe(
@@ -1176,13 +1271,13 @@ class DovecotOperatorProbeTest {
                 },
                 clock = clock,
                 requireMailboxRead = requireMailboxRead,
-                operationWorkers = DovecotBoundedOperationWorkers(
-                    nanoTime = clock::nanoTime,
-                ),
+                operationWorkers = workers,
+                beforeResultNormalization = beforeResultNormalization,
             ),
             transport = transport,
             credential = credential,
             secretBytes = secretBytes,
+            workers = workers,
         )
     }
 
@@ -1201,6 +1296,16 @@ class DovecotOperatorProbeTest {
             snapshot.fill(0)
         }
         assertFalse(fixture.transport.toString().contains(canary))
+    }
+
+    private fun assertProbeReleased(fixture: ProbeFixture) {
+        assertProbeEventually {
+            fixture.workers.snapshot().let { snapshot ->
+                snapshot.activeOperations == 0 &&
+                    snapshot.abandonedOperations == 0 &&
+                    snapshot.activeActors == 0
+            }
+        }
     }
 
     private class OneByteAtATimeInputStream(
@@ -1337,6 +1442,7 @@ class DovecotOperatorProbeTest {
         val transport: RecordingTransport,
         val credential: DovecotOperatorCredential,
         val secretBytes: ByteArray,
+        val workers: DovecotBoundedOperationWorkers,
     )
 
     private fun shortProbeDeadlineClock(): DovecotOperatorProbeClock {

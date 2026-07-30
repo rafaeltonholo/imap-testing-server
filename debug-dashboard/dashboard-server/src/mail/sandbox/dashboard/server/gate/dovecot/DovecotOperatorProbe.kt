@@ -70,8 +70,23 @@ internal class DovecotOperatorProbe(
     private val requireMailboxRead: Boolean = false,
     private val operationWorkers: DovecotBoundedOperationWorkers =
         DovecotBoundedOperationWorkers.processWide,
+    private val beforeResultNormalization:
+        (DovecotOperatorProbeResult) -> Unit = {},
 ) {
     fun probe(
+        target: DovecotOperatorTarget,
+        credential: DovecotOperatorCredential,
+    ): DovecotOperatorProbeResult {
+        val selected = selectResult(target, credential)
+        beforeResultNormalization(selected)
+        return if (Thread.currentThread().isInterrupted) {
+            DovecotOperatorProbeResult.TransportFailure
+        } else {
+            selected
+        }
+    }
+
+    private fun selectResult(
         target: DovecotOperatorTarget,
         credential: DovecotOperatorCredential,
     ): DovecotOperatorProbeResult {
