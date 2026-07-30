@@ -3,6 +3,7 @@ package mail.sandbox.dashboard.server.gate.dovecot
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.util.Collections
 
 internal class DovecotOperatorRuntime private constructor(
     val launchProfile: DovecotOperatorLaunchProfile,
@@ -19,7 +20,7 @@ internal class DovecotOperatorRuntime private constructor(
             return production(
                 repositoryRoot = repositoryRoot,
                 startupEnvironment = System.getenv(),
-                dockerCandidates = PRODUCTION_DOCKER_CANDIDATES,
+                dockerCandidates = productionDockerCandidates,
             )
         }
 
@@ -124,10 +125,13 @@ internal class DovecotOperatorRuntime private constructor(
             "Dovecot operator Compose project is invalid"
         private const val PROOF_PROJECT_NAME =
             "mail-sandbox-task5-proof"
-        private val PRODUCTION_DOCKER_CANDIDATES = listOf(
-            Path.of("/usr/local/bin/docker"),
-            Path.of("/opt/homebrew/bin/docker"),
-            Path.of("/usr/bin/docker"),
-        )
+        internal val productionDockerCandidates: List<Path> =
+            Collections.unmodifiableList(
+                listOf(
+                    Path.of("/usr/local/bin/docker"),
+                    Path.of("/opt/homebrew/bin/docker"),
+                    Path.of("/usr/bin/docker"),
+                ),
+            )
     }
 }

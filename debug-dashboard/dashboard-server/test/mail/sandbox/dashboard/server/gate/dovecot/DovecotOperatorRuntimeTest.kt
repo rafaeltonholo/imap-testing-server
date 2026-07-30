@@ -14,6 +14,25 @@ import kotlin.test.assertTrue
 
 class DovecotOperatorRuntimeTest {
     @Test
+    fun productionDockerCandidateAllowlistHasTheAuditedImmutableOrder() {
+        val candidates =
+            DovecotOperatorRuntime.productionDockerCandidates
+
+        assertEquals(
+            listOf(
+                Path.of("/usr/local/bin/docker"),
+                Path.of("/opt/homebrew/bin/docker"),
+                Path.of("/usr/bin/docker"),
+            ),
+            candidates,
+        )
+        assertFailsWith<UnsupportedOperationException> {
+            (candidates as MutableList<Path>)[0] =
+                Path.of("/request/docker")
+        }
+    }
+
+    @Test
     fun explicitStartupOverrideWinsOverEveryCandidate() =
         withRuntimeFixture { fixture ->
             val fallback = fixture.executable("fallback-docker")
