@@ -746,18 +746,25 @@ characterization. The repairs now:
 - prove registered open, abort, and close actors retain capacity through the
   deterministic `3 -> 2 -> 1 -> 0` release sequence.
 
-Independent state-machine, code-quality, and test-determinism reviews approved
-the final coordinator, Probe, Held, HTTP, ownership, and cleanup behavior with
-no remaining Important finding. Focused non-live evidence passed:
+Independent state-machine and code-quality reviews approved the final
+coordinator, Probe, Held, HTTP, ownership, and cleanup behavior with no
+remaining production Important finding. A subsequent external spec review
+found one Important test-proof issue: the Held deadline test read transport
+cleanup state after caller completion but before the independent close actor
+had necessarily completed. The reviewer reproduced `77/78` twice in the exact
+five-class order, invalidating the earlier three-run "no flake" claim.
 
-- the bounded operation coordinator: `23/23` twice;
-- Probe result normalization: `26/26`;
-- the Held deadline class: `28/28`, and Held deadline plus session:
-  `33/33` twice;
-- bounded HTTP and OAuth validation: `17/17` twice;
+The test-only repair now waits on exact abort/close completion events before
+reading actor-owned cleanup state, gives the affected cases owned
+coordinators, and proves final coordinator accounting returns to zero during
+cleanup. A follow-up read-only review found no remaining Important proof
+finding. Post-repair non-live evidence passed:
+
+- the Held deadline class: `28/28`;
 - the combined coordinator, Probe, Held, and HTTP selection: `99/99`; and
-- the exact reported five-class order: `78/78` on each of three consecutive
-  identical runs, with no flake.
+- the exact reported five-class order: `78/78` on each of five consecutive,
+  uninterrupted, identical post-repair runs, including all `33` Held
+  deadline and session tests each time.
 
 The current 13-class reciprocal run passed `169/169`:
 
