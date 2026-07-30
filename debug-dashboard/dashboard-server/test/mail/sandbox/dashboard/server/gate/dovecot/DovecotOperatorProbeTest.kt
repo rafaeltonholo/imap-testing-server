@@ -16,6 +16,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DovecotOperatorProbeTest {
@@ -604,6 +605,445 @@ class DovecotOperatorProbeTest {
         )
         assertClosedAndWiped(fixture, "line-bound-secret")
         response.fill(0)
+    }
+
+    @Test
+    fun typedResultsRemainProvisionalUntilFiniteCloseCompletes() {
+        val cases = listOf(
+            ProbeCloseCase(
+                name = "success",
+                response = successfulReadPrefixBeforeExamineState()
+                    .toByteArray(StandardCharsets.US_ASCII),
+                expected = DovecotOperatorProbeResult.Success,
+            ),
+            ProbeCloseCase(
+                name = "authentication",
+                response = (
+                    "* OK ready\r\n" +
+                        "+ VXNlcm5hbWU6\r\n" +
+                        "+ UGFzc3dvcmQ6\r\n" +
+                        "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n"
+                    ).toByteArray(StandardCharsets.US_ASCII),
+                expected = DovecotOperatorProbeResult.AuthenticationFailure,
+            ),
+            ProbeCloseCase(
+                name = "authorization",
+                response = (
+                    "* OK ready\r\n" +
+                        "+ VXNlcm5hbWU6\r\n" +
+                        "+ UGFzc3dvcmQ6\r\n" +
+                        "A001 NO [AUTHORIZATIONFAILED] Authorization failed\r\n"
+                    ).toByteArray(StandardCharsets.US_ASCII),
+                expected = DovecotOperatorProbeResult.AuthorizationFailure,
+            ),
+            ProbeCloseCase(
+                name = "protocol",
+                response = "* BAD invalid greeting\r\n"
+                    .toByteArray(StandardCharsets.US_ASCII),
+                expected = DovecotOperatorProbeResult.ProtocolFailure,
+            ),
+        )
+
+        cases.forEach { case ->
+            val closeStarted = CountDownLatch(1)
+            val releaseClose = CountDownLatch(1)
+            val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+            val transport = ScriptedCloseTransport(
+                response = case.response,
+                onClose = {
+                    closeStarted.countDown()
+                    releaseClose.await()
+                },
+            )
+            val secretBytes =
+                "provisional-${case.name}-secret"
+                    .toByteArray(StandardCharsets.US_ASCII)
+            val credential = DovecotOperatorCredential(
+                DovecotOperatorId.A,
+                DovecotOperatorSecret.takeOwnership(secretBytes),
+            )
+            val normalized = AtomicReference<DovecotOperatorProbeResult>()
+            val probe = DovecotOperatorProbe(
+                transportFactory = registeredFactory(transport),
+                operationWorkers = workers,
+                beforeResultNormalization = normalized::set,
+            )
+            val result = AtomicReference<DovecotOperatorProbeResult>()
+            val failure = AtomicReference<Throwable>()
+            val caller = Thread(
+                {
+                    try {
+                        result.set(probe.probe(TARGET, credential))
+                    } catch (caught: Throwable) {
+                        failure.set(caught)
+                    }
+                },
+                "test-provisional-${case.name}-probe",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+
+            try {
+                assertTrue(closeStarted.await(1, TimeUnit.SECONDS))
+                caller.join(300)
+
+                assertTrue(
+                    caller.isAlive,
+                    "${case.name} escaped before synchronous close",
+                )
+                assertNull(result.get())
+                assertNull(normalized.get())
+                assertEquals(
+                    DovecotBoundedOperationSnapshot(
+                        activeOperations = 1,
+                        activeActors = 1,
+                        peakActors = 1,
+                    ),
+                    workers.snapshot(),
+                )
+                assertEquals(0, transport.abortCalls.get())
+                assertEquals(
+                    listOf(DovecotBoundedActorRole.Io),
+                    transport.closeRoles(),
+                )
+            } finally {
+                releaseClose.countDown()
+                caller.join(2_000)
+            }
+
+            assertFalse(caller.isAlive)
+            assertNull(failure.get())
+            assertEquals(case.expected, result.get())
+            assertEquals(case.expected, normalized.get())
+            assertEquals(1, transport.closeCalls.get())
+            assertTrue(transport.closed)
+            assertTrue(secretBytes.all { byte -> byte == 0.toByte() })
+            assertProbeEventually {
+                workers.snapshot() ==
+                    DovecotBoundedOperationSnapshot(peakActors = 1)
+            }
+        }
+    }
+
+    @Test
+    fun failedFiniteCloseReturnsTransportFailureAndRetainsCleanupOwnership() {
+        val firstCloseAttempted = CountDownLatch(1)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = ScriptedCloseTransport(
+            response = successfulReadPrefixBeforeExamineState()
+                .toByteArray(StandardCharsets.US_ASCII),
+            onAbort = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+            onClose = { call ->
+                if (call == 1) {
+                    firstCloseAttempted.countDown()
+                    throw IOException("injected finite close failure")
+                }
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+        )
+        val secretBytes =
+            "failed-finite-close-secret".toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val failure = AtomicReference<Throwable>()
+        val caller = startProbeCaller(
+            name = "test-failed-finite-close-probe",
+            probe = DovecotOperatorProbe(
+                transportFactory = registeredFactory(transport),
+                operationWorkers = workers,
+            ),
+            credential = credential,
+            result = result,
+            failure = failure,
+        )
+
+        try {
+            assertTrue(firstCloseAttempted.await(1, TimeUnit.SECONDS))
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(caller.isAlive)
+            assertNull(failure.get())
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                result.get(),
+            )
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 2,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+            assertTrue(secretBytes.all { byte -> byte == 0.toByte() })
+        } finally {
+            releaseCancellation.countDown()
+            caller.join(2_000)
+        }
+
+        assertProbeEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 3)
+        }
+    }
+
+    @Test
+    fun finiteCloseDeadlineReturnsTransportFailureAndRetainsCleanupOwnership() {
+        val normalCloseStarted = CountDownLatch(1)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = ScriptedCloseTransport(
+            response = successfulReadPrefixBeforeExamineState()
+                .toByteArray(StandardCharsets.US_ASCII),
+            onAbort = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+            onClose = { call ->
+                if (call == 1) {
+                    normalCloseStarted.countDown()
+                } else {
+                    cancellationStarted.countDown()
+                }
+                releaseCancellation.await()
+            },
+        )
+        val secretBytes =
+            "finite-close-deadline-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val failure = AtomicReference<Throwable>()
+        val caller = startProbeCaller(
+            name = "test-finite-close-deadline-probe",
+            probe = DovecotOperatorProbe(
+                transportFactory = registeredFactory(transport),
+                clock = shortProbeDeadlineClock(),
+                operationWorkers = workers,
+            ),
+            credential = credential,
+            result = result,
+            failure = failure,
+        )
+
+        try {
+            assertTrue(normalCloseStarted.await(1, TimeUnit.SECONDS))
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(caller.isAlive)
+            assertNull(failure.get())
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                result.get(),
+            )
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+            assertTrue(secretBytes.all { byte -> byte == 0.toByte() })
+        } finally {
+            releaseCancellation.countDown()
+            caller.join(2_000)
+        }
+
+        assertProbeEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 3)
+        }
+    }
+
+    @Test
+    fun callerInterruptedDuringFiniteCloseReturnsTransportFailureAndRetainsOwnership() {
+        val normalCloseStarted = CountDownLatch(1)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val transport = ScriptedCloseTransport(
+            response = successfulReadPrefixBeforeExamineState()
+                .toByteArray(StandardCharsets.US_ASCII),
+            onAbort = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+            onClose = { call ->
+                if (call == 1) {
+                    normalCloseStarted.countDown()
+                } else {
+                    cancellationStarted.countDown()
+                }
+                releaseCancellation.await()
+            },
+        )
+        val secretBytes =
+            "interrupted-finite-close-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val failure = AtomicReference<Throwable>()
+        val interruptRestored = AtomicBoolean()
+        val caller = Thread(
+            {
+                try {
+                    result.set(
+                        DovecotOperatorProbe(
+                            transportFactory = registeredFactory(transport),
+                            operationWorkers = workers,
+                        ).probe(TARGET, credential),
+                    )
+                    interruptRestored.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                } finally {
+                    Thread.interrupted()
+                }
+            },
+            "test-interrupted-finite-close-probe",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(normalCloseStarted.await(1, TimeUnit.SECONDS))
+            caller.interrupt()
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(caller.isAlive)
+            assertNull(failure.get())
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                result.get(),
+            )
+            assertTrue(interruptRestored.get())
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 3,
+                    peakActors = 3,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+            assertTrue(secretBytes.all { byte -> byte == 0.toByte() })
+        } finally {
+            releaseCancellation.countDown()
+            caller.join(2_000)
+        }
+
+        assertProbeEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 3)
+        }
+    }
+
+    @Test
+    fun allocatedCallbackFailureReturnsTransportFailureWithBothTargetsOwned() {
+        val cancellationStarted = CountDownLatch(4)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val first = ScriptedCloseTransport(
+            response = ByteArray(0),
+            onAbort = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+            onClose = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+        )
+        val second = ScriptedCloseTransport(
+            response = ByteArray(0),
+            onAbort = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+            onClose = {
+                cancellationStarted.countDown()
+                releaseCancellation.await()
+            },
+        )
+        val secretBytes =
+            "allocated-callback-failure-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            DovecotOperatorId.A,
+            DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val result = AtomicReference<DovecotOperatorProbeResult>()
+        val failure = AtomicReference<Throwable>()
+        val caller = startProbeCaller(
+            name = "test-allocated-callback-failure-probe",
+            probe = DovecotOperatorProbe(
+                transportFactory = DovecotOperatorTransportFactory { register ->
+                    register(first)
+                    register(second)
+                    error("a second allocation callback must be rejected")
+                },
+                operationWorkers = workers,
+            ),
+            credential = credential,
+            result = result,
+            failure = failure,
+        )
+
+        try {
+            assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+            caller.join(1_000)
+
+            assertFalse(caller.isAlive)
+            assertNull(failure.get())
+            assertEquals(
+                DovecotOperatorProbeResult.TransportFailure,
+                result.get(),
+            )
+            assertEquals(
+                DovecotBoundedOperationSnapshot(
+                    abandonedOperations = 1,
+                    activeActors = 4,
+                    peakActors = 5,
+                ),
+                workers.snapshot(),
+            )
+            assertNull(workers.tryAcquire(deadlineAfter()))
+            assertTrue(secretBytes.all { byte -> byte == 0.toByte() })
+        } finally {
+            releaseCancellation.countDown()
+            caller.join(2_000)
+        }
+
+        assertProbeEventually {
+            workers.snapshot() ==
+                DovecotBoundedOperationSnapshot(peakActors = 5)
+        }
     }
 
     @Test
@@ -1336,6 +1776,49 @@ class DovecotOperatorProbeTest {
         }
     }
 
+    private class ScriptedCloseTransport(
+        response: ByteArray,
+        private val onAbort: () -> Unit = {},
+        private val onClose: (Int) -> Unit = {},
+    ) : DovecotOperatorTransport {
+        override val input: InputStream = ByteArrayInputStream(response)
+        override val outputStream: OutputStream = RecordingOutputStream()
+        val abortCalls = AtomicInteger()
+        val closeCalls = AtomicInteger()
+        private val closeThreadNames = mutableListOf<String>()
+
+        @Volatile
+        var closed = false
+            private set
+
+        override fun abort() {
+            abortCalls.incrementAndGet()
+            onAbort()
+        }
+
+        override fun close() {
+            val call = closeCalls.incrementAndGet()
+            synchronized(closeThreadNames) {
+                closeThreadNames += Thread.currentThread().name
+            }
+            onClose(call)
+            closed = true
+        }
+
+        fun closeRoles(): List<DovecotBoundedActorRole> =
+            synchronized(closeThreadNames) {
+                closeThreadNames.map { name ->
+                    when {
+                        name.startsWith("dovecot-bounded-operation-io-") ->
+                            DovecotBoundedActorRole.Io
+                        name.startsWith("dovecot-bounded-operation-close-") ->
+                            DovecotBoundedActorRole.Close
+                        else -> error("Unexpected close thread: $name")
+                    }
+                }
+            }
+    }
+
     private class TripleBlockingTransport(
         private val writeStarted: CountDownLatch,
         private val abortStarted: CountDownLatch,
@@ -1447,6 +1930,44 @@ class DovecotOperatorProbeTest {
         val secretBytes: ByteArray,
         val workers: DovecotBoundedOperationWorkers,
     )
+
+    private data class ProbeCloseCase(
+        val name: String,
+        val response: ByteArray,
+        val expected: DovecotOperatorProbeResult,
+    )
+
+    private fun registeredFactory(
+        transport: DovecotOperatorTransport,
+    ): DovecotOperatorTransportFactory =
+        DovecotOperatorTransportFactory { register ->
+            register(transport)
+            transport
+        }
+
+    private fun startProbeCaller(
+        name: String,
+        probe: DovecotOperatorProbe,
+        credential: DovecotOperatorCredential,
+        result: AtomicReference<DovecotOperatorProbeResult>,
+        failure: AtomicReference<Throwable>,
+    ): Thread =
+        Thread(
+            {
+                try {
+                    result.set(probe.probe(TARGET, credential))
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            },
+            name,
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+    private fun deadlineAfter(): Long =
+        System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
 
     private fun shortProbeDeadlineClock(): DovecotOperatorProbeClock {
         val productionDeadlineNanos = TimeUnit.SECONDS.toNanos(5)

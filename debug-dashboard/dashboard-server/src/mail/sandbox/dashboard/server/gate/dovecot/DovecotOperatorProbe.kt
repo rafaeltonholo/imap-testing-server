@@ -105,87 +105,113 @@ internal class DovecotOperatorProbe(
             }
             val opened = openTransport(acquired)
             val io = ProbeIo(acquired, opened)
-            requireBeforeDeadline(deadline)
-            requireGreeting(io)
-
-            authenticateLogin(
-                io = io,
-                target = target,
-                credential = credential,
-            )
-            when (
-                readAuthenticationCompletion(
+            val provisional = try {
+                selectProtocolResult(
                     io = io,
-                    tag = LOGIN_TAG,
+                    target = target,
+                    credential = credential,
+                    deadline = deadline,
                 )
-            ) {
-                DovecotAuthenticationResponse.Success -> Unit
-                DovecotAuthenticationResponse.PermanentFailure ->
-                    return DovecotOperatorProbeResult.AuthenticationFailure
-                DovecotAuthenticationResponse.AuthorizationFailure ->
-                    return DovecotOperatorProbeResult.AuthorizationFailure
-                DovecotAuthenticationResponse.Indeterminate ->
-                    return DovecotOperatorProbeResult.ProtocolFailure
+            } catch (_: DovecotOperatorProtocolException) {
+                DovecotOperatorProbeResult.ProtocolFailure
             }
-
-            writeFixedCommand(
-                io = io,
-                command = LIST_COMMAND,
-            )
-            when (
-                readTaggedCompletion(
-                    io = io,
-                    tag = LIST_TAG,
-                    requiredUntaggedPrefix = LIST_RESPONSE_PREFIX,
-                )
-            ) {
-                TaggedCompletion.Ok -> {
-                    if (requireMailboxRead) {
-                        val mailboxReadState = MailboxReadState()
-                        writeFixedCommand(
-                            io = io,
-                            command = EXAMINE_INBOX_COMMAND,
-                        )
-                        when (
-                            readTaggedCompletion(
-                                io = io,
-                                tag = EXAMINE_TAG,
-                                mailboxReadState = mailboxReadState,
-                            )
-                        ) {
-                            TaggedCompletion.Ok -> Unit
-                            TaggedCompletion.No,
-                            TaggedCompletion.Bad,
-                            -> return DovecotOperatorProbeResult.ProtocolFailure
-                        }
-                        val selectedUid = searchFirstMessageUid(
-                            io = io,
-                            mailboxReadState = mailboxReadState,
-                        )
-                        fetchAndValidateMessageId(
-                            io = io,
-                            uid = selectedUid,
-                            mailboxReadState = mailboxReadState,
-                        )
-                    }
-                    requireBeforeDeadline(deadline)
-                    DovecotOperatorProbeResult.Success
-                }
-                TaggedCompletion.No,
-                TaggedCompletion.Bad,
-                -> DovecotOperatorProbeResult.ProtocolFailure
+            acquired.execute {
+                opened.close()
             }
-        } catch (_: DovecotOperatorProtocolException) {
-            DovecotOperatorProbeResult.ProtocolFailure
+            if (!acquired.completeFinite()) {
+                return DovecotOperatorProbeResult.TransportFailure
+            }
+            operation = null
+            provisional
         } catch (_: Exception) {
             DovecotOperatorProbeResult.TransportFailure
         } finally {
             credential.close()
             runCatching { watchdogHandle?.close() }
-            operation?.abandon()
-            runCatching {
-                operation?.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
+            operation?.let { pending ->
+                pending.abandon()
+                runCatching {
+                    pending.awaitReleaseWithin(CANCELLATION_WAIT_NANOS)
+                }
             }
+        }
+    }
+
+    private fun selectProtocolResult(
+        io: ProbeIo,
+        target: DovecotOperatorTarget,
+        credential: DovecotOperatorCredential,
+        deadline: Long,
+    ): DovecotOperatorProbeResult {
+        requireBeforeDeadline(deadline)
+        requireGreeting(io)
+
+        authenticateLogin(
+            io = io,
+            target = target,
+            credential = credential,
+        )
+        when (
+            readAuthenticationCompletion(
+                io = io,
+                tag = LOGIN_TAG,
+            )
+        ) {
+            DovecotAuthenticationResponse.Success -> Unit
+            DovecotAuthenticationResponse.PermanentFailure ->
+                return DovecotOperatorProbeResult.AuthenticationFailure
+            DovecotAuthenticationResponse.AuthorizationFailure ->
+                return DovecotOperatorProbeResult.AuthorizationFailure
+            DovecotAuthenticationResponse.Indeterminate ->
+                return DovecotOperatorProbeResult.ProtocolFailure
+        }
+
+        writeFixedCommand(
+            io = io,
+            command = LIST_COMMAND,
+        )
+        return when (
+            readTaggedCompletion(
+                io = io,
+                tag = LIST_TAG,
+                requiredUntaggedPrefix = LIST_RESPONSE_PREFIX,
+            )
+        ) {
+            TaggedCompletion.Ok -> {
+                if (requireMailboxRead) {
+                    val mailboxReadState = MailboxReadState()
+                    writeFixedCommand(
+                        io = io,
+                        command = EXAMINE_INBOX_COMMAND,
+                    )
+                    when (
+                        readTaggedCompletion(
+                            io = io,
+                            tag = EXAMINE_TAG,
+                            mailboxReadState = mailboxReadState,
+                        )
+                    ) {
+                        TaggedCompletion.Ok -> Unit
+                        TaggedCompletion.No,
+                        TaggedCompletion.Bad,
+                        -> return DovecotOperatorProbeResult.ProtocolFailure
+                    }
+                    val selectedUid = searchFirstMessageUid(
+                        io = io,
+                        mailboxReadState = mailboxReadState,
+                    )
+                    fetchAndValidateMessageId(
+                        io = io,
+                        uid = selectedUid,
+                        mailboxReadState = mailboxReadState,
+                    )
+                }
+                requireBeforeDeadline(deadline)
+                DovecotOperatorProbeResult.Success
+            }
+            TaggedCompletion.No,
+            TaggedCompletion.Bad,
+            -> DovecotOperatorProbeResult.ProtocolFailure
         }
     }
 
@@ -690,38 +716,51 @@ internal class DovecotOperatorProbe(
         private val operation: DovecotBoundedOperation,
         private val transport: DovecotOperatorTransport,
     ) {
-        fun readLine(): ByteArray = operation.execute(
-            disposeLate = { bytes: ByteArray -> bytes.fill(0) },
-        ) {
-            val buffer = ByteArray(MAX_LINE_BYTES + 1)
-            var size = 0
-            try {
-                while (true) {
-                    val value = transport.input.read()
-                    if (value < 0) {
-                        throw IOException(
-                            "Dovecot operator response was truncated",
-                        )
+        fun readLine(): ByteArray {
+            val result = operation.execute<ProbeLineRead>(
+                disposeLate = { late ->
+                    if (late is ProbeLineRead.Value) {
+                        late.bytes.fill(0)
                     }
-                    if (value == LINE_FEED) {
-                        if (
-                            size == 0 ||
-                            buffer[size - 1] != CARRIAGE_RETURN.toByte()
-                        ) {
-                            throw DovecotOperatorProtocolException()
+                },
+            ) {
+                val buffer = ByteArray(MAX_LINE_BYTES + 1)
+                var size = 0
+                try {
+                    while (true) {
+                        val value = transport.input.read()
+                        if (value < 0) {
+                            throw IOException(
+                                "Dovecot operator response was truncated",
+                            )
                         }
-                        return@execute buffer.copyOf(size - 1)
+                        if (value == LINE_FEED) {
+                            if (
+                                size == 0 ||
+                                buffer[size - 1] != CARRIAGE_RETURN.toByte()
+                            ) {
+                                return@execute ProbeLineRead.ProtocolViolation
+                            }
+                            return@execute ProbeLineRead.Value(
+                                buffer.copyOf(size - 1),
+                            )
+                        }
+                        if (size == buffer.size) {
+                            return@execute ProbeLineRead.ProtocolViolation
+                        }
+                        buffer[size] = value.toByte()
+                        size += 1
                     }
-                    if (size == buffer.size) {
-                        throw DovecotOperatorProtocolException()
-                    }
-                    buffer[size] = value.toByte()
-                    size += 1
+                    @Suppress("UNREACHABLE_CODE")
+                    ProbeLineRead.Value(ByteArray(0))
+                } finally {
+                    buffer.fill(0)
                 }
-                @Suppress("UNREACHABLE_CODE")
-                ByteArray(0)
-            } finally {
-                buffer.fill(0)
+            }
+            return when (result) {
+                is ProbeLineRead.Value -> result.bytes
+                ProbeLineRead.ProtocolViolation ->
+                    throw DovecotOperatorProtocolException()
             }
         }
 
@@ -763,6 +802,14 @@ internal class DovecotOperatorProbe(
                 transport.outputStream.flush()
             }
         }
+    }
+
+    private sealed interface ProbeLineRead {
+        data class Value(
+            val bytes: ByteArray,
+        ) : ProbeLineRead
+
+        data object ProtocolViolation : ProbeLineRead
     }
 
     private fun requireBeforeDeadline(deadline: Long) {
