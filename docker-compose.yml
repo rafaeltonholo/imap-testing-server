@@ -28,8 +28,6 @@ services:
       - dovecot-operator
     image: dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:2993:31993"   # Operator-only IMAPS
     volumes:
       - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
       - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
@@ -63,8 +61,9 @@ services:
           grep -qx 'throttle_secs: 0' &&
           printf '%s\n' "$$imap_login_status" |
           grep -qx 'doveadm_stop: n' &&
-          grep -Eq '^[[:space:]]*[0-9]+:[[:space:]]+[[:xdigit:]]{8}:7CF9[[:space:]]+[[:xdigit:]]{8}:[[:xdigit:]]{4}[[:space:]]+0A[[:space:]]'
-          /proc/net/tcp
+          listener="$$(awk 'FNR == 1 { next } { expected_address_length = FILENAME ~ /tcp6$$/ ? 32 : 8; local_field_count = split($$2, parts, ":"); if (NF < 10 || $$1 !~ /^[0-9]+:$$/ || local_field_count != 2 || length(parts[1]) != expected_address_length || parts[1] !~ /^[[:xdigit:]]+$$/ || length(parts[2]) != 4 || parts[2] !~ /^[[:xdigit:]]+$$/ || length($$4) != 2 || $$4 !~ /^[[:xdigit:]]+$$/) { malformed = 1; next } if ($$4 == "0A" && parts[2] == "7CF9") { count++; listener = $$2 } } END { if (!malformed && count == 1 && listener == "0100007F:7CF9") { print listener; exit 0 } exit 1 }'
+          /proc/net/tcp /proc/net/tcp6)" &&
+          test "$$listener" = '0100007F:7CF9'
       interval: 5s
       timeout: 3s
       retries: 5
@@ -119,3 +118,4 @@ services:
 networks:
   operator-ingress:
     driver: bridge
+    internal: true

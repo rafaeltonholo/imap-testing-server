@@ -27,6 +27,7 @@ def main():
             "-keyout", str(key),
             "-out", str(cert),
             "-subj", "/CN=localhost",
+            "-addext", "subjectAltName=DNS:localhost",
         ],
         check=True,
         capture_output=True,

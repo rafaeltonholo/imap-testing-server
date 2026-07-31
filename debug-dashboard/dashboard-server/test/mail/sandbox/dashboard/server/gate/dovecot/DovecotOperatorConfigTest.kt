@@ -9,7 +9,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
@@ -25,6 +27,7 @@ import kotlin.test.assertTrue
 
 class DovecotOperatorConfigTest {
     private val repositoryRoot = repositoryRoot()
+    private val baseComposePath = repositoryRoot.resolve("docker-compose.yml")
     private val operatorConfigPath = repositoryRoot.resolve("config/operator/dovecot.conf")
     private val proofComposePath = repositoryRoot.resolve(
         "debug-dashboard/dashboard-server/testResources/" +
@@ -43,6 +46,12 @@ class DovecotOperatorConfigTest {
     )
     private val designSpecPath = repositoryRoot.resolve(
         "docs/superpowers/specs/2026-07-23-debug-dashboard-design.md",
+    )
+    private val operatorTransportPlanPath = repositoryRoot.resolve(
+        "docs/superpowers/plans/2026-07-30-dovecot-operator-stdio-transport.md",
+    )
+    private val operatorTransportDesignPath = repositoryRoot.resolve(
+        "docs/superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md",
     )
     private val startupLiveTestPath = repositoryRoot.resolve(
         "debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/" +
@@ -161,6 +170,33 @@ class DovecotOperatorConfigTest {
     }
 
     @Test
+    fun imapsListenerMirrorsServiceUsersInsteadOfFallingBackToImageIdentities() {
+        val effective = effectiveOperatorConfig()
+        val global = topLevelAssignments(effective)
+        val listener = nestedBlockAssignments(
+            text = effective,
+            outerBlockType = "service",
+            outerBlockName = "imap-login",
+            nestedBlockName = "inet_listener imaps",
+        )
+        val serviceUserKeys = setOf(
+            "default_internal_group",
+            "default_internal_user",
+            "default_login_user",
+        )
+
+        assertEquals(
+            global.filterKeys(serviceUserKeys::contains),
+            listener.filterKeys(serviceUserKeys::contains),
+            "The 2.4 listener-filter context must mirror the global vmail " +
+                "identities instead of falling back to absent image users",
+        )
+        assertEquals("127.0.0.1", listener.getValue("listen"))
+        assertEquals("31993", listener.getValue("port"))
+        assertEquals("yes", listener.getValue("ssl"))
+    }
+
+    @Test
     fun operatorEndpointRejectsThePlainAuthzidMasterFormByMechanism() {
         val configured = Files.readString(operatorConfigPath)
         val mutated = configured.replace(
@@ -256,91 +292,109 @@ class DovecotOperatorConfigTest {
     }
 
     @Test
-    fun resolvedComposeKeepsOperatorIngressLoopbackOnlyAndIsolated() {
-        val resolved = resolvedOperatorCompose()
-        val services = resolved.requiredObject("services")
-        val ordinary = services.requiredObject("dovecot")
-        val operator = services.requiredObject("dovecot-operator")
+    fun resolvedBaseAndProofComposeKeepTheOperatorControlPlaneOnly() {
+        val base = resolvedOperatorCompose()
+        val proof = resolvedProofCompose()
 
-        assertEquals(PINNED_DOVECOT_IMAGE, operator.requiredString("image"))
-        assertEquals("unless-stopped", operator.requiredString("restart"))
-        assertEquals(
-            setOf("operator-ingress"),
-            operator.requiredObject("networks").keys,
+        listOf(base, proof).forEach(::assertPrivateOperatorTopology)
+        assertBaseOrdinaryTopology(base)
+        assertProofOrdinaryTopology(proof)
+
+        val proofSource = Files.readString(proofComposePath)
+        assertTrue(
+            "    ports: !override []\n" in proofSource,
+            "The proof must explicitly clear any future base publication",
         )
-        assertEquals(
-            setOf("default"),
-            ordinary.requiredObject("networks").keys,
-        )
-        services.forEach { (name, value) ->
-            if (name != "dovecot-operator") {
-                assertFalse(
-                    "operator-ingress" in value.jsonObject.requiredObject("networks"),
-                    "$name must not join the operator ingress network",
+        listOf(
+            Files.readString(baseComposePath),
+            proofSource,
+            base.toString(),
+            proof.toString(),
+        ).forEach { model ->
+            assertFalse(
+                "2993" in model,
+                "Forbidden host port 2993 must be absent from Compose sources and models",
+            )
+        }
+    }
+
+    @Test
+    fun topologyAuditorRejectsEveryForbiddenBaseAndProofMutation() {
+        listOf(
+            "base" to resolvedOperatorCompose(),
+            "proof" to resolvedProofCompose(),
+        ).forEach { (label, resolved) ->
+            val mutations = listOf(
+                "expose" to mutateService(resolved, "dovecot-operator") { operator ->
+                    JsonObject(operator + ("expose" to JsonArray(listOf(JsonPrimitive("31993")))))
+                },
+                "host network mode" to
+                    mutateService(resolved, "dovecot-operator") { operator ->
+                        JsonObject(operator + ("network_mode" to JsonPrimitive("host")))
+                    },
+                "extra default operator network" to
+                    mutateService(resolved, "dovecot-operator") { operator ->
+                        val networks = operator.requiredObject("networks")
+                        JsonObject(
+                            operator +
+                                (
+                                    "networks" to
+                                        JsonObject(networks + ("default" to JsonObject(emptyMap())))
+                                    ),
+                        )
+                    },
+                "second ingress member" to mutateService(resolved, "dovecot") { ordinary ->
+                    val networks = ordinary.requiredObject("networks")
+                    JsonObject(
+                        ordinary +
+                            (
+                                "networks" to
+                                    JsonObject(
+                                        networks +
+                                            ("operator-ingress" to JsonObject(emptyMap())),
+                                    )
+                                ),
+                    )
+                },
+            )
+
+            mutations.forEach { (mutation, mutated) ->
+                assertTrue(
+                    mutated != resolved,
+                    "$label $mutation mutation did not land",
                 )
+                assertFailsWith<AssertionError>(
+                    message = "$label $mutation mutation escaped the topology auditor",
+                ) {
+                    assertPrivateOperatorTopology(mutated)
+                }
             }
         }
-        assertFalse(
-            resolved.requiredObject("networks")
-                .requiredObject("operator-ingress")["internal"]
-                ?.jsonPrimitive
-                ?.boolean ?: false,
-            "An internal bridge suppresses Docker's loopback host publication",
-        )
-
-        assertEquals(
-            listOf(
-                PortPublication(
-                    hostIp = "127.0.0.1",
-                    published = "2993",
-                    target = 31993,
-                    protocol = "tcp",
-                    mode = "ingress",
-                ),
-            ),
-            operator.requiredArray("ports").map(::portPublication),
-        )
     }
 
     @Test
     fun operatorIngressDocumentationRequiresAQuietOperationalHealthcheck() {
-        val plan = Files.readString(implementationPlanPath)
-        val task5 = plan
-            .substringAfter("## Task 5:")
-            .substringBefore("## Task 6:")
-        val gate0cSpec = Files.readString(designSpecPath)
-            .substringAfter("### Gate 0C — Dovecot operator access")
-            .substringBefore("### Gate 1 — Live parity suite")
+        val task4 = Files.readString(operatorTransportPlanPath)
+            .substringAfter("## Task 4:")
+            .substringBefore("## Task 5:")
+            .normalizeDocumentationWhitespace()
+        val amendment = Files.readString(operatorTransportDesignPath)
+            .substringAfter("### Compose topology")
+            .substringBefore("## Failure Semantics")
+            .normalizeDocumentationWhitespace()
 
-        assertFalse("joins its own internal Docker network" in plan)
-        assertTrue(
-            "dedicated non-internal Docker bridge whose sole service member " +
-                "is the operator" in plan,
-        )
-        assertFalse("`operator-ingress` internal network" in task5)
-        assertTrue(
-            "dedicated `operator-ingress` non-internal bridge with no other " +
-                "service" in task5,
-        )
-        assertTrue(
-            "dedicated non-internal project bridge whose only service member " +
-                "is the operator" in gate0cSpec,
-        )
-        val serviceStatusContract =
-            "requires a positive integer `process_count`, exact " +
-                "`throttle_secs: 0`, and exact `doveadm_stop: n` for both " +
-                "`auth` and `imap-login`"
-        val listenerContract =
-            "passively matches IPv4 LISTEN state `0A` for container port " +
-                "`31993` (`7CF9`) in `/proc/net/tcp` without connecting"
-        listOf(task5, gate0cSpec).forEach { document ->
-            assertFalse("requires exact `listening: y` status" in document)
-            assertTrue(serviceStatusContract in document)
-            assertTrue(listenerContract in document)
+        listOf(task4, amendment).forEach { document ->
+            assertTrue("`operator-ingress.internal" in document)
+            assertTrue("`/proc/net/tcp`" in document)
+            assertTrue("`/proc/net/tcp6`" in document)
+            assertTrue("`0100007F:7CF9`" in document)
             assertTrue(
-                "host JSSE readiness remains the end-to-end gate" in document,
+                "exactly one" in document || "count exactly one" in document,
             )
+            assertTrue("sole" in document)
         }
+        assertTrue("retain all existing" in amendment)
+        assertTrue("read-only runtime, operator-auth, and TLS mounts" in amendment)
     }
 
     @Test
@@ -348,9 +402,11 @@ class DovecotOperatorConfigTest {
         val plan = Files.readString(implementationPlanPath)
             .substringAfter("## Task 5:")
             .substringBefore("## Task 6:")
+            .normalizeDocumentationWhitespace()
         val gate0cSpec = Files.readString(designSpecPath)
             .substringAfter("### Gate 0C — Dovecot operator access")
             .substringBefore("### Gate 1 — Live parity suite")
+            .normalizeDocumentationWhitespace()
         val preinitContract =
             "Dovecot 2.4.1 `auth_preinit` silently omits a first non-master " +
                 "passdb with `skip = unauthenticated`"
@@ -418,7 +474,6 @@ class DovecotOperatorConfigTest {
             "`127.0.0.1:1993` → `31993`",
             "`127.0.0.1:1110` → `31110`",
             "`127.0.0.1:1995` → `31990`",
-            "`127.0.0.1:2993` → `31993`",
             "`127.0.0.1:1025` → `25`",
             "`127.0.0.1:1465` → `465`",
             "`127.0.0.1:1587` → `587`",
@@ -429,6 +484,10 @@ class DovecotOperatorConfigTest {
         }
         assertTrue("explicit `dovecot-operator` profile" in serviceMap)
         assertTrue("only service attached to `operator-ingress`" in serviceMap)
+        assertTrue("dedicated internal bridge" in serviceMap)
+        assertTrue("None" in serviceMap)
+        assertFalse("Target state pending confirmation and implementation" in serviceMap)
+        assertFalse("`127.0.0.1:2993` → `31993`" in serviceMap)
         assertFalse("dovecot-dev" in serviceMap)
         assertFalse("stalwart-dev" in serviceMap)
 
@@ -573,10 +632,9 @@ class DovecotOperatorConfigTest {
                     "grep -qx 'throttle_secs: 0' && " +
                     "printf '%s\\n' \"\$\$imap_login_status\" | " +
                     "grep -qx 'doveadm_stop: n' && " +
-                    "grep -Eq '^[[:space:]]*[0-9]+:[[:space:]]+" +
-                    "[[:xdigit:]]{8}:7CF9[[:space:]]+" +
-                    "[[:xdigit:]]{8}:[[:xdigit:]]{4}[[:space:]]+" +
-                    "0A[[:space:]]' /proc/net/tcp",
+                    "listener=\"\$\$(awk '$COMPOSE_LISTENER_AWK_PROGRAM' " +
+                    "/proc/net/tcp /proc/net/tcp6)\" && " +
+                    "test \"\$\$listener\" = '0100007F:7CF9'",
             ),
             health.requiredArray("test").map { it.jsonPrimitive.content },
         )
@@ -584,6 +642,129 @@ class DovecotOperatorConfigTest {
         assertEquals("3s", health.requiredString("timeout"))
         assertEquals("10s", health.requiredString("start_period"))
         assertEquals(5, health.requiredInt("retries"))
+    }
+
+    @Test
+    fun exactListenerAwkAcceptsOnlyOneIpv4LoopbackListenSocket() {
+        val fixtures = listOf(
+            ListenerFixture(
+                name = "exact plus irrelevant",
+                expected = true,
+                tcpRows = listOf(
+                    procNetRow(slot = 0, local = "0100007F:7CF9", state = "0A"),
+                    procNetRow(slot = 1, local = "00000000:008F", state = "0A"),
+                ),
+                tcp6Rows = listOf(
+                    procNetRow(
+                        slot = 0,
+                        local = "00000000000000000000000000000000:008F",
+                        state = "0A",
+                    ),
+                ),
+            ),
+            ListenerFixture("absent", false, emptyList(), emptyList()),
+            ListenerFixture(
+                "wildcard",
+                false,
+                listOf(procNetRow(0, "00000000:7CF9", "0A")),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "IPv6",
+                false,
+                emptyList(),
+                listOf(
+                    procNetRow(
+                        0,
+                        "00000000000000000000000001000000:7CF9",
+                        "0A",
+                    ),
+                ),
+            ),
+            ListenerFixture(
+                "duplicate",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "0100007F:7CF9", "0A"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "exact plus wildcard",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:7CF9", "0A"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "exact plus IPv6",
+                false,
+                listOf(procNetRow(0, "0100007F:7CF9", "0A")),
+                listOf(
+                    procNetRow(
+                        0,
+                        "00000000000000000000000001000000:7CF9",
+                        "0A",
+                    ),
+                ),
+            ),
+            ListenerFixture(
+                "exact plus malformed",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    "  1: malformed",
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "exact plus malformed local endpoint",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "NOT_AN_ENDPOINT", "0A"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "exact plus malformed state",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "ZZ"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "wrong state",
+                false,
+                listOf(procNetRow(0, "0100007F:7CF9", "01")),
+                emptyList(),
+            ),
+        )
+
+        val program = listenerAwkProgram()
+        fixtures.forEach { fixture ->
+            withProcNetFixtures(fixture.tcpRows, fixture.tcp6Rows) { tcp, tcp6 ->
+                assertEquals(
+                    fixture.expected,
+                    runListenerAssignment(program, tcp, tcp6) == 0,
+                    fixture.name,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun listenerAssignmentSubstitutionPreservesTheExtractedAwkFailure() {
+        withProcNetFixtures(emptyList(), emptyList()) { tcp, tcp6 ->
+            val program = listenerAwkProgram()
+            assertEquals(1, runAwk(program, tcp, tcp6))
+            assertEquals(1, runListenerAssignment(program, tcp, tcp6))
+        }
     }
 
     @Test
@@ -644,15 +825,6 @@ class DovecotOperatorConfigTest {
                         mode = "ingress",
                     ),
                 ),
-                "dovecot-operator" to listOf(
-                    PortPublication(
-                        hostIp = "127.0.0.1",
-                        published = "2993",
-                        target = 31993,
-                        protocol = "tcp",
-                        mode = "ingress",
-                    ),
-                ),
                 "postfix" to listOf(
                     PortPublication(
                         hostIp = "127.0.0.1",
@@ -672,10 +844,12 @@ class DovecotOperatorConfigTest {
                     ),
                 ),
             ),
-            services.mapValues { (_, value) ->
-                value.jsonObject.requiredArray("ports")
-                    .map(::portPublication)
-            },
+            services
+                .filterKeys { it != "dovecot-operator" }
+                .mapValues { (_, value) ->
+                    value.jsonObject.requiredArray("ports")
+                        .map(::portPublication)
+                },
         )
         assertEquals(
             setOf("default", "operator-ingress"),
@@ -865,6 +1039,217 @@ class DovecotOperatorConfigTest {
                     setOf("dashboard-operator-a", "dashboard-operator-b"),
             )
             EligibilityEntry.requireValidHash(lines.single().substring(delimiter + 1))
+        }
+    }
+
+    private fun assertPrivateOperatorTopology(resolved: JsonObject) {
+        val services = resolved.requiredObject("services")
+        val operator = services.requiredObject("dovecot-operator")
+
+        assertEquals(PINNED_DOVECOT_IMAGE, operator.requiredString("image"))
+        assertEquals("unless-stopped", operator.requiredString("restart"))
+        listOf("ports", "expose", "network_mode").forEach { forbidden ->
+            assertFalse(
+                forbidden in operator,
+                "dovecot-operator must not define $forbidden",
+            )
+        }
+        assertEquals(
+            setOf("operator-ingress"),
+            operator.requiredObject("networks").keys,
+        )
+        assertTrue(
+            resolved.requiredObject("networks")
+                .requiredObject("operator-ingress")
+                .requiredBoolean("internal"),
+            "operator-ingress must be an internal bridge",
+        )
+        assertEquals(
+            setOf("dovecot-operator"),
+            services
+                .filterValues { service ->
+                    "operator-ingress" in service.jsonObject.requiredObject("networks")
+                }
+                .keys,
+            "dovecot-operator must be the sole operator-ingress member",
+        )
+    }
+
+    private fun assertBaseOrdinaryTopology(resolved: JsonObject) {
+        val services = resolved.requiredObject("services")
+        val ordinary = services.filterKeys { it != "dovecot-operator" }
+        assertEquals(
+            mapOf(
+                "dovecot" to listOf(
+                    PortPublication("127.0.0.1", "1143", 31143, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1993", 31993, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1110", 31110, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1995", 31990, "tcp", "ingress"),
+                ),
+                "postfix" to listOf(
+                    PortPublication("127.0.0.1", "1025", 25, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1465", 465, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1587", 587, "tcp", "ingress"),
+                ),
+                "oauth2-mock" to listOf(
+                    PortPublication("127.0.0.1", "8080", 8080, "tcp", "ingress"),
+                ),
+                "stalwart" to listOf(
+                    PortPublication(null, "8443", 8443, "tcp", "ingress"),
+                ),
+            ),
+            ordinary.mapValues { (_, service) ->
+                service.jsonObject.requiredArray("ports").map(::portPublication)
+            },
+        )
+        ordinary.forEach { (name, service) ->
+            assertEquals(
+                setOf("default"),
+                service.jsonObject.requiredObject("networks").keys,
+                "$name ordinary network contract changed",
+            )
+        }
+    }
+
+    private fun assertProofOrdinaryTopology(resolved: JsonObject) {
+        val services = resolved.requiredObject("services")
+        assertEquals(
+            setOf("dovecot", "dovecot-operator", "postfix", "oauth2-mock"),
+            services.keys,
+        )
+        assertEquals(
+            mapOf(
+                "dovecot" to listOf(
+                    PortPublication("127.0.0.1", "1993", 31993, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "21995", 31990, "tcp", "ingress"),
+                ),
+                "postfix" to listOf(
+                    PortPublication("127.0.0.1", "21025", 25, "tcp", "ingress"),
+                ),
+                "oauth2-mock" to listOf(
+                    PortPublication("127.0.0.1", "28080", 8080, "tcp", "ingress"),
+                ),
+            ),
+            services
+                .filterKeys { it != "dovecot-operator" }
+                .mapValues { (_, service) ->
+                    service.jsonObject.requiredArray("ports").map(::portPublication)
+                },
+        )
+        services
+            .filterKeys { it != "dovecot-operator" }
+            .forEach { (name, service) ->
+                assertEquals(
+                    setOf("default"),
+                    service.jsonObject.requiredObject("networks").keys,
+                    "$name proof network contract changed",
+                )
+            }
+        assertEquals(
+            setOf("default", "operator-ingress"),
+            resolved.requiredObject("networks").keys,
+        )
+    }
+
+    private fun mutateService(
+        resolved: JsonObject,
+        serviceName: String,
+        mutation: (JsonObject) -> JsonObject,
+    ): JsonObject {
+        val services = resolved.requiredObject("services")
+        val original = services.requiredObject(serviceName)
+        val mutated = mutation(original)
+        assertTrue(mutated != original, "$serviceName mutation did not land")
+        return JsonObject(
+            resolved +
+                (
+                    "services" to
+                        JsonObject(services + (serviceName to mutated))
+                    ),
+        )
+    }
+
+    private fun String.normalizeDocumentationWhitespace(): String =
+        replace(Regex("""\s+"""), " ").trim()
+
+    private fun listenerAwkProgram(): String {
+        val command = resolvedOperatorCompose()
+            .requiredObject("services")
+            .requiredObject("dovecot-operator")
+            .requiredObject("healthcheck")
+            .requiredArray("test")
+            .map { it.jsonPrimitive.content }
+            .single { it.contains("doveadm service status auth") }
+        val prefix = "listener=\"\$\$(awk '"
+        val suffix = "' /proc/net/tcp /proc/net/tcp6)"
+        assertTrue(prefix in command, "missing listener awk assignment")
+        assertTrue(suffix in command, "missing listener awk input paths")
+        return command
+            .substringAfter(prefix)
+            .substringBefore(suffix)
+            .replace("\$\$", "\$")
+    }
+
+    private fun procNetRow(slot: Int, local: String, state: String): String =
+        "  $slot: $local 00000000:0000 $state " +
+            "00000000:00000000 00:00000000 00000000 1000 0 1 1 " +
+            "0000000000000000 100 0 0 10 0"
+
+    private fun withProcNetFixtures(
+        tcpRows: List<String>,
+        tcp6Rows: List<String>,
+        block: (Path, Path) -> Unit,
+    ) {
+        val directory = Files.createTempDirectory("dovecot-listener-health-")
+        val tcp = directory.resolve("tcp")
+        val tcp6 = directory.resolve("tcp6")
+        try {
+            listOf(tcp to tcpRows, tcp6 to tcp6Rows).forEach { (path, rows) ->
+                Files.writeString(
+                    path,
+                    (listOf(PROC_NET_HEADER) + rows).joinToString(
+                        separator = "\n",
+                        postfix = "\n",
+                    ),
+                )
+            }
+            block(tcp, tcp6)
+        } finally {
+            Files.deleteIfExists(tcp)
+            Files.deleteIfExists(tcp6)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    private fun runAwk(program: String, tcp: Path, tcp6: Path): Int =
+        runFixtureProcess(listOf("awk", program, tcp.toString(), tcp6.toString()))
+
+    private fun runListenerAssignment(program: String, tcp: Path, tcp6: Path): Int =
+        runFixtureProcess(
+            listOf(
+                "sh",
+                "-c",
+                "listener=\"\$(awk '$program' \"\$1\" \"\$2\")\" && " +
+                    "test \"\$listener\" = '0100007F:7CF9'",
+                "dovecot-listener-health",
+                tcp.toString(),
+                tcp6.toString(),
+            ),
+        )
+
+    private fun runFixtureProcess(command: List<String>): Int {
+        val process = ProcessBuilder(command)
+            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .start()
+        return try {
+            assertTrue(
+                process.waitFor(OUTPUT_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS),
+                "listener fixture process timed out",
+            )
+            process.exitValue()
+        } finally {
+            process.destroyForcibly()
         }
     }
 
@@ -1153,10 +1538,10 @@ class DovecotOperatorConfigTest {
         )
     }
 
-    private fun portPublication(value: kotlinx.serialization.json.JsonElement): PortPublication {
+    private fun portPublication(value: JsonElement): PortPublication {
         val port = value.jsonObject
         return PortPublication(
-            hostIp = port.requiredString("host_ip"),
+            hostIp = port["host_ip"]?.jsonPrimitive?.contentOrNull,
             published = port.requiredString("published"),
             target = port.requiredInt("target"),
             protocol = port.requiredString("protocol"),
@@ -1191,6 +1576,9 @@ class DovecotOperatorConfigTest {
     private fun JsonObject.requiredInt(name: String): Int =
         assertNotNull(this[name], "missing integer: $name").jsonPrimitive.int
 
+    private fun JsonObject.requiredBoolean(name: String): Boolean =
+        assertNotNull(this[name], "missing boolean: $name").jsonPrimitive.boolean
+
     private fun repositoryRoot(): Path {
         val workingDirectory = Path.of(System.getProperty("user.dir"))
             .toAbsolutePath()
@@ -1204,7 +1592,7 @@ class DovecotOperatorConfigTest {
     }
 
     private data class PortPublication(
-        val hostIp: String,
+        val hostIp: String?,
         val published: String,
         val target: Int,
         val protocol: String,
@@ -1217,6 +1605,13 @@ class DovecotOperatorConfigTest {
         val readOnly: Boolean,
     )
 
+    private data class ListenerFixture(
+        val name: String,
+        val expected: Boolean,
+        val tcpRows: List<String>,
+        val tcp6Rows: List<String>,
+    )
+
     companion object {
         private const val OPERATOR_PROFILE = "dovecot-operator"
         private const val PINNED_DOVECOT_IMAGE =
@@ -1225,6 +1620,27 @@ class DovecotOperatorConfigTest {
         private val COMPOSE_TIMEOUT = Duration.ofSeconds(10)
         private val OUTPUT_JOIN_TIMEOUT = Duration.ofSeconds(2)
         private const val MAX_COMPOSE_OUTPUT_BYTES = 1024 * 1024
+        private const val PROC_NET_HEADER =
+            "  sl  local_address rem_address   st tx_queue rx_queue tr " +
+                "tm->when retrnsmt   uid  timeout inode"
+        private const val COMPOSE_LISTENER_AWK_PROGRAM =
+            "FNR == 1 { next } " +
+                "{ expected_address_length = FILENAME ~ /tcp6\$\$/ ? 32 : 8; " +
+                "local_field_count = split(\$\$2, parts, \":\"); " +
+                "if (NF < 10 || \$\$1 !~ /^[0-9]+:\$\$/ || " +
+                "local_field_count != 2 || " +
+                "length(parts[1]) != expected_address_length || " +
+                "parts[1] !~ /^[[:xdigit:]]+\$\$/ || " +
+                "length(parts[2]) != 4 || " +
+                "parts[2] !~ /^[[:xdigit:]]+\$\$/ || " +
+                "length(\$\$4) != 2 || " +
+                "\$\$4 !~ /^[[:xdigit:]]+\$\$/) " +
+                "{ malformed = 1; next } " +
+                "if (\$\$4 == \"0A\" && parts[2] == \"7CF9\") " +
+                "{ count++; listener = \$\$2 } } " +
+                "END { if (!malformed && count == 1 && " +
+                "listener == \"0100007F:7CF9\") " +
+                "{ print listener; exit 0 } exit 1 }"
         private val EXPECTED_OPERATOR_CONFIG = """
             dovecot_config_version = 2.4.1
             dovecot_storage_version = 2.4.0
@@ -1327,6 +1743,10 @@ class DovecotOperatorConfigTest {
                 port = 0
               }
               inet_listener imaps {
+                default_internal_group = vmail
+                default_internal_user = vmail
+                default_login_user = vmail
+                listen = 127.0.0.1
                 port = 31993
                 ssl = yes
               }

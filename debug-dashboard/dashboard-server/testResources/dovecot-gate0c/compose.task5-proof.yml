@@ -22,8 +22,7 @@ services:
 
   dovecot-operator:
     profiles: !override []
-    ports: !override
-      - "127.0.0.1:2993:31993"
+    ports: !override []
     volumes: !override
       - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
       - type: bind

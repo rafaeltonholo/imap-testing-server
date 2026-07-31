@@ -1,12 +1,5 @@
 # Service Map
 
-> **Target state pending confirmation and implementation.** The checked
-> `docker-compose.yml` still contains the superseded operator
-> `127.0.0.1:2993` publication and non-internal bridge. Task 6 remains pending;
-> do not treat that current topology as accepted. The operator entries below
-> are the required post-amendment state from
-> `docs/superpowers/specs/2026-07-30-dovecot-operator-stdio-transport-design.md`.
-
 `docker-compose.yml` defines service names but no fixed `container_name` values;
 Compose generates project-scoped container names.
 

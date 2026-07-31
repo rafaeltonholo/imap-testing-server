@@ -4,11 +4,18 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DovecotBaselineConfigAuditTest {
     private val repositoryRoot = repositoryRoot()
     private val compose = Files.readString(repositoryRoot.resolve("docker-compose.yml"))
+    private val proofCompose = Files.readString(
+        repositoryRoot.resolve(
+            "debug-dashboard/dashboard-server/testResources/" +
+                "dovecot-gate0c/compose.task5-proof.yml",
+        ),
+    )
 
     @Test
     fun dovecotImageIsPinnedToTheInspectedVersionAndDigest() {
@@ -46,6 +53,58 @@ class DovecotBaselineConfigAuditTest {
             listOf("dovecot", "postfix", "oauth2-mock").associateWith { service ->
                 servicePublications(service)
             },
+        )
+    }
+
+    @Test
+    fun operatorHasNoPublicationAndForbiddenPortIsAbsentFromComposeSources() {
+        assertTrue(
+            servicePublicationsOrEmpty("dovecot-operator").isEmpty(),
+            "The base operator must not publish a host port",
+        )
+        assertFalse(
+            "2993" in compose,
+            "The forbidden operator host port must not occur in base Compose",
+        )
+        assertFalse(
+            "2993" in proofCompose,
+            "The forbidden operator host port must not occur in proof Compose",
+        )
+    }
+
+    @Test
+    fun setupGeneratesTheExactLocalhostCertificateIdentity() {
+        val setupSource = Files.readString(repositoryRoot.resolve("scripts/setup.py"))
+        val argumentBlock = requireNotNull(
+            Regex(
+                """subprocess\.run\(\s*\[\s*([\s\S]*?)\s*],\s*check=True""",
+            ).find(setupSource),
+        ).groupValues[1]
+        val arguments = argumentBlock
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+
+        assertEquals(
+            listOf(
+                "\"openssl\"",
+                "\"req\"",
+                "\"-x509\"",
+                "\"-nodes\"",
+                "\"-days\"",
+                "\"365\"",
+                "\"-newkey\"",
+                "\"rsa:2048\"",
+                "\"-keyout\"",
+                "str(key)",
+                "\"-out\"",
+                "str(cert)",
+                "\"-subj\"",
+                "\"/CN=localhost\"",
+                "\"-addext\"",
+                "\"subjectAltName=DNS:localhost\"",
+            ),
+            arguments,
         )
     }
 
@@ -131,6 +190,15 @@ class DovecotBaselineConfigAuditTest {
                     ?.get(1)
                     ?: "<unreviewed-port-syntax:${line.trim()}>"
             }
+    }
+
+    private fun servicePublicationsOrEmpty(service: String): List<String> {
+        val serviceLines = serviceLines(service)
+        return if ("    ports:" in serviceLines) {
+            servicePublications(service)
+        } else {
+            emptyList()
+        }
     }
 
     private fun serviceLines(service: String): List<String> {

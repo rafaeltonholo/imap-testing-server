@@ -1106,7 +1106,8 @@ task5_require_proof_root_ownership "TLS material creation"
 (
   umask 077
   openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
-    -subj /CN=task5-proof.local \
+    -subj /CN=localhost \
+    -addext subjectAltName=DNS:localhost \
     -keyout "$TASK5_PROOF_ROOT/ssl/tls.key" \
     -out "$TASK5_PROOF_ROOT/ssl/tls.crt"
 )
@@ -1123,6 +1124,8 @@ if [[ ! -f "$TASK5_PROOF_ROOT/ssl/tls.crt" ]] ||
 fi
 task5_require_mode "$TASK5_PROOF_ROOT/ssl/tls.crt" 600
 task5_require_mode "$TASK5_PROOF_ROOT/ssl/tls.key" 600
+task5_require_proof_root_ownership "TLS certificate hostname verification"
+openssl verify -CAfile "$TASK5_PROOF_ROOT/ssl/tls.crt" -verify_hostname localhost "$TASK5_PROOF_ROOT/ssl/tls.crt"
 
 task5_require_proof_root_ownership "proof preflight"
 (

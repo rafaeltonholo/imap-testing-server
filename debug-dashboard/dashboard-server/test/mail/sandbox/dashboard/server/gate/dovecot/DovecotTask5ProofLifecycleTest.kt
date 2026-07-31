@@ -259,9 +259,33 @@ class DovecotTask5ProofLifecycleTest {
         val proofRootCreation = source.lastIndexOf(
             "\ntask5_create_owned_proof_root\n",
         )
+        val certificateRequest = source.indexOf(
+            "openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \\\n" +
+                "    -subj /CN=localhost \\\n" +
+                "    -addext subjectAltName=DNS:localhost \\\n" +
+                "    -keyout \"\$TASK5_PROOF_ROOT/ssl/tls.key\" \\\n" +
+                "    -out \"\$TASK5_PROOF_ROOT/ssl/tls.crt\"",
+        )
+        val certificateRegularFileValidation = source.indexOf(
+            "TLS material is not fixed regular-file input",
+        )
+        val certificateKeyModeValidation = source.indexOf(
+            "task5_require_mode \"\$TASK5_PROOF_ROOT/ssl/tls.key\" 600",
+        )
+        val certificateVerification = source.indexOf(
+            "openssl verify " +
+                "-CAfile \"\$TASK5_PROOF_ROOT/ssl/tls.crt\" " +
+                "-verify_hostname localhost " +
+                "\"\$TASK5_PROOF_ROOT/ssl/tls.crt\"",
+        )
         val proofPreflight = source.indexOf("-- task5-proof preflight")
         assertTrue(proofRootCreation > previousBoundary)
+        assertTrue(certificateRequest > proofRootCreation)
+        assertTrue(certificateRegularFileValidation > certificateRequest)
+        assertTrue(certificateKeyModeValidation > certificateRegularFileValidation)
+        assertTrue(certificateVerification > certificateKeyModeValidation)
         assertTrue(proofPreflight > proofRootCreation)
+        assertTrue(proofPreflight > certificateVerification)
 
         val proofPortLoop = assertNotNull(
             Regex("""for TASK5_PROOF_PORT in ([0-9 ]+); do""")
@@ -271,6 +295,11 @@ class DovecotTask5ProofLifecycleTest {
         assertEquals(
             listOf("1993", "21995", "2993", "21025", "28080"),
             proofPortLoop,
+        )
+        assertEquals(
+            1,
+            source.windowed("2993".length).count { it == "2993" },
+            "Port 2993 is reserved only by the fixed negative lsof probe",
         )
 
         val startupTest = source.indexOf(
@@ -510,6 +539,16 @@ class DovecotTask5ProofLifecycleTest {
             val result = fixture.run("success")
 
             assertEquals(0, result.exitCode, result.output)
+            val certificateRequest =
+                "openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 " +
+                    "-subj /CN=localhost " +
+                    "-addext subjectAltName=DNS:localhost " +
+                    "-keyout ${fixture.proofRoot}/ssl/tls.key " +
+                    "-out ${fixture.proofRoot}/ssl/tls.crt"
+            val certificateVerification =
+                "openssl verify -CAfile ${fixture.proofRoot}/ssl/tls.crt " +
+                    "-verify_hostname localhost " +
+                    "${fixture.proofRoot}/ssl/tls.crt"
             val upCommands = result.commands.filter { " compose " in it && " up " in it }
             assertEquals(2, upCommands.size)
             assertTrue(
@@ -532,6 +571,12 @@ class DovecotTask5ProofLifecycleTest {
                     "lsof -nP -iTCP:28080 -sTCP:LISTEN",
                 ),
                 result.commands.filter { it.startsWith("lsof ") },
+            )
+            assertOrdered(
+                result.commands,
+                certificateRequest,
+                certificateVerification,
+                upCommands.first(),
             )
             assertOrdered(
                 result.commands,
@@ -603,6 +648,35 @@ class DovecotTask5ProofLifecycleTest {
                     fixture.lifecycleLock,
                     LinkOption.NOFOLLOW_LINKS,
                 ),
+            )
+        }
+    }
+
+    @Test
+    fun failedCertificateHostnameVerificationStartsNoComposeService() {
+        withFixture { fixture ->
+            val result = fixture.run("certificate-verification-fails")
+            val expectedVerification =
+                "openssl verify -CAfile ${fixture.proofRoot}/ssl/tls.crt " +
+                    "-verify_hostname localhost " +
+                    "${fixture.proofRoot}/ssl/tls.crt"
+
+            assertTrue(result.exitCode != 0, result.output)
+            assertTrue(
+                result.commands.any { it == expectedVerification },
+                result.commands.joinToString("\n"),
+            )
+            assertTrue(
+                result.commands.none { " compose " in it && " up " in it },
+                result.commands.joinToString("\n"),
+            )
+            assertFalse(
+                Files.exists(fixture.proofRoot, LinkOption.NOFOLLOW_LINKS),
+                "Failed certificate verification must clean the proof root",
+            )
+            assertFalse(
+                Files.exists(fixture.lifecycleLock, LinkOption.NOFOLLOW_LINKS),
+                "Failed certificate verification must release the lifecycle lock",
             )
         }
     }
@@ -2625,7 +2699,9 @@ class DovecotTask5ProofLifecycleTest {
             |}
             |case "§{1:-}" in
             |  req)
-            |    printf '%s\n' "openssl req" >> "§TASK5_FAKE_LOG"
+            |    printf '%s\n' "openssl §*" >> "§TASK5_FAKE_LOG"
+            |    expected="req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost -keyout §TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof/ssl/tls.key -out §TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof/ssl/tls.crt"
+            |    [ "§*" = "§expected" ]
             |    keyout=
             |    output=
             |    while [ "§#" -gt 0 ]; do
@@ -2637,6 +2713,14 @@ class DovecotTask5ProofLifecycleTest {
             |    done
             |    : > "§keyout"
             |    : > "§output"
+            |    ;;
+            |  verify)
+            |    printf '%s\n' "openssl §*" >> "§TASK5_FAKE_LOG"
+            |    expected="verify -CAfile §TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof/ssl/tls.crt -verify_hostname localhost §TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof/ssl/tls.crt"
+            |    [ "§*" = "§expected" ]
+            |    if [ "§TASK5_FAKE_SCENARIO" = certificate-verification-fails ]; then
+            |      exit 94
+            |    fi
             |    ;;
             |  rand)
             |    printf '%s\n' "openssl §*" >> "§TASK5_FAKE_LOG"
