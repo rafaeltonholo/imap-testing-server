@@ -22,6 +22,530 @@ import kotlin.test.assertTrue
 
 class DovecotHeldOperatorImapDeadlineTest {
     @Test
+    fun preStartDrainRejectsTheOpenBeforeTransportAllocation() {
+        val checkpointReached = CountDownLatch(1)
+        val checkpointRelease = CountDownLatch(1)
+        val drainMarked = CountDownLatch(1)
+        val openFinished = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val allocationCalls = AtomicInteger()
+        val openFailure = AtomicReference<Throwable?>()
+        val drainFailure = AtomicReference<Throwable?>()
+        val returned =
+            AtomicReference<LeasedHeldDovecotOperatorImapSession?>()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val leases = DovecotOperatorApplicationLeaseRegistry(
+            initialActive = DovecotOperatorId.A,
+            beforeDrainCloseWorkers = drainMarked::countDown,
+        )
+        val message = validMessage()
+        val credential = credential("pre-start-drain-secret")
+        val opener = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeedLeased(
+                            leaseRegistry = leases,
+                            transportFactory =
+                                DovecotOperatorTransportFactory {
+                                    allocationCalls.incrementAndGet()
+                                    error(
+                                        "Pre-start drain allocated transport",
+                                    )
+                                },
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterLeasedOpenStep = { step ->
+                                if (
+                                    step ==
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .LeaseReserved
+                                ) {
+                                    checkpointReached.countDown()
+                                    awaitUninterruptibly(checkpointRelease)
+                                }
+                            },
+                        ),
+                    )
+                } catch (failure: Throwable) {
+                    openFailure.set(failure)
+                } finally {
+                    openFinished.countDown()
+                }
+            },
+            "task6-pre-start-drain-opener",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        var drain: Thread? = null
+        try {
+            assertTrue(checkpointReached.await(1, TimeUnit.SECONDS))
+            drain = Thread(
+                {
+                    try {
+                        leases.blockAndDrain(DovecotOperatorId.A)
+                    } catch (failure: Throwable) {
+                        drainFailure.set(failure)
+                    } finally {
+                        drainFinished.countDown()
+                    }
+                },
+                "task6-pre-start-drain",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+            assertTrue(drainMarked.await(1, TimeUnit.SECONDS))
+            assertEquals(0, allocationCalls.get())
+            assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+        } finally {
+            checkpointRelease.countDown()
+            opener.join(2_000)
+            drain?.join(2_000)
+            runCatching { returned.get()?.close() }
+        }
+
+        val completedDrain = checkNotNull(drain)
+        assertFalse(opener.isAlive)
+        assertFalse(completedDrain.isAlive)
+        assertTrue(openFinished.await(1, TimeUnit.SECONDS))
+        assertTrue(drainFinished.await(1, TimeUnit.SECONDS))
+        assertTrue(openFailure.get() is IllegalStateException)
+        assertEquals(null, drainFailure.get())
+        assertEquals(null, returned.get())
+        assertEquals(0, allocationCalls.get())
+        assertEquals(0, leases.openLeaseCount(DovecotOperatorId.A))
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun postAllocationPreBindDrainWaitsForTransportCleanup() {
+        val checkpointReached = CountDownLatch(1)
+        val checkpointRelease = CountDownLatch(1)
+        val drainMarked = CountDownLatch(1)
+        val openFinished = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val openFailure = AtomicReference<Throwable?>()
+        val drainFailure = AtomicReference<Throwable?>()
+        val returned =
+            AtomicReference<LeasedHeldDovecotOperatorImapSession?>()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val leases = DovecotOperatorApplicationLeaseRegistry(
+            initialActive = DovecotOperatorId.A,
+            beforeDrainCloseWorkers = drainMarked::countDown,
+        )
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("pre-bind-drain-secret")
+        val opener = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeedLeased(
+                            leaseRegistry = leases,
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterLeasedOpenStep = { step ->
+                                if (
+                                    step ==
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .SessionConstructed
+                                ) {
+                                    checkpointReached.countDown()
+                                    awaitUninterruptibly(checkpointRelease)
+                                }
+                            },
+                        ),
+                    )
+                } catch (failure: Throwable) {
+                    openFailure.set(failure)
+                } finally {
+                    openFinished.countDown()
+                }
+            },
+            "task6-pre-bind-drain-opener",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        var drain: Thread? = null
+        try {
+            assertTrue(checkpointReached.await(1, TimeUnit.SECONDS))
+            drain = Thread(
+                {
+                    try {
+                        leases.blockAndDrain(DovecotOperatorId.A)
+                    } catch (failure: Throwable) {
+                        drainFailure.set(failure)
+                    } finally {
+                        drainFinished.countDown()
+                    }
+                },
+                "task6-pre-bind-drain",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+            assertTrue(drainMarked.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitCloseStarted())
+            checkpointRelease.countDown()
+            assertFalse(openFinished.await(100, TimeUnit.MILLISECONDS))
+            assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+            assertEquals(1, leases.openLeaseCount(DovecotOperatorId.A))
+        } finally {
+            checkpointRelease.countDown()
+            transport.releaseBlockedClose()
+            opener.join(2_000)
+            drain?.join(2_000)
+            runCatching { returned.get()?.close() }
+        }
+
+        val completedDrain = checkNotNull(drain)
+        assertFalse(opener.isAlive)
+        assertFalse(completedDrain.isAlive)
+        assertTrue(openFailure.get() is IllegalStateException)
+        assertEquals(null, drainFailure.get())
+        assertEquals(null, returned.get())
+        assertTrue(transport.awaitCloseCompleted())
+        assertTrue(transport.closed)
+        assertEquals(0, leases.openLeaseCount(DovecotOperatorId.A))
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun boundPreHandoffDrainClosesOnTheOriginalOperationSlot() {
+        val checkpointReached = CountDownLatch(1)
+        val checkpointRelease = CountDownLatch(1)
+        val drainMarked = CountDownLatch(1)
+        val openFinished = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val openFailure = AtomicReference<Throwable?>()
+        val drainFailure = AtomicReference<Throwable?>()
+        val handoffEvents = AtomicInteger()
+        val returned =
+            AtomicReference<LeasedHeldDovecotOperatorImapSession?>()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val leases = DovecotOperatorApplicationLeaseRegistry(
+            initialActive = DovecotOperatorId.A,
+            beforeDrainCloseWorkers = drainMarked::countDown,
+        )
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("pre-handoff-drain-secret")
+        val opener = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeedLeased(
+                            leaseRegistry = leases,
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterLeasedOpenStep = { step ->
+                                when (step) {
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .LeaseRecheckedBeforeHandoff -> {
+                                        checkpointReached.countDown()
+                                        awaitUninterruptibly(
+                                            checkpointRelease,
+                                        )
+                                    }
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .OperationHandedOff -> {
+                                        handoffEvents.incrementAndGet()
+                                    }
+                                    else -> Unit
+                                }
+                            },
+                        ),
+                    )
+                } catch (failure: Throwable) {
+                    openFailure.set(failure)
+                } finally {
+                    openFinished.countDown()
+                }
+            },
+            "task6-pre-handoff-drain-opener",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        var drain: Thread? = null
+        try {
+            assertTrue(checkpointReached.await(1, TimeUnit.SECONDS))
+            drain = Thread(
+                {
+                    try {
+                        leases.blockAndDrain(DovecotOperatorId.A)
+                    } catch (failure: Throwable) {
+                        drainFailure.set(failure)
+                    } finally {
+                        drainFinished.countDown()
+                    }
+                },
+                "task6-pre-handoff-drain",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+            assertTrue(drainMarked.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitCloseStarted())
+            checkpointRelease.countDown()
+            assertFalse(openFinished.await(100, TimeUnit.MILLISECONDS))
+            assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+            assertEquals(1, leases.openLeaseCount(DovecotOperatorId.A))
+            assertEquals(
+                1,
+                workers.snapshot().let { snapshot ->
+                    snapshot.activeOperations +
+                        snapshot.abandonedOperations
+                },
+            )
+        } finally {
+            checkpointRelease.countDown()
+            transport.releaseBlockedClose()
+            opener.join(2_000)
+            drain?.join(2_000)
+            runCatching { returned.get()?.close() }
+        }
+
+        val completedDrain = checkNotNull(drain)
+        assertFalse(opener.isAlive)
+        assertFalse(completedDrain.isAlive)
+        assertTrue(openFailure.get() is IllegalStateException)
+        assertEquals(null, drainFailure.get())
+        assertEquals(null, returned.get())
+        assertEquals(0, handoffEvents.get())
+        assertTrue(transport.awaitCloseCompleted())
+        assertTrue(transport.closed)
+        assertEquals(0, leases.openLeaseCount(DovecotOperatorId.A))
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun handedOffPreCommitDrainAbortsBeforeRejectingTheHolder() {
+        val checkpointReached = CountDownLatch(1)
+        val checkpointRelease = CountDownLatch(1)
+        val drainMarked = CountDownLatch(1)
+        val openFinished = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val openFailure = AtomicReference<Throwable?>()
+        val drainFailure = AtomicReference<Throwable?>()
+        val handoffEvents = AtomicInteger()
+        val returned =
+            AtomicReference<LeasedHeldDovecotOperatorImapSession?>()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val leases = DovecotOperatorApplicationLeaseRegistry(
+            initialActive = DovecotOperatorId.A,
+            beforeDrainCloseWorkers = drainMarked::countDown,
+        )
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockAbort = true,
+        )
+        val message = validMessage()
+        val credential = credential("pre-commit-drain-secret")
+        val opener = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeedLeased(
+                            leaseRegistry = leases,
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterLeasedOpenStep = { step ->
+                                if (
+                                    step ==
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .OperationHandedOff
+                                ) {
+                                    handoffEvents.incrementAndGet()
+                                    checkpointReached.countDown()
+                                    awaitUninterruptibly(
+                                        checkpointRelease,
+                                    )
+                                }
+                            },
+                        ),
+                    )
+                } catch (failure: Throwable) {
+                    openFailure.set(failure)
+                } finally {
+                    openFinished.countDown()
+                }
+            },
+            "task6-pre-commit-drain-opener",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        var drain: Thread? = null
+        try {
+            assertTrue(checkpointReached.await(1, TimeUnit.SECONDS))
+            drain = Thread(
+                {
+                    try {
+                        leases.blockAndDrain(DovecotOperatorId.A)
+                    } catch (failure: Throwable) {
+                        drainFailure.set(failure)
+                    } finally {
+                        drainFinished.countDown()
+                    }
+                },
+                "task6-pre-commit-drain",
+            ).also {
+                it.isDaemon = true
+                it.start()
+            }
+            assertTrue(drainMarked.await(1, TimeUnit.SECONDS))
+            assertTrue(transport.awaitAbortStarted())
+            checkpointRelease.countDown()
+            assertFalse(openFinished.await(100, TimeUnit.MILLISECONDS))
+            assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+            assertEquals(1, leases.openLeaseCount(DovecotOperatorId.A))
+        } finally {
+            checkpointRelease.countDown()
+            transport.releaseBlockedAbort()
+            opener.join(2_000)
+            drain?.join(2_000)
+            runCatching { returned.get()?.close() }
+        }
+
+        val completedDrain = checkNotNull(drain)
+        assertFalse(opener.isAlive)
+        assertFalse(completedDrain.isAlive)
+        assertTrue(transport.awaitAbortCompleted())
+        assertTrue(openFailure.get() is IllegalStateException)
+        assertEquals(null, drainFailure.get())
+        assertEquals(null, returned.get())
+        assertEquals(1, handoffEvents.get())
+        assertTrue(transport.aborted)
+        assertFalse(transport.closed)
+        assertEquals(0, leases.openLeaseCount(DovecotOperatorId.A))
+        assertTrue(message.all { it == 0.toByte() })
+        assertCredentialClosed(credential)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
+    fun interruptedOpeningCleanupTimeoutRestoresAndDetaches() {
+        val openFinished = CountDownLatch(1)
+        val openFailure = AtomicReference<Throwable?>()
+        val interruptRestored = AtomicBoolean()
+        val returned =
+            AtomicReference<LeasedHeldDovecotOperatorImapSession?>()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val leases =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val transport = DeadlineTestTransport(
+            transcript = SEED_TRANSCRIPT,
+            blockClose = true,
+        )
+        val message = validMessage()
+        val credential = credential("interrupted-cleanup-timeout-secret")
+        val opener = Thread(
+            {
+                try {
+                    returned.set(
+                        HeldDovecotOperatorImapSession.openAndSeedLeased(
+                            leaseRegistry = leases,
+                            transportFactory = factoryFor(transport),
+                            target = TARGET,
+                            credential = credential,
+                            message = message,
+                            timeout = SYNTHETIC_INTERRUPT_TIMEOUT,
+                            operationWorkers = workers,
+                            afterLeasedOpenStep = { step ->
+                                if (
+                                    step ==
+                                    HeldDovecotOperatorLeasedOpenStep
+                                        .SessionConstructed
+                                ) {
+                                    error("Reject the opening before bind")
+                                }
+                            },
+                        ),
+                    )
+                } catch (failure: Throwable) {
+                    openFailure.set(failure)
+                    interruptRestored.set(
+                        Thread.currentThread().isInterrupted,
+                    )
+                } finally {
+                    Thread.interrupted()
+                    openFinished.countDown()
+                }
+            },
+            "task6-interrupted-cleanup-timeout-opener",
+        ).also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(transport.awaitCloseStarted())
+            opener.interrupt()
+            assertTrue(openFinished.await(2, TimeUnit.SECONDS))
+            opener.join(1_000)
+            assertFalse(opener.isAlive)
+            assertEquals(null, returned.get())
+            assertTrue(openFailure.get() is InterruptedException)
+            assertEquals(
+                "Held Dovecot operator seed proof was interrupted",
+                openFailure.get()?.message,
+            )
+            assertTrue(interruptRestored.get())
+            assertEquals(1, leases.openLeaseCount(DovecotOperatorId.A))
+            assertTrue(message.all { it == 0.toByte() })
+            assertCredentialClosed(credential)
+            assertEquals(1, workers.snapshot().abandonedOperations)
+        } finally {
+            transport.releaseBlockedClose()
+            opener.interrupt()
+            opener.join(2_000)
+        }
+        awaitWorkersReleased(workers)
+
+        leases.blockAndDrain(DovecotOperatorId.A)
+
+        assertEquals(0, leases.openLeaseCount(DovecotOperatorId.A))
+        assertEquals(2, transport.abortCalls)
+        assertTrue(transport.closed)
+        awaitWorkersReleased(workers)
+    }
+
+    @Test
     fun delayedCancellationSuccessEventuallyMarksSessionClosed() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(

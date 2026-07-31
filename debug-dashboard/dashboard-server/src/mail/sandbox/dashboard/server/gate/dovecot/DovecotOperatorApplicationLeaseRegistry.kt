@@ -295,6 +295,16 @@ internal class DovecotOperatorOpeningLeaseReservation internal constructor(
 
     fun commit(): DovecotOperatorApplicationLease = commit(lease)
 
+    /**
+     * Permanently relinquishes owner release authority after cleanup failed.
+     *
+     * Detachment does not cancel or release the lease. A later successful
+     * registry drain performs both before releasing a detached opening.
+     */
+    fun detachOwnerAfterFailedCleanup() {
+        lease.detachOpeningOwnerAfterFailedCleanup()
+    }
+
     override fun close() {
         lease.releaseOpeningByOwner()
     }
@@ -315,6 +325,7 @@ internal class DovecotOperatorApplicationLease private constructor(
     private var openingReleaseAttempt: CloseAttempt? = null
     private var openingCancellationRequested = false
     private var openingCancellationSucceeded = false
+    private var openingOwner = OpeningOwner.Attached
 
     internal constructor(
         id: DovecotOperatorId,
@@ -384,21 +395,43 @@ internal class DovecotOperatorApplicationLease private constructor(
     }
 
     internal fun releaseOpeningByOwner() {
-        var leader = false
-        val attempt = synchronized(stateLock) {
-            if (closed) return
-            if (binding !is LeaseBinding.Opening) {
-                return@synchronized null
+        val opening = synchronized(stateLock) {
+            check(openingOwner == OpeningOwner.Attached) {
+                "Dovecot operator opening lease owner is detached"
             }
+            if (closed) return
             draining = true
+            binding is LeaseBinding.Opening
+        }
+        if (!opening) {
+            close()
+            return
+        }
+        releaseOpening()?.let { throw it }
+    }
+
+    internal fun detachOpeningOwnerAfterFailedCleanup() {
+        val releaseNow = synchronized(stateLock) {
+            if (openingOwner == OpeningOwner.Detached) return
+            openingOwner = OpeningOwner.Detached
+            if (closed) return
+            draining = true
+            binding is LeaseBinding.Opening &&
+                openingCancellationSucceeded
+        }
+        if (releaseNow) {
+            releaseOpening()?.let { throw it }
+        }
+    }
+
+    private fun releaseOpening(): Throwable? {
+        var leader = false
+        val releaseAttempt = synchronized(stateLock) {
+            if (closed) return null
             openingReleaseAttempt ?: CloseAttempt().also { created ->
                 openingReleaseAttempt = created
                 leader = true
             }
-        }
-        if (attempt == null) {
-            close()
-            return
         }
         if (leader) {
             val failure = try {
@@ -407,22 +440,27 @@ internal class DovecotOperatorApplicationLease private constructor(
             } catch (failure: Throwable) {
                 failure
             }
+            var leaseCloseAttempt: CloseAttempt? = null
             synchronized(stateLock) {
                 if (failure == null) {
                     closed = true
-                    attempt.complete(null)
-                    if (openingCancellationSucceeded) {
-                        closeAttempt?.complete(null)
-                    }
-                } else {
-                    attempt.complete(failure)
-                    if (openingReleaseAttempt === attempt) {
-                        openingReleaseAttempt = null
+                } else if (openingReleaseAttempt === releaseAttempt) {
+                    openingReleaseAttempt = null
+                }
+                if (openingCancellationSucceeded) {
+                    leaseCloseAttempt = closeAttempt
+                    if (
+                        failure != null &&
+                        closeAttempt === leaseCloseAttempt
+                    ) {
+                        closeAttempt = null
                     }
                 }
             }
+            releaseAttempt.complete(failure)
+            leaseCloseAttempt?.complete(failure)
         }
-        attempt.await()?.let { throw it }
+        return releaseAttempt.await()
     }
 
     override fun close() {
@@ -443,12 +481,20 @@ internal class DovecotOperatorApplicationLease private constructor(
                         attempt = attempt,
                         leader =
                             existing == null &&
-                                !openingCancellationSucceeded,
+                                (
+                                    !openingCancellationSucceeded ||
+                                        openingOwner ==
+                                        OpeningOwner.Detached
+                                    ),
                         openingCancellation =
                             current.cancelOpening.takeIf {
                                 existing == null &&
                                     !openingCancellationSucceeded
                             },
+                        releaseOpening =
+                            existing == null &&
+                                openingCancellationSucceeded &&
+                                openingOwner == OpeningOwner.Detached,
                         closeSession = null,
                     )
                 }
@@ -464,6 +510,7 @@ internal class DovecotOperatorApplicationLease private constructor(
                         attempt = attempt,
                         leader = existing == null,
                         openingCancellation = null,
+                        releaseOpening = false,
                         closeSession =
                             current.closeSession.takeIf { existing == null },
                     )
@@ -480,6 +527,7 @@ internal class DovecotOperatorApplicationLease private constructor(
                         attempt = attempt,
                         leader = existing == null,
                         openingCancellation = null,
+                        releaseOpening = false,
                         closeSession =
                             current.closeSession.takeIf { existing == null },
                     )
@@ -493,6 +541,8 @@ internal class DovecotOperatorApplicationLease private constructor(
                     attempt = registration.attempt,
                     cancel = openingCancellation,
                 )
+            } else if (registration.releaseOpening) {
+                releaseOpening()
             } else {
                 closeBoundLease(
                     attempt = registration.attempt,
@@ -513,18 +563,26 @@ internal class DovecotOperatorApplicationLease private constructor(
         } catch (failure: Throwable) {
             failure
         }
+        var completeSucceededCancellation = false
+        var releaseDetachedOpening = false
         synchronized(stateLock) {
             if (failure == null) {
                 openingCancellationSucceeded = true
                 if (closed) {
-                    attempt.complete(null)
+                    completeSucceededCancellation = true
+                } else if (openingOwner == OpeningOwner.Detached) {
+                    releaseDetachedOpening = true
                 }
             } else {
-                attempt.complete(failure)
                 if (closeAttempt === attempt) {
                     closeAttempt = null
                 }
             }
+        }
+        when {
+            failure != null -> attempt.complete(failure)
+            completeSucceededCancellation -> attempt.complete(null)
+            releaseDetachedOpening -> releaseOpening()
         }
     }
 
@@ -582,6 +640,7 @@ internal class DovecotOperatorApplicationLease private constructor(
         val attempt: CloseAttempt,
         val leader: Boolean,
         val openingCancellation: (() -> Unit)?,
+        val releaseOpening: Boolean,
         val closeSession: (() -> Unit)?,
     )
 
@@ -597,6 +656,11 @@ internal class DovecotOperatorApplicationLease private constructor(
         data class Committed(
             val closeSession: () -> Unit,
         ) : LeaseBinding
+    }
+
+    private enum class OpeningOwner {
+        Attached,
+        Detached,
     }
 
     companion object {

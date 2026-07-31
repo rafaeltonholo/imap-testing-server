@@ -1507,6 +1507,223 @@ class DovecotBoundedOperationWorkersTest {
     }
 
     @Test
+    fun abandonedCleanupCanUseAFreshBoundAfterTheOperationDeadline() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val waitResult = AtomicReference<Boolean>()
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+        )
+        val operation = workers.tryAcquire(deadline)!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+
+        assertFailsWith<IllegalStateException> {
+            operation.awaitAbandonedReleaseWithin(
+                TimeUnit.SECONDS.toNanos(1),
+            )
+        }
+        clock.set(deadline)
+        operation.abandon()
+        assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+        assertFalse(operation.awaitRelease())
+        val waiter = Thread {
+            waitResult.set(
+                operation.awaitAbandonedReleaseWithin(
+                    TimeUnit.SECONDS.toNanos(1),
+                ),
+            )
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            waiter.join(100)
+            assertTrue(waiter.isAlive)
+        } finally {
+            releaseCancellation.countDown()
+            waiter.join(1_000)
+        }
+
+        assertFalse(waiter.isAlive)
+        assertEquals(true, waitResult.get())
+        assertEventually {
+            workers.snapshot().let {
+                it.activeOperations == 0 &&
+                    it.abandonedOperations == 0 &&
+                    it.activeActors == 0
+            }
+        }
+    }
+
+    @Test
+    fun abandonedReleaseWaitTimesOutWithAFrozenOperationClock() {
+        val clock = AtomicLong()
+        val deadline = TimeUnit.SECONDS.toNanos(5)
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val workers = DovecotBoundedOperationWorkers(
+            maxOperations = 1,
+            nanoTime = clock::get,
+        )
+        val operation = workers.tryAcquire(deadline)!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+        clock.set(deadline)
+        operation.abandon()
+        assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+
+        try {
+            assertFalse(
+                operation.awaitAbandonedReleaseWithin(
+                    TimeUnit.MILLISECONDS.toNanos(50),
+                ),
+            )
+        } finally {
+            releaseCancellation.countDown()
+        }
+
+        assertTrue(
+            operation.awaitAbandonedReleaseWithin(
+                TimeUnit.SECONDS.toNanos(1),
+            ),
+        )
+        assertEventually {
+            workers.snapshot().let {
+                it.activeOperations == 0 &&
+                    it.abandonedOperations == 0 &&
+                    it.activeActors == 0
+            }
+        }
+    }
+
+    @Test
+    fun abandonedReleaseDoesNotClaimCancellationActionsSucceeded() {
+        val abortCalls = AtomicInteger()
+        val closeCalls = AtomicInteger()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    abortCalls.incrementAndGet()
+                    error("Synthetic abort failure")
+                },
+                close = {
+                    closeCalls.incrementAndGet()
+                    error("Synthetic close failure")
+                },
+            )
+        }
+
+        operation.abandon()
+
+        assertTrue(
+            operation.awaitAbandonedReleaseWithin(
+                TimeUnit.SECONDS.toNanos(1),
+            ),
+        )
+        assertEquals(1, abortCalls.get())
+        assertEquals(1, closeCalls.get())
+        assertEventually {
+            workers.snapshot().let {
+                it.activeOperations == 0 &&
+                    it.abandonedOperations == 0 &&
+                    it.activeActors == 0
+            }
+        }
+    }
+
+    @Test
+    fun freshCleanupWaitRestoresInterruption() {
+        val cancellationStarted = CountDownLatch(2)
+        val releaseCancellation = CountDownLatch(1)
+        val waitEntered = CountDownLatch(1)
+        val waitFailure = AtomicReference<Throwable?>()
+        val interruptRestored = AtomicBoolean()
+        val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
+        val operation = workers.tryAcquire(deadlineAfter())!!
+        operation.execute<Unit> {
+            registerCancellationTarget(
+                identity = Any(),
+                abort = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+                close = {
+                    cancellationStarted.countDown()
+                    releaseCancellation.await()
+                },
+            )
+        }
+        operation.abandon()
+        assertTrue(cancellationStarted.await(1, TimeUnit.SECONDS))
+        val waiter = Thread {
+            try {
+                waitEntered.countDown()
+                operation.awaitAbandonedReleaseWithin(
+                    TimeUnit.SECONDS.toNanos(1),
+                )
+            } catch (failure: Throwable) {
+                waitFailure.set(failure)
+                interruptRestored.set(Thread.currentThread().isInterrupted)
+            } finally {
+                Thread.interrupted()
+            }
+        }.also {
+            it.isDaemon = true
+            it.start()
+        }
+
+        try {
+            assertTrue(waitEntered.await(1, TimeUnit.SECONDS))
+            waiter.interrupt()
+            waiter.join(1_000)
+        } finally {
+            releaseCancellation.countDown()
+            waiter.join(1_000)
+        }
+
+        assertFalse(waiter.isAlive)
+        assertTrue(waitFailure.get() is InterruptedException)
+        assertTrue(interruptRestored.get())
+        assertEventually {
+            workers.snapshot().let {
+                it.activeOperations == 0 &&
+                    it.abandonedOperations == 0 &&
+                    it.activeActors == 0
+            }
+        }
+    }
+
+    @Test
     fun callerCannotReuseTheWorkerContextToRegisterATarget() {
         val workers = DovecotBoundedOperationWorkers()
         val operation = workers.tryAcquire(deadlineAfter())!!

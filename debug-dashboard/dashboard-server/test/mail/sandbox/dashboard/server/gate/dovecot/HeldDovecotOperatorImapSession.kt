@@ -4,9 +4,35 @@ import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
+internal enum class HeldDovecotOperatorLeasedOpenStep {
+    OperationAcquired,
+    LeaseReserved,
+    LeaseRecheckedBeforeTransport,
+    SessionConstructed,
+    LeaseRecheckedBeforeBind,
+    LeaseBound,
+    LeaseRecheckedBeforeHandoff,
+    OperationHandedOff,
+    LeaseCommitted,
+}
+
+internal class LeasedHeldDovecotOperatorImapSession internal constructor(
+    val session: HeldDovecotOperatorImapSession,
+    private val lease: DovecotOperatorApplicationLease,
+    private val restoreDeferredInterruption: () -> Unit,
+) : AutoCloseable {
+    override fun close() = try {
+        lease.close()
+    } finally {
+        restoreDeferredInterruption()
+    }
+}
 
 internal class HeldDovecotOperatorImapSession private constructor(
     private val transport: DovecotOperatorTransport,
@@ -192,6 +218,71 @@ internal class HeldDovecotOperatorImapSession private constructor(
         }
     }
 
+    private fun closeLeased(
+        abortTransports: () -> Unit,
+        recordInterruption: () -> Unit,
+    ) {
+        val deadlineNanos = Math.addExact(
+            System.nanoTime(),
+            SESSION_TIMEOUT.toNanos(),
+        )
+        var acquired = false
+        if (Thread.interrupted()) {
+            recordInterruption()
+        }
+        try {
+            acquired = sessionLock.tryLock()
+            if (!acquired) {
+                afterSessionLockContention()
+                while (!acquired) {
+                    val remaining = deadlineNanos - System.nanoTime()
+                    check(remaining > 0L) {
+                        "Held Dovecot operator leased close " +
+                            "exceeded its deadline"
+                    }
+                    try {
+                        acquired = sessionLock.tryLock(
+                            remaining,
+                            TimeUnit.NANOSECONDS,
+                        )
+                    } catch (_: InterruptedException) {
+                        recordInterruption()
+                        Thread.interrupted()
+                    }
+                }
+            }
+            rejectLivePendingOperation()
+            if (state.get() == SessionState.Closed) return
+            try {
+                abortTransports()
+            } catch (failure: Throwable) {
+                if (failure is InterruptedException) {
+                    recordInterruption()
+                    Thread.interrupted()
+                }
+                markNeedsClose()
+                throw failure
+            }
+            if (Thread.interrupted()) {
+                recordInterruption()
+            }
+            markClosed()
+        } catch (failure: Throwable) {
+            if (failure is InterruptedException) {
+                recordInterruption()
+                Thread.interrupted()
+            }
+            error("Held Dovecot operator leased close failed")
+        } finally {
+            if (acquired) {
+                sessionLock.unlock()
+            }
+            if (Thread.interrupted()) {
+                recordInterruption()
+            }
+        }
+    }
+
     private fun <T> withSessionLock(
         timeout: Duration,
         interruptionMessage: String,
@@ -344,6 +435,326 @@ internal class HeldDovecotOperatorImapSession private constructor(
         state.set(SessionState.Closed)
     }
 
+    private class LeasedOpeningCloseController(
+        private val operation: DovecotBoundedOperation,
+    ) {
+        private val lock = ReentrantLock()
+        private val transports = mutableListOf<DovecotOperatorTransport>()
+        private var phase = Phase.Opening
+        private var session: HeldDovecotOperatorImapSession? = null
+        private var closeAttempt: ControllerCloseAttempt? = null
+
+        fun recordTransport(transport: DovecotOperatorTransport) {
+            val accepted = lock.withLock {
+                if (transports.none { registered -> registered === transport }) {
+                    transports += transport
+                }
+                phase == Phase.Opening
+            }
+            check(accepted) {
+                "Held Dovecot operator lease stopped transport allocation"
+            }
+        }
+
+        fun attachSession(attached: HeldDovecotOperatorImapSession) {
+            var closing: ControllerCloseAttempt? = null
+            val accepted = lock.withLock {
+                when (phase) {
+                    Phase.Opening -> {
+                        check(session == null) {
+                            "Held Dovecot operator lease already has a session"
+                        }
+                        session = attached
+                        true
+                    }
+                    Phase.Closing -> {
+                        closing = checkNotNull(closeAttempt)
+                        false
+                    }
+                    Phase.Closed -> false
+                    Phase.HandoffDeciding,
+                    Phase.HandedOff,
+                    -> error(
+                        "Held Dovecot operator lease session attached late",
+                    )
+                }
+            }
+            if (accepted) return
+
+            val closeFailure = closing?.await()
+            if (closeFailure == null) {
+                attached.markClosed()
+            } else {
+                lock.withLock {
+                    if (phase == Phase.Opening && session == null) {
+                        session = attached
+                    }
+                }
+                throw closeFailure
+            }
+            error("Held Dovecot operator lease stopped session construction")
+        }
+
+        fun commitHandoff(
+            deadline: DovecotTask6ProofDeadline,
+        ): Boolean = lock.withLock {
+            if (phase != Phase.Opening) return@withLock false
+            checkNotNull(session) {
+                "Held Dovecot operator lease has no session to hand off"
+            }
+            phase = Phase.HandoffDeciding
+            try {
+                deadline.complete()
+                if (!operation.commitHandoff()) {
+                    phase = Phase.Opening
+                    return@withLock false
+                }
+                phase = Phase.HandedOff
+                true
+            } catch (failure: Throwable) {
+                phase = Phase.Opening
+                throw failure
+            }
+        }
+
+        fun close() {
+            val interruption = InterruptionTracker()
+            try {
+                var leader = false
+                val attempt = lock.withLock {
+                    if (phase == Phase.Closed) return
+                    closeAttempt ?: ControllerCloseAttempt(
+                        origin = when (phase) {
+                            Phase.Opening -> Phase.Opening
+                            Phase.HandedOff -> Phase.HandedOff
+                            Phase.HandoffDeciding -> error(
+                                "Held Dovecot operator handoff lock escaped",
+                            )
+                            Phase.Closing -> error(
+                                "Held Dovecot operator close attempt is absent",
+                            )
+                            Phase.Closed -> error(
+                                "Held Dovecot operator lease is already closed",
+                            )
+                        },
+                    ).also { created ->
+                        closeAttempt = created
+                        phase = Phase.Closing
+                        leader = true
+                    }
+                }
+                if (leader) {
+                    val failure = try {
+                        performClose(
+                            origin = attempt.origin,
+                            interruption = interruption,
+                        )
+                        null
+                    } catch (failure: Throwable) {
+                        failure
+                    }
+                    lock.withLock {
+                        phase =
+                            if (failure == null) {
+                                Phase.Closed
+                            } else {
+                                attempt.origin
+                            }
+                        if (closeAttempt === attempt) {
+                            closeAttempt = null
+                        }
+                    }
+                    attempt.complete(failure)
+                }
+                attempt.await()?.let { failure -> throw failure }
+            } finally {
+                interruption.restore()
+            }
+        }
+
+        fun closeForRegistry() {
+            try {
+                close()
+            } finally {
+                // The registry performs an interruptible completion wait after
+                // this callback. Defer a successful abort's restored flag
+                // until that wait has released the lease.
+                if (Thread.interrupted()) {
+                    deferredRegistryInterruption.set(true)
+                }
+            }
+        }
+
+        fun restoreDeferredRegistryInterruption() {
+            if (deferredRegistryInterruption.get() == true) {
+                deferredRegistryInterruption.remove()
+                Thread.currentThread().interrupt()
+            }
+        }
+
+        private fun performClose(
+            origin: Phase,
+            interruption: InterruptionTracker,
+        ) {
+            try {
+                when (origin) {
+                    Phase.Opening -> {
+                        operation.abandon()
+                        awaitOpeningActorQuiescence()
+                        interruption.captureFlag()
+                        abortRecordedTransports(interruption)
+                        lock.withLock { session }?.markClosed()
+                    }
+                    Phase.HandedOff -> {
+                        checkNotNull(lock.withLock { session }).closeLeased(
+                            abortTransports = {
+                                abortRecordedTransports(interruption)
+                            },
+                            recordInterruption = interruption::record,
+                        )
+                    }
+                    Phase.HandoffDeciding,
+                    Phase.Closing,
+                    Phase.Closed,
+                    -> error("Held Dovecot operator close phase is invalid")
+                }
+            } finally {
+                interruption.captureFlag()
+            }
+        }
+
+        private fun awaitOpeningActorQuiescence() {
+            val startedAt = System.nanoTime()
+            var interrupted = Thread.interrupted()
+            try {
+                while (true) {
+                    val elapsed = System.nanoTime() - startedAt
+                    val remaining =
+                        if (elapsed >= LEASE_CLEANUP_WAIT_NANOS) {
+                            0L
+                        } else {
+                            LEASE_CLEANUP_WAIT_NANOS - elapsed
+                        }
+                    check(remaining > 0L) {
+                        "Held Dovecot operator opening actors did not quiesce"
+                    }
+                    try {
+                        check(
+                            operation.awaitAbandonedReleaseWithin(remaining),
+                        ) {
+                            "Held Dovecot operator opening actors " +
+                                "did not quiesce"
+                        }
+                        return
+                    } catch (_: InterruptedException) {
+                        interrupted = true
+                        Thread.interrupted()
+                    }
+                }
+            } finally {
+                if (Thread.interrupted()) {
+                    interrupted = true
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+
+        private fun abortRecordedTransports(
+            interruption: InterruptionTracker,
+        ) {
+            interruption.captureFlag()
+            val recorded = lock.withLock { transports.toList() }
+            var failed = false
+            recorded.forEach { transport ->
+                try {
+                    transport.abort()
+                } catch (_: InterruptedException) {
+                    interruption.record()
+                    failed = true
+                    Thread.interrupted()
+                } catch (_: Throwable) {
+                    failed = true
+                } finally {
+                    interruption.captureFlag()
+                }
+            }
+            check(!failed) {
+                "Held Dovecot operator leased transport abort failed"
+            }
+        }
+
+        private class InterruptionTracker {
+            private var interrupted = Thread.interrupted()
+
+            fun record() {
+                interrupted = true
+            }
+
+            fun captureFlag() {
+                if (Thread.interrupted()) {
+                    record()
+                }
+            }
+
+            fun restore() {
+                captureFlag()
+                if (interrupted) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+
+        private class ControllerCloseAttempt(
+            val origin: Phase,
+        ) {
+            private val completed = CountDownLatch(1)
+            private val outcome = AtomicReference<ControllerCloseOutcome?>()
+
+            fun complete(failure: Throwable?) {
+                if (
+                    outcome.compareAndSet(
+                        null,
+                        ControllerCloseOutcome(failure),
+                    )
+                ) {
+                    completed.countDown()
+                }
+            }
+
+            fun await(): Throwable? {
+                var interrupted = false
+                while (true) {
+                    try {
+                        completed.await()
+                        break
+                    } catch (_: InterruptedException) {
+                        interrupted = true
+                    }
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt()
+                }
+                return checkNotNull(outcome.get()).failure
+            }
+        }
+
+        private data class ControllerCloseOutcome(
+            val failure: Throwable?,
+        )
+
+        private enum class Phase {
+            Opening,
+            HandoffDeciding,
+            HandedOff,
+            Closing,
+            Closed,
+        }
+
+        private val deferredRegistryInterruption = ThreadLocal<Boolean>()
+    }
+
     private enum class SessionState {
         Open,
         NeedsClose,
@@ -351,6 +762,202 @@ internal class HeldDovecotOperatorImapSession private constructor(
     }
 
     companion object {
+        fun openAndSeedLeased(
+            leaseRegistry: DovecotOperatorApplicationLeaseRegistry,
+            transportFactory: DovecotOperatorTransportFactory,
+            target: DovecotOperatorTarget,
+            credential: DovecotOperatorCredential,
+            message: ByteArray,
+            verificationLease: Boolean = false,
+            timeout: Duration = SESSION_TIMEOUT,
+            operationWorkers: DovecotBoundedOperationWorkers =
+                DovecotBoundedOperationWorkers.processWide,
+            beforeFailureClassification: (Throwable) -> Unit = {},
+            afterLeasedOpenStep:
+                (HeldDovecotOperatorLeasedOpenStep) -> Unit = {},
+            afterSessionLockContention: () -> Unit = {},
+        ): LeasedHeldDovecotOperatorImapSession {
+            var operation: DovecotBoundedOperation? = null
+            var closeController: LeasedOpeningCloseController? = null
+            var reservation: DovecotOperatorOpeningLeaseReservation? = null
+            var deadline: DovecotTask6ProofDeadline? = null
+            try {
+                val operationDeadline = DovecotTask6ProofDeadline(timeout) {}
+                deadline = operationDeadline
+                requireValidMessage(message)
+                val acquired = operationWorkers.tryAcquire(
+                    operationDeadline.deadlineNanos,
+                ) ?: error(
+                    "Held Dovecot operator capacity was exhausted",
+                )
+                operation = acquired
+                val controller = LeasedOpeningCloseController(acquired)
+                closeController = controller
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.OperationAcquired,
+                )
+                val openingReservation = if (verificationLease) {
+                    leaseRegistry.reserveVerificationOpening(
+                        id = credential.id,
+                        cancelOpening = controller::closeForRegistry,
+                    )
+                } else {
+                    leaseRegistry.reserveOpening(
+                        id = credential.id,
+                        cancelOpening = controller::closeForRegistry,
+                    )
+                }
+                reservation = openingReservation
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.LeaseReserved,
+                )
+                openingReservation.recheck()
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep
+                        .LeaseRecheckedBeforeTransport,
+                )
+                val opened = openTransport(
+                    operation = acquired,
+                    transportFactory = transportFactory,
+                    onAllocated = controller::recordTransport,
+                )
+                val io = HeldIo(acquired, opened)
+                requireGreeting(io)
+                authenticate(
+                    io = io,
+                    target = target,
+                    credential = credential,
+                )
+                appendMessage(io, message)
+                val session = HeldDovecotOperatorImapSession(
+                    transport = opened,
+                    operationWorkers = operationWorkers,
+                    beforeFailureClassification =
+                        beforeFailureClassification,
+                    afterSessionLockContention =
+                        afterSessionLockContention,
+                )
+                controller.attachSession(session)
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.SessionConstructed,
+                )
+                openingReservation.recheck()
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep
+                        .LeaseRecheckedBeforeBind,
+                )
+                openingReservation.bind(controller::closeForRegistry)
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.LeaseBound,
+                )
+                openingReservation.recheck()
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep
+                        .LeaseRecheckedBeforeHandoff,
+                )
+                check(
+                    controller.commitHandoff(operationDeadline),
+                ) {
+                    "Held Dovecot operator operation exceeded its deadline"
+                }
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.OperationHandedOff,
+                )
+                val lease = openingReservation.commit()
+                afterLeasedOpenStep(
+                    HeldDovecotOperatorLeasedOpenStep.LeaseCommitted,
+                )
+                return LeasedHeldDovecotOperatorImapSession(
+                    session = session,
+                    lease = lease,
+                    restoreDeferredInterruption =
+                        controller::restoreDeferredRegistryInterruption,
+                )
+            } catch (failure: Throwable) {
+                var interrupted = failure is InterruptedException
+                if (Thread.interrupted()) {
+                    interrupted = true
+                }
+                var cleanupSucceeded = closeController == null
+                var reservationReleased = reservation == null
+                try {
+                    if (closeController != null) {
+                        closeController.close()
+                        cleanupSucceeded = true
+                    } else {
+                        operation?.abandon()
+                    }
+                    if (Thread.interrupted()) {
+                        interrupted = true
+                    }
+                    if (cleanupSucceeded) {
+                        try {
+                            reservation?.close()
+                            reservationReleased = true
+                        } finally {
+                            closeController
+                                ?.restoreDeferredRegistryInterruption()
+                            if (Thread.interrupted()) {
+                                interrupted = true
+                            }
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    Thread.interrupted()
+                } catch (_: Throwable) {
+                    // The reservation remains tracked when cleanup is not
+                    // proven complete, so no live transport becomes unleased.
+                    if (Thread.interrupted()) {
+                        interrupted = true
+                    }
+                } finally {
+                    if (!cleanupSucceeded || !reservationReleased) {
+                        try {
+                            reservation
+                                ?.detachOwnerAfterFailedCleanup()
+                        } catch (_: InterruptedException) {
+                            interrupted = true
+                            Thread.interrupted()
+                        } catch (_: Throwable) {
+                            if (Thread.interrupted()) {
+                                interrupted = true
+                            }
+                            // Detachment is terminal before any retryable
+                            // release failure is reported.
+                        } finally {
+                            closeController
+                                ?.restoreDeferredRegistryInterruption()
+                            if (Thread.interrupted()) {
+                                interrupted = true
+                            }
+                        }
+                    }
+                }
+                try {
+                    beforeFailureClassification(failure)
+                } finally {
+                    if (Thread.interrupted()) {
+                        interrupted = true
+                    }
+                    if (interrupted) {
+                        Thread.currentThread().interrupt()
+                    }
+                }
+                if (interrupted) {
+                    throwRedactedInterruption(
+                        "Held Dovecot operator seed proof was interrupted",
+                    )
+                }
+                if (failure is IllegalArgumentException) throw failure
+                error("Held Dovecot operator seed proof failed")
+            } finally {
+                deadline?.close()
+                credential.close()
+                message.fill(0)
+            }
+        }
+
         fun openAndSeed(
             transportFactory: DovecotOperatorTransportFactory,
             target: DovecotOperatorTarget,
@@ -423,9 +1030,11 @@ internal class HeldDovecotOperatorImapSession private constructor(
         private fun openTransport(
             operation: DovecotBoundedOperation,
             transportFactory: DovecotOperatorTransportFactory,
+            onAllocated: (DovecotOperatorTransport) -> Unit = {},
         ): DovecotOperatorTransport = operation.execute {
             var allocated: DovecotOperatorTransport? = null
             val opened = transportFactory.open { candidate ->
+                onAllocated(candidate)
                 registerCancellationTarget(
                     identity = candidate,
                     abort = candidate::abort,
@@ -437,6 +1046,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
                 allocated = candidate
             }
             if (allocated !== opened) {
+                onAllocated(opened)
                 registerCancellationTarget(
                     identity = opened,
                     abort = opened::abort,
@@ -849,6 +1459,8 @@ internal class HeldDovecotOperatorImapSession private constructor(
         private const val MAX_MESSAGE_BYTES = 16 * 1024
         private val CANCELLATION_WAIT_NANOS =
             TimeUnit.MILLISECONDS.toNanos(100)
+        private val LEASE_CLEANUP_WAIT_NANOS =
+            TimeUnit.SECONDS.toNanos(1)
         private const val USABILITY_NOOP_TAG = "A003"
         private val REQUIRED_MESSAGE_HEADERS = listOf(
             "From",

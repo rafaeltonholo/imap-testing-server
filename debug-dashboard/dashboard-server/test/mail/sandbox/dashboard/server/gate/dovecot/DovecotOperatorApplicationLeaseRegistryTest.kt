@@ -72,6 +72,162 @@ class DovecotOperatorApplicationLeaseRegistryTest {
     }
 
     @Test
+    fun detachedOpeningOwnerRetainsTheLeaseWithoutCancellingIt() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val cancellationCalls = AtomicInteger()
+        val reservation = registry.reserveOpening(DovecotOperatorId.A) {
+            cancellationCalls.incrementAndGet()
+        }
+
+        reservation.detachOwnerAfterFailedCleanup()
+
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+        assertEquals(0, cancellationCalls.get())
+        assertFailsWith<IllegalStateException> {
+            reservation.recheck()
+        }
+        assertFailsWith<IllegalStateException> {
+            reservation.close()
+        }
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+
+        assertEquals(1, cancellationCalls.get())
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+        assertFailsWith<IllegalStateException> {
+            reservation.close()
+        }
+    }
+
+    @Test
+    fun detachedOpeningRetriesFailedCancellationWithoutItsOwner() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val cancellationCalls = AtomicInteger()
+        val reservation = registry.reserveOpening(DovecotOperatorId.A) {
+            if (cancellationCalls.incrementAndGet() == 1) {
+                throw TerminalCloseFailure()
+            }
+        }
+        reservation.detachOwnerAfterFailedCleanup()
+
+        assertFailsWith<TerminalCloseFailure> {
+            registry.blockAndDrain(DovecotOperatorId.A)
+        }
+
+        assertEquals(1, cancellationCalls.get())
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+
+        assertEquals(2, cancellationCalls.get())
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun detachingAfterOpeningCancellationReleasesTheWaitingDrain() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val cancellationReturned = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val drainFailure = AtomicReference<Throwable?>()
+        val reservation = registry.reserveOpening(DovecotOperatorId.A) {
+            cancellationReturned.countDown()
+        }
+        val drain = thread(
+            isDaemon = true,
+            name = "opening-detach-after-cancel",
+        ) {
+            try {
+                registry.blockAndDrain(DovecotOperatorId.A)
+            } catch (failure: Throwable) {
+                drainFailure.set(failure)
+            } finally {
+                drainFinished.countDown()
+            }
+        }
+
+        assertTrue(cancellationReturned.await(1, TimeUnit.SECONDS))
+        assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+
+        reservation.detachOwnerAfterFailedCleanup()
+        assertTrue(drainFinished.await(1, TimeUnit.SECONDS))
+        drain.join(1_000)
+
+        assertNull(drainFailure.get())
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun detachDuringOpeningCancellationReleasesOnlyAfterItSucceeds() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val cancellationEntered = CountDownLatch(1)
+        val cancellationRelease = CountDownLatch(1)
+        val drainFinished = CountDownLatch(1)
+        val drainFailure = AtomicReference<Throwable?>()
+        val cancellationCalls = AtomicInteger()
+        val reservation = registry.reserveOpening(DovecotOperatorId.A) {
+            cancellationCalls.incrementAndGet()
+            cancellationEntered.countDown()
+            cancellationRelease.await()
+        }
+        val drain = thread(
+            isDaemon = true,
+            name = "opening-detach-during-cancel",
+        ) {
+            try {
+                registry.blockAndDrain(DovecotOperatorId.A)
+            } catch (failure: Throwable) {
+                drainFailure.set(failure)
+            } finally {
+                drainFinished.countDown()
+            }
+        }
+
+        assertTrue(cancellationEntered.await(1, TimeUnit.SECONDS))
+        reservation.detachOwnerAfterFailedCleanup()
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+        assertFalse(drainFinished.await(100, TimeUnit.MILLISECONDS))
+
+        cancellationRelease.countDown()
+        assertTrue(drainFinished.await(1, TimeUnit.SECONDS))
+        drain.join(1_000)
+
+        assertNull(drainFailure.get())
+        assertEquals(1, cancellationCalls.get())
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
+    fun detachedBoundReservationRetriesItsFailedCloseCallback() {
+        val registry =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
+        val closeCalls = AtomicInteger()
+        val reservation = registry.reserveOpening(DovecotOperatorId.A) {}
+        reservation.bind {
+            if (closeCalls.incrementAndGet() == 1) {
+                throw TerminalCloseFailure()
+            }
+        }
+        reservation.detachOwnerAfterFailedCleanup()
+
+        assertFailsWith<TerminalCloseFailure> {
+            registry.blockAndDrain(DovecotOperatorId.A)
+        }
+
+        assertEquals(1, closeCalls.get())
+        assertEquals(1, registry.openLeaseCount(DovecotOperatorId.A))
+
+        registry.blockAndDrain(DovecotOperatorId.A)
+
+        assertEquals(2, closeCalls.get())
+        assertEquals(0, registry.openLeaseCount(DovecotOperatorId.A))
+    }
+
+    @Test
     fun recheckRejectsAnInactiveOpeningReservation() {
         val registry =
             DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)

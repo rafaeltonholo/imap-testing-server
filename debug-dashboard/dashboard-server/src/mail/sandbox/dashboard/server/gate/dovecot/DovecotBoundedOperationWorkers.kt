@@ -454,6 +454,35 @@ internal class DovecotBoundedOperation internal constructor(
         }
     }
 
+    /**
+     * Waits for an abandoned operation's actors and accounting to quiesce.
+     *
+     * Cancellation actions are best effort, so success is not transport
+     * close/reap proof.
+     */
+    fun awaitAbandonedReleaseWithin(maxWaitNanos: Long): Boolean {
+        require(maxWaitNanos > 0L) {
+            "Dovecot cleanup wait must be positive"
+        }
+        lock.withLock {
+            check(abandoned) {
+                "Only an abandoned Dovecot operation may use a fresh " +
+                    "cleanup wait"
+            }
+            var remaining = maxWaitNanos
+            while (!reservationReleased) {
+                if (remaining <= 0L) return false
+                try {
+                    remaining = released.awaitNanos(remaining)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw interrupted
+                }
+            }
+            return true
+        }
+    }
+
     internal fun isReleased(): Boolean =
         lock.withLock {
             reservationReleased
