@@ -288,7 +288,7 @@ class DovecotTask6OperatorProcessInventoryTest {
     }
 
     @Test
-    fun rejectsHeaderPaddingOutsideTheExactLiteralHeader() {
+    fun acceptsDockerAlignedHeaderAndRowsFromTheFixedTopCommand() {
         InventoryFixture().use { fixture ->
             val output =
                 "PID                 COMMAND\n" +
@@ -298,12 +298,13 @@ class DovecotTask6OperatorProcessInventoryTest {
                 fixture.successfulResults(topOutput = output),
             )
 
-            assertInvalidInventory {
+            assertEquals(
+                1,
                 DovecotTask6OperatorProcessInventory(
                     fixture.profile,
                     runner,
-                ).count()
-            }
+                ).count(),
+            )
         }
     }
 

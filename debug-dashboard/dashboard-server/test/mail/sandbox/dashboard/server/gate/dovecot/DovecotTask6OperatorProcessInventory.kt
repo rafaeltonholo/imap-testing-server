@@ -157,7 +157,7 @@ internal class DovecotTask6OperatorProcessInventory(
         check(
             lines.size >= 2 &&
                 lines.last().isEmpty() &&
-                lines.first() == TOP_HEADER,
+                TOP_HEADER.matches(lines.first()),
         )
         val seenPids = mutableSetOf<String>()
         var count = 0
@@ -374,7 +374,7 @@ internal class DovecotTask6OperatorProcessInventory(
         private const val COMPOSE_CONTAINER_NUMBER_LABEL =
             "com.docker.compose.container-number"
         private const val NETWORK_ID_KEY = "NetworkID"
-        private const val TOP_HEADER = "PID COMMAND"
+        private val TOP_HEADER = Regex("PID +COMMAND")
         private const val MAX_OPENSSL_PROCESSES = 16
         private const val MAX_PROCESS_OUTPUT_BYTES = 64 * 1024
         private val PROCESS_TIMEOUT: Duration = Duration.ofSeconds(10)
