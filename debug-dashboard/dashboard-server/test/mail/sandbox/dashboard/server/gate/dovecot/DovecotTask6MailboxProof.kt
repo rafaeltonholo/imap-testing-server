@@ -3,6 +3,7 @@ package mail.sandbox.dashboard.server.gate.dovecot
 import java.nio.charset.StandardCharsets
 
 internal fun seedAndProbeTask6IsolationMailbox(
+    leaseRegistry: DovecotOperatorApplicationLeaseRegistry,
     transportFactory: DovecotOperatorTransportFactory,
     target: DovecotOperatorTarget,
     credentialSupplier: () -> DovecotOperatorCredential,
@@ -11,7 +12,8 @@ internal fun seedAndProbeTask6IsolationMailbox(
     var seedCredential: DovecotOperatorCredential? = null
     try {
         seedCredential = credentialSupplier()
-        HeldDovecotOperatorImapSession.openAndSeed(
+        HeldDovecotOperatorImapSession.openAndSeedLeased(
+            leaseRegistry = leaseRegistry,
             transportFactory = transportFactory,
             target = target,
             credential = seedCredential,

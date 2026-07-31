@@ -552,7 +552,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             transcript = SEED_TRANSCRIPT,
             cancellationDelayMillis = 150,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("delayed-cancellation-secret"),
@@ -587,7 +588,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             transcript = SEED_TRANSCRIPT,
             blockAbort = true,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("blocked-noop-abort-secret"),
@@ -638,7 +640,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             transcript = SEED_TRANSCRIPT,
             blockAbort = true,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("blocked-post-close-abort-secret"),
@@ -698,7 +701,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             {
                 failure.set(
                     runCatching {
-                        HeldDovecotOperatorImapSession.openAndSeed(
+                        HeldDovecotOperatorImapSession
+                            .openAndSeedUnleasedForDeterministicTransportTest(
                             transportFactory =
                                 DovecotOperatorTransportFactory { register ->
                                     register(transport)
@@ -791,7 +795,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         try {
             Thread.currentThread().interrupt()
             assertFailsWith<InterruptedException> {
-                HeldDovecotOperatorImapSession.openAndSeed(
+                HeldDovecotOperatorImapSession
+                    .openAndSeedUnleasedForDeterministicTransportTest(
                     transportFactory = DovecotOperatorTransportFactory {
                         openCalls.incrementAndGet()
                         error("Pre-interrupted open must not allocate transport")
@@ -841,7 +846,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             {
                 try {
                     returned.set(
-                        HeldDovecotOperatorImapSession.openAndSeed(
+                        HeldDovecotOperatorImapSession
+                            .openAndSeedUnleasedForDeterministicTransportTest(
                             transportFactory = factoryFor(transport),
                             target = TARGET,
                             credential = credential,
@@ -943,7 +949,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             {
                 try {
                     returned.set(
-                        HeldDovecotOperatorImapSession.openAndSeed(
+                        HeldDovecotOperatorImapSession
+                            .openAndSeedUnleasedForDeterministicTransportTest(
                             transportFactory = factoryFor(transport),
                             target = TARGET,
                             credential = credential,
@@ -1016,7 +1023,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun preInterruptedUsabilityProofFailsBeforeTransportIo() {
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("pre-interrupted-noop-secret"),
@@ -1048,7 +1056,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     @Test
     fun preInterruptedPostCloseValidationFailsBeforeTransportIo() {
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("pre-interrupted-post-close-secret"),
@@ -1081,7 +1090,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     fun postCloseValidationDoesNotTreatInterruptionAsUnusability() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("interrupted-post-close-secret"),
@@ -1127,7 +1137,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val caller = Thread(
             {
                 try {
-                    HeldDovecotOperatorImapSession.openAndSeed(
+                    HeldDovecotOperatorImapSession
+                        .openAndSeedUnleasedForDeterministicTransportTest(
                         transportFactory = factoryFor(transport),
                         target = TARGET,
                         credential = credential,
@@ -1199,7 +1210,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val classificationCalls = AtomicInteger()
         val classificationReached = CountDownLatch(1)
         val releaseClassification = CountDownLatch(1)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("interrupted-noop-credential"),
@@ -1279,7 +1291,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val classificationCalls = AtomicInteger()
         val classificationReached = CountDownLatch(1)
         val releaseClassification = CountDownLatch(1)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("interrupted-post-close-credential"),
@@ -1364,7 +1377,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val sentinel = FailureClassificationSentinel()
 
         val caught = assertFailsWith<FailureClassificationSentinel> {
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = factoryFor(transport),
                 target = TARGET,
                 credential = credential,
@@ -1399,7 +1413,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             blockAbort = true,
             blockClose = true,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("dual-block-noop-credential"),
@@ -1488,7 +1503,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             {
                 failure.set(
                     runCatching {
-                        HeldDovecotOperatorImapSession.openAndSeed(
+                        HeldDovecotOperatorImapSession
+                            .openAndSeedUnleasedForDeterministicTransportTest(
                             transportFactory = factoryFor(transport),
                             target = TARGET,
                             credential = credential,
@@ -1554,7 +1570,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             {
                 failure.set(
                     runCatching {
-                        HeldDovecotOperatorImapSession.openAndSeed(
+                        HeldDovecotOperatorImapSession
+                            .openAndSeedUnleasedForDeterministicTransportTest(
                             transportFactory =
                                 DovecotOperatorTransportFactory { register ->
                                     register(transport)
@@ -1658,7 +1675,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     fun blockedPostCloseIoAbortAndCloseCannotKeepCallerBlocked() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("dual-block-post-close-credential"),
@@ -1720,7 +1738,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     fun blockedExplicitCloseRetainsSerializationAndPublishesLateTransportClose() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 2)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("bounded-explicit-close-credential"),
@@ -1818,7 +1837,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             )
         }
         val sessions = transports.mapIndexed { index, transport ->
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = factoryFor(transport),
                 target = TARGET,
                 credential = credential("capacity-session-$index"),
@@ -1874,7 +1894,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             val fifthMessage = validMessage()
             val fifthCredential = credential("rejected-fifth-credential")
             assertFailsWith<IllegalStateException> {
-                HeldDovecotOperatorImapSession.openAndSeed(
+                HeldDovecotOperatorImapSession
+                    .openAndSeedUnleasedForDeterministicTransportTest(
                     transportFactory = DovecotOperatorTransportFactory {
                         fifthAllocations.incrementAndGet()
                         error(
@@ -1908,7 +1929,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         assertTrue(sessions.all { session -> session.isClosed })
 
         val recoveryTransport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val recovered = HeldDovecotOperatorImapSession.openAndSeed(
+        val recovered = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(recoveryTransport),
             target = TARGET,
             credential = credential("recovered-capacity-credential"),
@@ -1927,7 +1949,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     fun runtimeCloseCallersJoinAndReplayDelayedHeldCloseFailure() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("runtime-close-replay-credential"),
@@ -2024,7 +2047,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val credential = credential("invalid-timeout-secret")
 
         assertFailsWith<IllegalArgumentException> {
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = DovecotOperatorTransportFactory {
                     error("Invalid timeout must fail before opening transport")
                 },
@@ -2072,7 +2096,8 @@ class DovecotHeldOperatorImapDeadlineTest {
 
         val elapsed = try {
             assertFailsWith<IllegalStateException> {
-                HeldDovecotOperatorImapSession.openAndSeed(
+                HeldDovecotOperatorImapSession
+                    .openAndSeedUnleasedForDeterministicTransportTest(
                     transportFactory = DovecotOperatorTransportFactory { register ->
                         openStarted.countDown()
                         while (true) {
@@ -2126,7 +2151,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             val started = System.nanoTime()
 
             assertFailsWith<IllegalStateException>(block.name) {
-                HeldDovecotOperatorImapSession.openAndSeed(
+                HeldDovecotOperatorImapSession
+                    .openAndSeedUnleasedForDeterministicTransportTest(
                     transportFactory = factoryFor(transport),
                     target = TARGET,
                     credential = credential,
@@ -2155,7 +2181,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         DeadlineTestTransport.Block.entries.forEach { block ->
             val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
             val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-            val session = HeldDovecotOperatorImapSession.openAndSeed(
+            val session = HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = factoryFor(transport),
                 target = TARGET,
                 credential = credential("noop-${block.name}-secret"),
@@ -2187,7 +2214,8 @@ class DovecotHeldOperatorImapDeadlineTest {
     fun postCloseValidationUsesCoordinatorAndHasBoundedCompletion() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = DeadlineTestTransport(SEED_TRANSCRIPT)
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("post-close-secret"),
@@ -2223,7 +2251,8 @@ class DovecotHeldOperatorImapDeadlineTest {
             blockAbort = true,
             blockClose = true,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = factoryFor(transport),
             target = TARGET,
             credential = credential("deadline-close-retry-secret"),
@@ -2295,7 +2324,8 @@ class DovecotHeldOperatorImapDeadlineTest {
         val credential = credential("duplicate-allocation-secret")
 
         assertFailsWith<IllegalStateException> {
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = DovecotOperatorTransportFactory { register ->
                     register(first)
                     register(duplicate)

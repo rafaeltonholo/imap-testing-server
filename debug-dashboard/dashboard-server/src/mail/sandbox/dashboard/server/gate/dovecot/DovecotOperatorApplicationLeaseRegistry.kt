@@ -688,6 +688,10 @@ internal class DovecotOperatorLeasedRotationRuntime(
     private val leases: DovecotOperatorApplicationLeaseRegistry,
     private val prober: DovecotOperatorCredentialProber,
 ) : DovecotOperatorRotationRuntime, AutoCloseable {
+    internal val applicationLeaseRegistry:
+        DovecotOperatorApplicationLeaseRegistry
+        get() = leases
+
     private val generationLock = Any()
     private var lifecycle = RuntimeLifecycle.Open
     private var generation: RuntimeGeneration? = null

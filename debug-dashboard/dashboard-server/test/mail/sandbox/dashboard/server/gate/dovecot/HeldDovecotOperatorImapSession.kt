@@ -958,7 +958,7 @@ internal class HeldDovecotOperatorImapSession private constructor(
             }
         }
 
-        fun openAndSeed(
+        fun openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory: DovecotOperatorTransportFactory,
             target: DovecotOperatorTarget,
             credential: DovecotOperatorCredential,

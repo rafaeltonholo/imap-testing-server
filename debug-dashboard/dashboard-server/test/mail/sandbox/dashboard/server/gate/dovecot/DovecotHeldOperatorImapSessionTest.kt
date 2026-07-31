@@ -731,7 +731,8 @@ class DovecotHeldOperatorImapSessionTest {
                 ).toByteArray(StandardCharsets.US_ASCII),
         )
 
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = DovecotOperatorTransportFactory { register ->
                 register(transport)
                 transport
@@ -777,7 +778,8 @@ class DovecotHeldOperatorImapSessionTest {
         )
 
         assertFailsWith<IllegalArgumentException> {
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = DovecotOperatorTransportFactory {
                     error("Invalid input must fail before opening transport")
                 },
@@ -817,7 +819,8 @@ class DovecotHeldOperatorImapSessionTest {
         val transport = ScriptedHeldOperatorTransport(ByteArray(0))
 
         assertFailsWith<IllegalStateException> {
-            HeldDovecotOperatorImapSession.openAndSeed(
+            HeldDovecotOperatorImapSession
+                .openAndSeedUnleasedForDeterministicTransportTest(
                 transportFactory = DovecotOperatorTransportFactory {
                     transport
                 },
@@ -860,7 +863,8 @@ class DovecotHeldOperatorImapSessionTest {
                 ).toByteArray(StandardCharsets.US_ASCII),
             failedCloseAttempts = 1,
         )
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = DovecotOperatorTransportFactory { register ->
                 register(transport)
                 transport
@@ -903,7 +907,8 @@ class DovecotHeldOperatorImapSessionTest {
     fun postCloseWriteSuccessAbandonsBeforeReleasingCleanupAuthority() {
         val workers = DovecotBoundedOperationWorkers(maxOperations = 1)
         val transport = MisbehavingClosedHeldTransport()
-        val session = HeldDovecotOperatorImapSession.openAndSeed(
+        val session = HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = DovecotOperatorTransportFactory { register ->
                 register(transport)
                 transport
@@ -1154,7 +1159,8 @@ class DovecotHeldOperatorImapSessionTest {
         workers: DovecotBoundedOperationWorkers,
         afterSessionLockContention: () -> Unit,
     ): HeldDovecotOperatorImapSession =
-        HeldDovecotOperatorImapSession.openAndSeed(
+        HeldDovecotOperatorImapSession
+            .openAndSeedUnleasedForDeterministicTransportTest(
             transportFactory = DovecotOperatorTransportFactory { register ->
                 register(transport)
                 transport

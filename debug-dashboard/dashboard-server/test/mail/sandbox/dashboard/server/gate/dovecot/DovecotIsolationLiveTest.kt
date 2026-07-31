@@ -84,14 +84,34 @@ class DovecotIsolationLiveTest {
                 )
             },
         ).run { targetPassword ->
-            assertEquals(
-                DovecotOperatorProbeResult.Success,
-                seedAndProbeTask6IsolationMailbox(
-                    transportFactory = transportFactory,
-                    target = target,
-                    credentialSupplier = store::loadActive,
-                ),
-            )
+            val activeId = store.loadActive().use { it.id }
+            val leases = DovecotOperatorApplicationLeaseRegistry(activeId)
+            var seedFailure: Throwable? = null
+            try {
+                assertEquals(
+                    DovecotOperatorProbeResult.Success,
+                    seedAndProbeTask6IsolationMailbox(
+                        leaseRegistry = leases,
+                        transportFactory = transportFactory,
+                        target = target,
+                        credentialSupplier = store::loadActive,
+                    ),
+                )
+            } catch (failure: Throwable) {
+                seedFailure = failure
+                throw failure
+            } finally {
+                try {
+                    leases.blockAndDrain(activeId)
+                } catch (cleanupFailure: Throwable) {
+                    val primary = seedFailure
+                    if (primary != null) {
+                        primary.addSuppressed(cleanupFailure)
+                    } else {
+                        throw cleanupFailure
+                    }
+                }
+            }
             store.loadActive().use { master ->
                 protocol.requireImapRejected(
                     live.operatorImapsPort,

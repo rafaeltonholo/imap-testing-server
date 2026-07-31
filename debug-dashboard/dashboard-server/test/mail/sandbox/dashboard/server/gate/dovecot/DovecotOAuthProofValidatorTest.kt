@@ -486,6 +486,8 @@ class DovecotOAuthProofValidatorTest {
         val heldCredential = httpTestCredential(
             "task6-shared-held-secret",
         )
+        val heldLeases =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
         val heldMessage = SHARED_CAPACITY_MESSAGE.copyOf()
 
         try {
@@ -502,7 +504,8 @@ class DovecotOAuthProofValidatorTest {
                 ).probe(target, probeCredential),
             )
             assertFailsWith<IllegalStateException> {
-                HeldDovecotOperatorImapSession.openAndSeed(
+                HeldDovecotOperatorImapSession.openAndSeedLeased(
+                    leaseRegistry = heldLeases,
                     transportFactory =
                         DovecotOperatorTransportFactory {
                             heldAllocations.incrementAndGet()
@@ -516,6 +519,10 @@ class DovecotOAuthProofValidatorTest {
                     message = heldMessage,
                 )
             }
+            assertEquals(
+                0,
+                heldLeases.openLeaseCount(DovecotOperatorId.A),
+            )
             assertFailsWith<IllegalStateException> {
                 DovecotBoundedHttpProofClient(
                     port = 1,

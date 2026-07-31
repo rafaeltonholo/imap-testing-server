@@ -79,22 +79,23 @@ class DovecotOperatorRotationLiveTest {
             },
         ).run {
             val oldId = store.loadActive().use { it.id }
-            val leases = DovecotOperatorApplicationLeaseRegistry(oldId)
             val runtime = DovecotOperatorLeasedRotationRuntime(
-                leases = leases,
+                leases = DovecotOperatorApplicationLeaseRegistry(oldId),
                 prober = probe::probe,
             )
-            var oldLease: DovecotOperatorApplicationLease? = null
-            var heldOldSession: HeldDovecotOperatorImapSession? = null
+            val leases = runtime.applicationLeaseRegistry
+            var heldOld:
+                LeasedHeldDovecotOperatorImapSession? = null
             var primaryFailure: Throwable? = null
             try {
                 val oldCredential = store.loadActive()
                 val seedMessage = deterministicRotationMessage(target)
-                val oldSession = try {
+                val oldHolder = try {
                     check(oldCredential.id == oldId) {
                         "Dovecot operator active ID changed before session hold"
                     }
-                    HeldDovecotOperatorImapSession.openAndSeed(
+                    HeldDovecotOperatorImapSession.openAndSeedLeased(
+                        leaseRegistry = leases,
                         transportFactory = transportFactory,
                         target = target,
                         credential = oldCredential,
@@ -105,20 +106,14 @@ class DovecotOperatorRotationLiveTest {
                     seedMessage.fill(0)
                     throw failure
                 }
-                heldOldSession = oldSession
-                val lease = try {
-                    leases.acquire(oldId, oldSession::close)
-                } catch (failure: Throwable) {
-                    oldSession.close()
-                    throw failure
-                }
-                oldLease = lease
+                heldOld = oldHolder
+                val oldSession = oldHolder.session
+                assertEquals(1, leases.openLeaseCount(oldId))
                 oldSession.requireUsable()
 
                 val newId = store.rotateOrRecover(target, runtime)
 
                 assertNotEquals(oldId, newId)
-                assertFalse(lease.isOpen)
                 assertTrue(oldSession.isClosed)
                 oldSession.requireClosedAndUnusable()
                 assertEquals(0, leases.openLeaseCount(oldId))
@@ -186,10 +181,7 @@ class DovecotOperatorRotationLiveTest {
                     runtime.close()
                 }
                 attemptCleanup {
-                    oldLease?.close()
-                }
-                attemptCleanup {
-                    heldOldSession?.close()
+                    heldOld?.close()
                 }
                 cleanupFailure?.let { failure ->
                     val primary = primaryFailure

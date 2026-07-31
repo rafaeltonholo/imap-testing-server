@@ -26,9 +26,102 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DovecotOperatorCredentialStoreTest {
+    @Test
+    fun heldSessionConstructionKeepsUnleasedOpeningFakeOnly() {
+        val serverRoot = repositoryRoot()
+            .resolve("debug-dashboard/dashboard-server")
+        val kotlinSources = linkedMapOf<Path, String>()
+        listOf(
+            serverRoot.resolve("src"),
+            serverRoot.resolve("test"),
+        ).forEach { sourceRoot ->
+            Files.walk(sourceRoot).use { paths ->
+                paths.filter { path ->
+                    Files.isRegularFile(path) &&
+                        path.fileName.toString().endsWith(".kt")
+                }.forEach { path ->
+                    kotlinSources[path] = Files.readString(path)
+                }
+            }
+        }
+
+        val bareName = "openAnd" + "Seed"
+        val barePattern = Regex(
+            """\b${Regex.escape(bareName)}\s*\(""",
+        )
+        val bareHits = kotlinSources
+            .filterValues(barePattern::containsMatchIn)
+            .keys
+        assertTrue(
+            bareHits.isEmpty(),
+            "Bare held-session opening remains in $bareHits",
+        )
+
+        val fakeOnlyName =
+            "openAndSeedUnleasedFor" +
+                "DeterministicTransportTest"
+        val fakeOnlyHits = kotlinSources
+            .filterValues { source -> fakeOnlyName in source }
+            .keys
+        assertEquals(
+            setOf(
+                serverRoot.resolve(
+                    "test/mail/sandbox/dashboard/server/gate/dovecot/" +
+                        "HeldDovecotOperatorImapSession.kt",
+                ),
+                serverRoot.resolve(
+                    "test/mail/sandbox/dashboard/server/gate/dovecot/" +
+                        "DovecotHeldOperatorImapSessionTest.kt",
+                ),
+                serverRoot.resolve(
+                    "test/mail/sandbox/dashboard/server/gate/dovecot/" +
+                        "DovecotHeldOperatorImapDeadlineTest.kt",
+                ),
+            ),
+            fakeOnlyHits,
+        )
+
+        val rotationSource = Files.readString(
+            serverRoot.resolve(
+                "test/mail/sandbox/dashboard/server/gate/dovecot/" +
+                    "DovecotOperatorRotationLiveTest.kt",
+            ),
+        )
+        val mailboxSource = Files.readString(
+            serverRoot.resolve(
+                "test/mail/sandbox/dashboard/server/gate/dovecot/" +
+                    "DovecotTask6MailboxProof.kt",
+            ),
+        )
+        assertTrue(
+            "HeldDovecotOperatorImapSession.openAndSeedLeased(" in
+                rotationSource,
+        )
+        assertTrue(
+            "HeldDovecotOperatorImapSession.openAndSeedLeased(" in
+                mailboxSource,
+        )
+        assertTrue(
+            "leaseRegistry: DovecotOperatorApplicationLeaseRegistry" in
+                mailboxSource,
+        )
+        assertFalse(
+            "DovecotOperatorApplicationLeaseRegistry(" in mailboxSource,
+            "Mailbox proof must receive its runtime-owned registry",
+        )
+        assertFalse(
+            Regex(
+                """\.acquire\s*\(\s*oldId\s*,\s*""" +
+                    """oldSession::close\s*\)""",
+            ).containsMatchIn(rotationSource),
+            "Rotation proof retains the post-open lease race",
+        )
+    }
+
     @Test
     fun productionPathsAndTypedIdsAreFixedToTheRepositoryLayout() {
         val repositoryRoot = repositoryRoot()
@@ -1448,6 +1541,7 @@ class DovecotOperatorCredentialStoreTest {
                 DovecotOperatorProbeResult.Success
             },
         )
+        assertSame(registry, runtime.applicationLeaseRegistry)
         val activationBytes = "leased-new-secret".toByteArray()
         DovecotOperatorCredential(
             DovecotOperatorId.B,

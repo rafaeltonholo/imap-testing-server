@@ -81,6 +81,8 @@ class DovecotIsolationMailboxContractTest {
         val target = DovecotOperatorTarget.create(
             "task6-isolation-seed@local.test",
         )
+        val leases =
+            DovecotOperatorApplicationLeaseRegistry(DovecotOperatorId.A)
         val fetchedMessageId =
             "Message-ID: <task6-isolation-read-proof." +
                 "${target.address}>\r\n\r\n"
@@ -117,8 +119,18 @@ class DovecotIsolationMailboxContractTest {
         val openIndex = AtomicInteger()
         val transportFactory = DovecotOperatorTransportFactory { register ->
             when (openIndex.getAndIncrement()) {
-                0 -> seedTransport
+                0 -> {
+                    assertEquals(
+                        1,
+                        leases.openLeaseCount(DovecotOperatorId.A),
+                    )
+                    seedTransport
+                }
                 1 -> {
+                    assertEquals(
+                        0,
+                        leases.openLeaseCount(DovecotOperatorId.A),
+                    )
                     check(seedTransport.closed) {
                         "Seed session must close before the read probe opens"
                     }
@@ -137,6 +149,7 @@ class DovecotIsolationMailboxContractTest {
             assertEquals(
                 DovecotOperatorProbeResult.Success,
                 seedAndProbeTask6IsolationMailbox(
+                    leaseRegistry = leases,
                     transportFactory = transportFactory,
                     target = target,
                     credentialSupplier = {
@@ -163,6 +176,10 @@ class DovecotIsolationMailboxContractTest {
             )
             assertEquals(2, openIndex.get())
             assertEquals(2, credentialIndex.get())
+            assertEquals(
+                0,
+                leases.openLeaseCount(DovecotOperatorId.A),
+            )
             assertTrue(seedTransport.closed)
             assertTrue(readTransport.closed)
             credentials.forEach { credential ->
