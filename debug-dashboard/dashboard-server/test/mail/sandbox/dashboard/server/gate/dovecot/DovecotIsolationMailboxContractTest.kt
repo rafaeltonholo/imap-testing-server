@@ -32,14 +32,15 @@ class DovecotIsolationMailboxContractTest {
             requireDovecotOperatorTargetRejected(
                 target = target,
                 activeMasterId = DovecotOperatorId.A,
-                response = DovecotAuthenticationResponse.AuthorizationFailure,
+                response = DovecotOperatorProbeResult.AuthorizationFailure,
             )
         }
 
         listOf(
-            DovecotAuthenticationResponse.Success,
-            DovecotAuthenticationResponse.PermanentFailure,
-            DovecotAuthenticationResponse.Indeterminate,
+            DovecotOperatorProbeResult.Success,
+            DovecotOperatorProbeResult.AuthenticationFailure,
+            DovecotOperatorProbeResult.ProtocolFailure,
+            DovecotOperatorProbeResult.TransportFailure,
         ).forEach { result ->
             assertFailsWith<IllegalStateException>(result.name) {
                 requireDovecotOperatorTargetRejected(
@@ -57,14 +58,15 @@ class DovecotIsolationMailboxContractTest {
             requireDovecotOperatorTargetRejected(
                 target = activeId.masterUsername,
                 activeMasterId = activeId,
-                response = DovecotAuthenticationResponse.PermanentFailure,
+                response = DovecotOperatorProbeResult.AuthenticationFailure,
             )
         }
 
         listOf(
-            DovecotAuthenticationResponse.Success,
-            DovecotAuthenticationResponse.AuthorizationFailure,
-            DovecotAuthenticationResponse.Indeterminate,
+            DovecotOperatorProbeResult.Success,
+            DovecotOperatorProbeResult.AuthorizationFailure,
+            DovecotOperatorProbeResult.ProtocolFailure,
+            DovecotOperatorProbeResult.TransportFailure,
         ).forEach { result ->
             assertFailsWith<IllegalStateException>(result.name) {
                 requireDovecotOperatorTargetRejected(
@@ -222,16 +224,13 @@ class DovecotIsolationMailboxContractTest {
                         .toByteArray(StandardCharsets.US_ASCII),
                 ),
             )
-            var observedPort: Int? = null
             var observedLogin: String? = null
             var observedCredential: DovecotOperatorCredential? = null
             try {
                 task6RequireInactiveMasterRejected(
-                    port = 19_993,
                     targetAddress = "target@local.test",
                     activeCredential = credential,
-                    requireRejected = { port, combinedLogin, suppliedCredential ->
-                        observedPort = port
+                    requireRejected = { combinedLogin, suppliedCredential ->
                         observedLogin = combinedLogin
                         observedCredential = suppliedCredential
                     },
@@ -240,7 +239,6 @@ class DovecotIsolationMailboxContractTest {
                 val inactiveId = DovecotOperatorId.entries.single {
                     it != activeId
                 }
-                assertEquals(19_993, observedPort)
                 assertEquals(
                     "target@local.test*${inactiveId.masterUsername}",
                     observedLogin,
@@ -250,6 +248,99 @@ class DovecotIsolationMailboxContractTest {
                 credential.close()
             }
         }
+    }
+
+    @Test
+    fun inactiveMasterRejectionCompletesItsPortFreeCheckBeforeReturning() {
+        val credential = task6TestCredential("inactive-master-cleanup")
+        val events = mutableListOf<String>()
+        try {
+            task6RequireInactiveMasterRejected(
+                targetAddress = "target@local.test",
+                activeCredential = credential,
+                requireRejected = { combinedLogin, suppliedCredential ->
+                    events += "check:$combinedLogin"
+                    assertSame(credential, suppliedCredential)
+                    events += "cleanup"
+                },
+            )
+            events += "returned"
+
+            assertEquals(
+                listOf(
+                    "check:target@local.test*dashboard-operator-b",
+                    "cleanup",
+                    "returned",
+                ),
+                events,
+            )
+        } finally {
+            credential.close()
+        }
+    }
+
+    @Test
+    fun portFreeOperatorRejectionClosesBeforeReturningAndConsumesCredential() {
+        val secretBytes =
+            "inactive-master-exchange-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            id = DovecotOperatorId.A,
+            secret = DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val transport = Task6ScriptedOperatorTransport(
+            (
+                "* OK Dovecot ready\r\n" +
+                    "+ VXNlcm5hbWU6\r\n" +
+                    "+ UGFzc3dvcmQ6\r\n" +
+                    "A901 NO [AUTHENTICATIONFAILED] rejected\r\n"
+                ).toByteArray(StandardCharsets.US_ASCII),
+        )
+        val exchange = DovecotOperatorBoundedExchange(
+            DovecotOperatorTransportFactory { register ->
+                register(transport)
+                transport
+            },
+        )
+        val proof = task6ProtocolProofForOperatorExchange(exchange)
+
+        proof.requireOperatorImapRejected(
+            combinedUsername =
+                "target@local.test*dashboard-operator-b",
+            credential = credential,
+        )
+
+        assertTrue(transport.closed)
+        assertTrue(secretBytes.all { it == 0.toByte() })
+        assertFailsWith<IllegalStateException> {
+            credential.withSecretBytes { }
+        }
+    }
+
+    @Test
+    fun ordinaryImapProofCannotAcceptAnOperatorPort() {
+        val publicHelper =
+            DovecotIsolationProtocolProof::class.java.declaredMethods
+                .single { method ->
+                    method.name == "requireOrdinaryImapRejected"
+                }
+        val rawHelper =
+            DovecotIsolationProtocolProof::class.java.declaredMethods
+                .single { method ->
+                    method.name == "ordinaryImapLogin"
+                }
+
+        assertEquals(
+            listOf(
+                String::class.java,
+                DovecotOperatorCredential::class.java,
+            ),
+            publicHelper.parameterTypes.toList(),
+        )
+        assertFalse(
+            Int::class.javaPrimitiveType in rawHelper.parameterTypes,
+            "Ordinary IMAP must use the endpoint frozen by its proof profile",
+        )
     }
 
     @Test
@@ -370,6 +461,18 @@ class DovecotIsolationMailboxContractTest {
             )
         constructor.isAccessible = true
         return constructor.newInstance(SSLContext.getDefault())
+    }
+
+    private fun task6ProtocolProofForOperatorExchange(
+        exchange: DovecotOperatorBoundedExchange,
+    ): DovecotIsolationProtocolProof {
+        val constructor =
+            DovecotIsolationProtocolProof::class.java.getDeclaredConstructor(
+                SSLContext::class.java,
+                DovecotOperatorBoundedExchange::class.java,
+            )
+        constructor.isAccessible = true
+        return constructor.newInstance(SSLContext.getDefault(), exchange)
     }
 
     private fun withTask6SmtpServer(

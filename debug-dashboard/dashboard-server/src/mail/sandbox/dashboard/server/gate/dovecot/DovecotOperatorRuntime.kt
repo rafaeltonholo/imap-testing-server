@@ -16,6 +16,9 @@ internal class DovecotOperatorRuntime private constructor(
     fun probe(): DovecotOperatorProbe =
         DovecotOperatorProbe(transportFactory = transportFactory)
 
+    internal fun transportFactory(): DovecotOperatorTransportFactory =
+        transportFactory
+
     companion object {
         fun production(): DovecotOperatorRuntime {
             val repositoryRoot =
@@ -47,6 +50,16 @@ internal class DovecotOperatorRuntime private constructor(
 
         fun task5Proof(
             profile: DovecotTask5ProofProfile,
+        ): DovecotOperatorRuntime =
+            task5Proof(
+                profile = profile,
+                dockerCandidates = productionDockerCandidates,
+                transportFactoryProvider =
+                    DEFAULT_TRANSPORT_FACTORY_PROVIDER,
+            )
+
+        fun task5Proof(
+            profile: DovecotTask5ProofProfile,
             selectedDockerCli: Path,
         ): DovecotOperatorRuntime =
             task5Proof(
@@ -72,6 +85,22 @@ internal class DovecotOperatorRuntime private constructor(
                         profile.composeOverride,
                     ),
                     projectName = PROOF_PROJECT_NAME,
+                ),
+                transportFactoryProvider = transportFactoryProvider,
+            )
+
+        internal fun task5Proof(
+            profile: DovecotTask5ProofProfile,
+            dockerCandidates: List<Path>,
+            transportFactoryProvider:
+                (DovecotOperatorLaunchProfile) ->
+                    DovecotOperatorTransportFactory,
+        ): DovecotOperatorRuntime =
+            task5Proof(
+                profile = profile,
+                selectedDockerCli = selectDockerCli(
+                    startupEnvironment = emptyMap(),
+                    dockerCandidates = dockerCandidates,
                 ),
                 transportFactoryProvider = transportFactoryProvider,
             )

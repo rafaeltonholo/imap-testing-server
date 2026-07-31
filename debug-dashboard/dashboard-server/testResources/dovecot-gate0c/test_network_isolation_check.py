@@ -73,6 +73,14 @@ class NetworkIsolationCheckPresenceTest(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         self.assertIn('if __name__ == "__main__":', source)
 
+    def test_operator_ports_are_named_only_for_container_and_forbidden_negatives(self):
+        source = HELPER.read_text(encoding="utf-8")
+
+        self.assertIn("_OPERATOR_CONTAINER_TLS_PORT = 31993", source)
+        self.assertIn("_FORBIDDEN_OPERATOR_HOST_PORT = 2993", source)
+        self.assertNotIn("_OPERATOR_" + "IMAPS_PORT", source)
+        self.assertNotIn("\n_OPERATOR_HOST_PORT =", source)
+
 
 class NetworkIsolationInputTest(unittest.TestCase):
     @classmethod

@@ -22,13 +22,19 @@ class DovecotIsolationLiveTest {
         val hostAddresses = discoverTask6HostNonLoopbackIpv4()
         hostAddresses.forEach { address ->
             requireTask6TcpRejected(address, live.ordinaryImapsPort)
-            requireTask6TcpRejected(address, live.operatorImapsPort)
+            requireTask6TcpRejected(
+                address,
+                live.forbiddenOperatorHostPort,
+            )
         }
         topology.requireDefaultNetworkIsolation(
             operatorIngressAddress = runtime.operatorIngressAddress,
             hostAddresses = hostAddresses,
         )
-        val protocol = DovecotIsolationProtocolProof.pinned(live.profile)
+        val protocol = DovecotIsolationProtocolProof.pinned(
+            profile = live.profile,
+            operatorExchange = live.operatorExchange,
+        )
 
         val address =
             "task6-isolation-" +
@@ -64,10 +70,7 @@ class DovecotIsolationLiveTest {
                 ),
             ),
         )
-        val transportFactory =
-            JvmJsseDovecotOperatorTransportFactory.task5Proof(
-                live.profile,
-            )
+        val transportFactory = live.operatorRuntime.transportFactory()
         val probe = DovecotOperatorProbe(
             transportFactory = transportFactory,
             requireMailboxRead = true,
@@ -112,25 +115,25 @@ class DovecotIsolationLiveTest {
                     }
                 }
             }
-            store.loadActive().use { master ->
-                protocol.requireImapRejected(
-                    live.operatorImapsPort,
-                    task6MasterLogin(address, master.id),
-                    targetPassword,
-                )
+            val activeMasterId = store.loadActive().use { it.id }
+            protocol.requireOperatorImapRejected(
+                task6MasterLogin(address, activeMasterId),
+                targetPassword,
+            )
+            store.loadActive().use { activeCredential ->
                 task6RequireInactiveMasterRejected(
-                    port = live.operatorImapsPort,
                     targetAddress = address,
-                    activeCredential = master,
-                    requireRejected = protocol::requireImapRejected,
+                    activeCredential = activeCredential,
+                    requireRejected =
+                        protocol::requireOperatorImapRejected,
                 )
-                protocol.requireImapRejected(
-                    live.operatorImapsPort,
-                    "$address*absent-master",
-                    targetPassword,
-                )
-                protocol.requireImapRejected(
-                    live.ordinaryImapsPort,
+            }
+            protocol.requireOperatorImapRejected(
+                "$address*absent-master",
+                targetPassword,
+            )
+            store.loadActive().use { master ->
+                protocol.requireOrdinaryImapRejected(
                     task6MasterLogin(address, master.id),
                     master,
                 )
@@ -152,20 +155,21 @@ class DovecotIsolationLiveTest {
 
             store.loadActive().use { master ->
                 protocol.requireRawOperatorRejected(
-                    live.operatorImapsPort,
                     "absent-${UUID.randomUUID()}@local.test",
                     master,
                 )
-                PROTECTED_TARGETS.forEach { protected ->
+            }
+            PROTECTED_TARGETS.forEach { protected ->
+                store.loadActive().use { master ->
                     protocol.requireRawOperatorRejected(
-                        live.operatorImapsPort,
                         protected,
                         master,
                     )
                 }
-                DovecotOperatorId.entries.forEach { id ->
+            }
+            DovecotOperatorId.entries.forEach { id ->
+                store.loadActive().use { master ->
                     protocol.requireRawOperatorRejected(
-                        live.operatorImapsPort,
                         id.masterUsername,
                         master,
                     )

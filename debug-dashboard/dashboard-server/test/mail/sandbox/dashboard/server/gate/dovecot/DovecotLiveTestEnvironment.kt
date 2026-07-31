@@ -26,9 +26,9 @@ internal enum class DovecotReadinessBoundary(
 ) {
     ORDINARY_IMAPS("ordinary-imaps"),
     ORDINARY_POP3S("ordinary-pop3s"),
-    OPERATOR_IMAPS("operator-imaps"),
     SMTP("smtp"),
     OAUTH_HEALTH("oauth-health"),
+    OPERATOR_EXEC("operator-exec"),
 }
 
 internal fun interface DovecotLiveTestSleeper {
@@ -37,15 +37,21 @@ internal fun interface DovecotLiveTestSleeper {
 
 internal class DovecotLiveTestEnvironment private constructor(
     internal val profile: DovecotTask5ProofProfile,
+    internal val operatorRuntime: DovecotOperatorRuntime,
     val loopbackAddress: String,
     val ordinaryImapsPort: Int,
     val ordinaryPop3sPort: Int,
-    val operatorImapsPort: Int,
+    val forbiddenOperatorHostPort: Int,
     val smtpPort: Int,
     val oauthPort: Int,
     val tlsCertificate: Path,
     val composeOverride: Path,
 ) {
+    internal val operatorExchange =
+        DovecotOperatorBoundedExchange(
+            operatorRuntime.transportFactory(),
+        )
+
     fun awaitReady(
         maxAttempts: Int = DEFAULT_READINESS_ATTEMPTS,
         delayMillis: Long = DEFAULT_READINESS_DELAY_MILLIS,
@@ -109,6 +115,10 @@ internal class DovecotLiveTestEnvironment private constructor(
         fun load(
             environment: Map<String, String> = System.getenv(),
             repositoryRoot: Path,
+            operatorRuntimeProvider:
+                (DovecotTask5ProofProfile) -> DovecotOperatorRuntime = { profile ->
+                DovecotOperatorRuntime.task5Proof(profile)
+            },
         ): DovecotLiveTestEnvironment {
             val profile = DovecotTask5ProofProfile.load(
                 environment = environment,
@@ -116,10 +126,12 @@ internal class DovecotLiveTestEnvironment private constructor(
             )
             return DovecotLiveTestEnvironment(
                 profile = profile,
+                operatorRuntime = operatorRuntimeProvider(profile),
                 loopbackAddress = profile.loopbackAddress,
                 ordinaryImapsPort = profile.ordinaryImapsPort,
                 ordinaryPop3sPort = profile.ordinaryPop3sPort,
-                operatorImapsPort = profile.operatorImapsPort,
+                forbiddenOperatorHostPort =
+                    profile.forbiddenOperatorHostPort,
                 smtpPort = profile.smtpPort,
                 oauthPort = profile.oauthPort,
                 tlsCertificate = profile.tlsCertificate,
@@ -129,7 +141,7 @@ internal class DovecotLiveTestEnvironment private constructor(
     }
 }
 
-private object JvmDovecotTopologyReadinessProbe :
+internal object JvmDovecotTopologyReadinessProbe :
     DovecotTopologyReadinessProbe {
     override fun isReady(
         environment: DovecotLiveTestEnvironment,
@@ -145,15 +157,13 @@ private object JvmDovecotTopologyReadinessProbe :
             environment.ordinaryPop3sPort,
             "+OK",
         )
-        DovecotReadinessBoundary.OPERATOR_IMAPS -> tlsGreetingReady(
-            pinnedSslContext(environment.profile),
-            environment.operatorImapsPort,
-            "* OK",
-        )
         DovecotReadinessBoundary.SMTP ->
             smtpGreetingReady(environment.smtpPort)
         DovecotReadinessBoundary.OAUTH_HEALTH ->
             oauthHealthReady(environment.oauthPort)
+        DovecotReadinessBoundary.OPERATOR_EXEC ->
+            environment.operatorExchange.greetingReadiness() ==
+                DovecotOperatorProbeResult.Success
     }
 
     private fun pinnedSslContext(

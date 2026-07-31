@@ -57,6 +57,10 @@ class DovecotOperatorConfigTest {
         "debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/" +
             "server/gate/dovecot/DovecotOperatorStartupLiveTest.kt",
     )
+    private val isolationProtocolProofPath = repositoryRoot.resolve(
+        "debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/" +
+            "server/gate/dovecot/DovecotIsolationProtocolProof.kt",
+    )
     private val serviceMapPath = repositoryRoot.resolve(
         ".ai/skills/docker-compose/references/service-map.md",
     )
@@ -437,14 +441,14 @@ class DovecotOperatorConfigTest {
     }
 
     @Test
-    fun task5LiveProofDeniesBareTargetLoginBeforeMasterLoginAndWipesBuffers() {
+    fun task5LiveProofUsesTheBoundedExchangeBeforeCombinedMasterLogin() {
         val source = Files.readString(startupLiveTestPath)
         val addEligible = source.indexOf("addEligibleTarget(")
         val directLogin = source.indexOf(
-            "assertEligibleTargetPasswordRejected(",
+            "authenticateBareTarget(",
         )
         val plainAuthzid = source.indexOf(
-            "assertPlainAuthzidMasterFormRejected(",
+            "authenticatePlainAuthzidMaster(",
         )
         val masterLogin = source.indexOf(
             "val result = probe.probe(target, credential)",
@@ -454,12 +458,41 @@ class DovecotOperatorConfigTest {
         assertTrue(directLogin > addEligible)
         assertTrue(plainAuthzid > directLogin)
         assertTrue(masterLogin > plainAuthzid)
-        assertTrue("A901 AUTHENTICATE LOGIN\\r\\n" in source)
-        assertTrue("completion.startsWithAscii(\"A901 NO\")" in source)
+        assertTrue("live.operatorRuntime.probe()" in source)
+        assertTrue("live.operatorExchange" in source)
         assertTrue("EligibilityPassword" in source)
-        assertTrue("targetPassword.withBytes" in source)
         assertTrue("credentialBuffers.all" in source)
+        val retiredSocketFactory =
+            "JvmJsseDovecotOperator" + "TransportFactory"
+        assertFalse(retiredSocketFactory in source)
+        assertFalse("readBoundedLiveLine(" in source)
+        assertFalse("AUTHENTICATE LOGIN" in source)
         assertFalse("decodeToString" in source)
+    }
+
+    @Test
+    fun task5OrdinaryImapProofUsesOnlyItsFrozenProfileEndpoint() {
+        val source = Files.readString(isolationProtocolProofPath)
+
+        assertEquals(
+            1,
+            source.windowed(
+                "ordinaryImapsPort = profile.ordinaryImapsPort".length,
+            ).count {
+                it == "ordinaryImapsPort = profile.ordinaryImapsPort"
+            },
+        )
+        assertFalse("forbiddenOperatorHostPort" in source)
+        assertFalse(
+            Regex(
+                """fun\s+requireOrdinaryImapRejected\s*\(\s*port\s*:""",
+            ).containsMatchIn(source),
+        )
+        assertFalse(
+            Regex(
+                """fun\s+ordinaryImapLogin\s*\(\s*port\s*:""",
+            ).containsMatchIn(source),
+        )
     }
 
     @Test

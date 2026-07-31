@@ -271,6 +271,58 @@ class DovecotOperatorRuntimeTest {
     }
 
     @Test
+    fun proofSelectsAndBindsTheFirstCanonicalDockerCandidateOnce() =
+        withRuntimeFixture { fixture ->
+            val missing = fixture.workspace.resolve("missing-proof-docker")
+            val symbolicDocker =
+                fixture.workspace.resolve("symbolic-proof-docker")
+            Files.createSymbolicLink(symbolicDocker, fixture.docker)
+            val later = fixture.executable("later-proof-docker")
+            val binding = RecordingRuntimeTransportBinding()
+
+            val runtime = DovecotOperatorRuntime.task5Proof(
+                profile = fixture.proofProfile(),
+                dockerCandidates = listOf(
+                    missing,
+                    symbolicDocker,
+                    later,
+                ),
+                transportFactoryProvider = binding::create,
+            )
+            Files.delete(symbolicDocker)
+
+            assertEquals(fixture.docker, runtime.launchProfile.dockerCli)
+            assertFalse(Files.isSymbolicLink(runtime.launchProfile.dockerCli))
+            assertSame(
+                runtimeTransportFactory(runtime),
+                runtime.transportFactory(),
+            )
+            assertSame(
+                runtime.transportFactory(),
+                runtime.transportFactory(),
+            )
+            assertEquals(1, binding.providerCalls)
+            assertSame(runtime.launchProfile, binding.boundProfile)
+            assertEquals(0, binding.opens)
+        }
+
+    @Test
+    fun proofFailsClosedWhenNoCanonicalDockerCandidateExists() =
+        withRuntimeFixture { fixture ->
+            val failure = assertFailsWith<IllegalStateException> {
+                DovecotOperatorRuntime.task5Proof(
+                    profile = fixture.proofProfile(),
+                    dockerCandidates = listOf(
+                        fixture.workspace.resolve("missing-proof-docker"),
+                    ),
+                    transportFactoryProvider = RecordingRuntimeTransportBinding()::create,
+                )
+            }
+
+            assertEquals(UNAVAILABLE_DOCKER_MESSAGE, failure.message)
+        }
+
+    @Test
     fun productionBindsOneFactoryToTheFrozenProfileAndOpensOnlyOnUse() =
         withRuntimeFixture { fixture ->
             val symbolicDocker =
@@ -416,33 +468,14 @@ class DovecotOperatorRuntimeTest {
         }
 
     @Test
-    fun jsseFactoryRetainsOnlyProofProfileConstructionUntilTask5Migration() {
-        val factoryClass =
-            JvmJsseDovecotOperatorTransportFactory::class.java
-        val companionClass = factoryClass.declaredClasses.single {
-            it.simpleName == "Companion"
+    fun task5MigrationRemovesTheHostSocketOperatorFactory() {
+        assertFailsWith<ClassNotFoundException> {
+            Class.forName(
+                "mail.sandbox.dashboard.server.gate.dovecot." +
+                    "JvmJsseDovecotOperator" +
+                    "TransportFactory",
+            )
         }
-
-        assertTrue(
-            companionClass.declaredMethods.none {
-                it.name.substringBefore('$') == "production"
-            },
-        )
-        val task5Proof = companionClass.declaredMethods.single {
-            it.name == "task5Proof"
-        }
-        assertEquals(
-            listOf(DovecotTask5ProofProfile::class.java),
-            task5Proof.parameterTypes.toList(),
-        )
-        val constructor =
-            factoryClass.declaredConstructors
-                .filterNot { it.isSynthetic }
-                .single()
-        assertEquals(
-            listOf(DovecotTask5ProofProfile::class.java),
-            constructor.parameterTypes.toList(),
-        )
     }
 }
 

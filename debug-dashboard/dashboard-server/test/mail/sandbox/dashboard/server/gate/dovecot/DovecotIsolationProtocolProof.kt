@@ -23,13 +23,13 @@ import javax.net.ssl.TrustManagerFactory
 internal fun requireDovecotOperatorTargetRejected(
     target: String,
     activeMasterId: DovecotOperatorId,
-    response: DovecotAuthenticationResponse,
+    response: DovecotOperatorProbeResult,
 ) {
     val expected =
         if (target == activeMasterId.masterUsername) {
-            DovecotAuthenticationResponse.PermanentFailure
+            DovecotOperatorProbeResult.AuthenticationFailure
         } else {
-            DovecotAuthenticationResponse.AuthorizationFailure
+            DovecotOperatorProbeResult.AuthorizationFailure
         }
     check(response == expected) {
         "Operator forbidden target rejection had the wrong failure class"
@@ -38,53 +38,80 @@ internal fun requireDovecotOperatorTargetRejected(
 
 internal class DovecotIsolationProtocolProof private constructor(
     private val sslContext: SSLContext,
+    private val operatorExchange: DovecotOperatorBoundedExchange?,
+    private val ordinaryImapsPort: Int?,
 ) {
-    fun requireImapRejected(
-        port: Int,
+    private constructor(sslContext: SSLContext) : this(
+        sslContext = sslContext,
+        operatorExchange = null,
+        ordinaryImapsPort = null,
+    )
+
+    private constructor(
+        sslContext: SSLContext,
+        operatorExchange: DovecotOperatorBoundedExchange,
+    ) : this(
+        sslContext = sslContext,
+        operatorExchange = operatorExchange,
+        ordinaryImapsPort = null,
+    )
+
+    fun requireOperatorImapRejected(
         combinedUsername: String,
         password: EligibilityPassword,
     ) {
-        password.withBytes { bytes ->
-            check(
-                rawImapLogin(port, combinedUsername, bytes) ==
-                    DovecotAuthenticationResponse.PermanentFailure,
-            ) {
-                "IMAP rejection was not permanent"
-            }
+        check(
+            requireOperatorExchange().authenticateLogin(
+                username = combinedUsername,
+                password = password,
+            ) == DovecotOperatorProbeResult.AuthenticationFailure,
+        ) {
+            "Operator IMAP rejection was not permanent"
         }
     }
 
-    fun requireImapRejected(
-        port: Int,
+    fun requireOperatorImapRejected(
+        combinedUsername: String,
+        credential: DovecotOperatorCredential,
+    ) {
+        check(
+            requireOperatorExchange().authenticateLogin(
+                username = combinedUsername,
+                credential = credential,
+            ) == DovecotOperatorProbeResult.AuthenticationFailure,
+        ) {
+            "Operator IMAP rejection was not permanent"
+        }
+    }
+
+    fun requireOrdinaryImapRejected(
         combinedUsername: String,
         credential: DovecotOperatorCredential,
     ) {
         credential.withSecretBytes { bytes ->
             check(
-                rawImapLogin(port, combinedUsername, bytes) ==
+                ordinaryImapLogin(combinedUsername, bytes) ==
                     DovecotAuthenticationResponse.PermanentFailure,
             ) {
-                "IMAP rejection was not permanent"
+                "Ordinary IMAP rejection was not permanent"
             }
         }
     }
 
     fun requireRawOperatorRejected(
-        port: Int,
         target: String,
         credential: DovecotOperatorCredential,
     ) {
-        credential.withSecretBytes { bytes ->
-            requireDovecotOperatorTargetRejected(
-                target = target,
-                activeMasterId = credential.id,
-                response = rawImapLogin(
-                    port = port,
-                    username = task6MasterLogin(target, credential.id),
-                    password = bytes,
+        val activeMasterId = credential.id
+        requireDovecotOperatorTargetRejected(
+            target = target,
+            activeMasterId = activeMasterId,
+            response = requireOperatorExchange()
+                .authenticateLogin(
+                    username = task6MasterLogin(target, activeMasterId),
+                    credential = credential,
                 ),
-            )
-        }
+        )
     }
 
     fun requirePop3Rejected(
@@ -232,8 +259,7 @@ internal class DovecotIsolationProtocolProof private constructor(
         }
     }
 
-    private fun rawImapLogin(
-        port: Int,
+    private fun ordinaryImapLogin(
         username: String,
         password: ByteArray,
     ): DovecotAuthenticationResponse {
@@ -241,7 +267,10 @@ internal class DovecotIsolationProtocolProof private constructor(
         val socket = sslContext.socketFactory.createSocket() as SSLSocket
         return try {
             configureTls(socket)
-            socket.connect(loopbackEndpoint(port), SOCKET_TIMEOUT_MILLIS)
+            socket.connect(
+                loopbackEndpoint(requireOrdinaryImapsPort()),
+                SOCKET_TIMEOUT_MILLIS,
+            )
             socket.startHandshake()
             readBoundedLine(socket.inputStream).useBytes { greeting ->
                 require(greeting.startsWithAscii("* OK")) {
@@ -426,9 +455,20 @@ internal class DovecotIsolationProtocolProof private constructor(
     private fun loopbackEndpoint(port: Int): InetSocketAddress =
         InetSocketAddress(LOOPBACK, port)
 
+    private fun requireOperatorExchange(): DovecotOperatorBoundedExchange =
+        checkNotNull(operatorExchange) {
+            "Dovecot operator bounded exchange is unavailable"
+        }
+
+    private fun requireOrdinaryImapsPort(): Int =
+        checkNotNull(ordinaryImapsPort) {
+            "Dovecot ordinary IMAP endpoint is unavailable"
+        }
+
     companion object {
         fun pinned(
             profile: DovecotTask5ProofProfile,
+            operatorExchange: DovecotOperatorBoundedExchange,
         ): DovecotIsolationProtocolProof {
             val certificateBytes = profile.readStableTlsCertificate()
             val certificate = try {
@@ -452,7 +492,11 @@ internal class DovecotIsolationProtocolProof private constructor(
             val sslContext = SSLContext.getInstance("TLS").apply {
                 init(null, trustManagers, SecureRandom())
             }
-            return DovecotIsolationProtocolProof(sslContext)
+            return DovecotIsolationProtocolProof(
+                sslContext = sslContext,
+                operatorExchange = operatorExchange,
+                ordinaryImapsPort = profile.ordinaryImapsPort,
+            )
         }
 
         private const val SOCKET_TIMEOUT_MILLIS = 1_000
@@ -503,17 +547,14 @@ internal fun task6InactiveMasterLogin(
 )
 
 internal fun task6RequireInactiveMasterRejected(
-    port: Int,
     targetAddress: String,
     activeCredential: DovecotOperatorCredential,
     requireRejected: (
-        Int,
         String,
         DovecotOperatorCredential,
     ) -> Unit,
 ) {
     requireRejected(
-        port,
         task6InactiveMasterLogin(targetAddress, activeCredential.id),
         activeCredential,
     )

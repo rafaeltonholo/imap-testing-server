@@ -58,10 +58,7 @@ class DovecotOperatorRotationLiveTest {
                 ),
             ),
         )
-        val transportFactory =
-            JvmJsseDovecotOperatorTransportFactory.task5Proof(
-                live.profile,
-            )
+        val transportFactory = live.operatorRuntime.transportFactory()
         val probe = DovecotOperatorProbe(
             transportFactory = transportFactory,
             requireMailboxRead = true,

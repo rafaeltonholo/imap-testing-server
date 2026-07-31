@@ -1,7 +1,11 @@
 package mail.sandbox.dashboard.server.gate.dovecot
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -16,6 +20,19 @@ import kotlin.test.assertTrue
 
 class DovecotLiveTestEnvironmentTest {
     private val repositoryRoot = repositoryRoot()
+    private val dockerCli = testDockerCli()
+    private val unusedTransportFactory =
+        DovecotOperatorTransportFactory {
+            error("The injected readiness probe must not open a transport")
+        }
+    private val runtimeProvider:
+        (DovecotTask5ProofProfile) -> DovecotOperatorRuntime = { profile ->
+            DovecotOperatorRuntime.task5Proof(
+                profile = profile,
+                selectedDockerCli = dockerCli,
+                transportFactoryProvider = { unusedTransportFactory },
+            )
+        }
     private val validEnvironment = mapOf(
         "DOVECOT_LIVE_TESTS" to "1",
         "DOVECOT_LIVE_PROFILE" to "task5-proof",
@@ -32,24 +49,34 @@ class DovecotLiveTestEnvironmentTest {
 
     @Test
     fun liveEnvironmentRequiresTheSingleFixedProofProfile() {
+        var runtimeConstructions = 0
         val live = DovecotLiveTestEnvironment.load(
             environment = validEnvironment,
             repositoryRoot = repositoryRoot,
+            operatorRuntimeProvider = { profile ->
+                runtimeConstructions += 1
+                runtimeProvider(profile)
+            },
         )
 
         assertEquals("127.0.0.1", live.loopbackAddress)
         assertEquals(1993, live.ordinaryImapsPort)
         assertEquals(21995, live.ordinaryPop3sPort)
-        assertEquals(2993, live.operatorImapsPort)
+        assertEquals(2993, live.forbiddenOperatorHostPort)
         assertEquals(21025, live.smtpPort)
         assertEquals(28080, live.oauthPort)
+        assertEquals(1, runtimeConstructions)
+        assertSame(
+            unusedTransportFactory,
+            live.operatorRuntime.transportFactory(),
+        )
         assertEquals(
             listOf(
                 "ordinary-imaps",
                 "ordinary-pop3s",
-                "operator-imaps",
                 "smtp",
                 "oauth-health",
+                "operator-exec",
             ),
             DovecotReadinessBoundary.entries.map { it.diagnosticLabel },
         )
@@ -97,20 +124,31 @@ class DovecotLiveTestEnvironmentTest {
                 DovecotLiveTestEnvironment.load(
                     environment = invalid,
                     repositoryRoot = repositoryRoot,
+                    operatorRuntimeProvider = runtimeProvider,
                 )
             }
         }
+        assertEquals(1, runtimeConstructions)
     }
 
     @Test
-    fun proofProfileKeepsOperatorImapsPortOnlyAsATransitionalTask5Alias() {
+    fun proofProfileKeeps2993OnlyAsAForbiddenHostPort() {
         val profile = DovecotTask5ProofProfile.load(
             environment = validEnvironment,
             repositoryRoot = repositoryRoot,
         )
 
         assertEquals(2993, profile.forbiddenOperatorHostPort)
-        assertEquals(2993, profile.operatorImapsPort)
+        assertTrue(
+            DovecotTask5ProofProfile::class.java.declaredMethods.none { method ->
+                method.name.startsWith("getOperatorImapsPort")
+            },
+        )
+        assertTrue(
+            DovecotLiveTestEnvironment::class.java.declaredMethods.none { method ->
+                method.name.startsWith("getOperatorImapsPort")
+            },
+        )
     }
 
     @Test
@@ -118,6 +156,7 @@ class DovecotLiveTestEnvironmentTest {
         val live = DovecotLiveTestEnvironment.load(
             environment = validEnvironment,
             repositoryRoot = repositoryRoot,
+            operatorRuntimeProvider = runtimeProvider,
         )
         val attempts = AtomicInteger()
         val sleeps = mutableListOf<Long>()
@@ -138,7 +177,9 @@ class DovecotLiveTestEnvironmentTest {
         assertEquals(listOf(7L, 7L), sleeps)
         assertEquals(
             DovecotReadinessBoundary.entries.toList().let { boundaries ->
-                boundaries + boundaries + boundaries
+                boundaries.dropLast(1) +
+                    boundaries.dropLast(1) +
+                    boundaries
             },
             observedBoundaries,
         )
@@ -175,6 +216,7 @@ class DovecotLiveTestEnvironmentTest {
         val live = DovecotLiveTestEnvironment.load(
             environment = validEnvironment,
             repositoryRoot = repositoryRoot,
+            operatorRuntimeProvider = runtimeProvider,
         )
         val boundaries = DovecotReadinessBoundary.entries.toList()
 
@@ -235,6 +277,43 @@ class DovecotLiveTestEnvironmentTest {
     }
 
     @Test
+    fun operatorExecReadinessUsesTheSingleRuntimeFactoryAndClosesBeforeSuccess() {
+        val transport = ReadinessOperatorTransport()
+        val opens = AtomicInteger()
+        val factory = DovecotOperatorTransportFactory { register ->
+            opens.incrementAndGet()
+            transport.also(register)
+        }
+        lateinit var runtime: DovecotOperatorRuntime
+        val live = DovecotLiveTestEnvironment.load(
+            environment = validEnvironment,
+            repositoryRoot = repositoryRoot,
+            operatorRuntimeProvider = { profile ->
+                DovecotOperatorRuntime.task5Proof(
+                    profile = profile,
+                    selectedDockerCli = dockerCli,
+                    transportFactoryProvider = {
+                        factory
+                    },
+                ).also { runtime = it }
+            },
+        )
+
+        assertTrue(
+            JvmDovecotTopologyReadinessProbe.isReady(
+                live,
+                DovecotReadinessBoundary.OPERATOR_EXEC,
+            ),
+        )
+
+        assertEquals(1, opens.get())
+        assertTrue(transport.closed)
+        assertFalse(transport.aborted)
+        assertSame(runtime, live.operatorRuntime)
+        assertSame(factory, runtime.transportFactory())
+    }
+
+    @Test
     fun proofComposeOverrideIsExactAndContainsOnlyFixedIsolationChanges() {
         val override = Files.readString(
             repositoryRoot.resolve(
@@ -269,8 +348,7 @@ class DovecotLiveTestEnvironmentTest {
 
               dovecot-operator:
                 profiles: !override []
-                ports: !override
-                  - "127.0.0.1:2993:31993"
+                ports: !override []
                 volumes: !override
                   - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
                   - type: bind
@@ -445,5 +523,34 @@ class DovecotLiveTestEnvironmentTest {
         } catch (_: SecurityException) {
             false
         }
+    }
+
+    private fun testDockerCli(): Path =
+        Files.createTempFile("dovecot-live-environment-docker-", ".fake")
+            .toRealPath()
+            .also { path ->
+                check(path.toFile().setExecutable(true, false))
+                check(Files.isExecutable(path))
+            }
+}
+
+private class ReadinessOperatorTransport : DovecotOperatorTransport {
+    override val input: InputStream =
+        ByteArrayInputStream(
+            "* OK Dovecot operator ready\r\n"
+                .toByteArray(Charsets.US_ASCII),
+        )
+    override val outputStream: OutputStream = ByteArrayOutputStream()
+    var aborted: Boolean = false
+        private set
+    var closed: Boolean = false
+        private set
+
+    override fun abort() {
+        aborted = true
+    }
+
+    override fun close() {
+        closed = true
     }
 }

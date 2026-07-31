@@ -24,13 +24,6 @@ internal class DovecotTask5ProofProfile private constructor(
     internal val dockerRoutingEnvironment: Map<String, String>,
     private val trustedOwner: UserPrincipal,
 ) {
-    @Deprecated(
-        message = "Task 5 removes this compatibility alias.",
-        replaceWith = ReplaceWith("forbiddenOperatorHostPort"),
-    )
-    internal val operatorImapsPort: Int
-        get() = forbiddenOperatorHostPort
-
     fun eligibilityPaths(): EligibilityPaths =
         EligibilityPaths.task5Proof(repositoryRoot)
 

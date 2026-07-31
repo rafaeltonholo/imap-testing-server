@@ -13,8 +13,8 @@ SOCKET_TIMEOUT_SECONDS = 0.5
 
 _ORDINARY_DOVECOT = ("dovecot", 31993)
 _OPERATOR_DNS_NAME = "dovecot-operator"
-_OPERATOR_IMAPS_PORT = 31993
-_OPERATOR_HOST_PORT = 2993
+_OPERATOR_CONTAINER_TLS_PORT = 31993
+_FORBIDDEN_OPERATOR_HOST_PORT = 2993
 _FIXED_HOST_GATEWAYS = (
     (
         "host.docker.internal",
@@ -137,13 +137,13 @@ def network_diagnostic(operator_ip, host_ips):
         return "DOVECOT_UNREACHABLE"
     if _operator_dns_resolves():
         return "OPERATOR_DNS_RESOLVED"
-    if _connects(operator_ip, _OPERATOR_IMAPS_PORT):
+    if _connects(operator_ip, _OPERATOR_CONTAINER_TLS_PORT):
         return "OPERATOR_IP_REACHABLE"
     for address, diagnostic in gateway_targets:
-        if _connects(address, _OPERATOR_HOST_PORT):
+        if _connects(address, _FORBIDDEN_OPERATOR_HOST_PORT):
             return diagnostic
     for host_ip in host_ips:
-        if _connects(host_ip, _OPERATOR_HOST_PORT):
+        if _connects(host_ip, _FORBIDDEN_OPERATOR_HOST_PORT):
             return "HOST_IP_REACHABLE"
     return None
 
@@ -152,7 +152,7 @@ def _resolve_fixed_gateways():
     first_unresolved = None
     targets = []
     for hostname, _, unresolved_diagnostic in _FIXED_HOST_GATEWAYS:
-        addresses = _resolve_ipv4(hostname, _OPERATOR_HOST_PORT)
+        addresses = _resolve_ipv4(hostname, _FORBIDDEN_OPERATOR_HOST_PORT)
         if not addresses:
             if first_unresolved is None:
                 first_unresolved = unresolved_diagnostic
@@ -225,7 +225,7 @@ def _operator_dns_resolves():
     try:
         addresses = socket.getaddrinfo(
             _OPERATOR_DNS_NAME,
-            _OPERATOR_IMAPS_PORT,
+            _OPERATOR_CONTAINER_TLS_PORT,
             type=socket.SOCK_STREAM,
         )
     except socket.gaierror as failure:
