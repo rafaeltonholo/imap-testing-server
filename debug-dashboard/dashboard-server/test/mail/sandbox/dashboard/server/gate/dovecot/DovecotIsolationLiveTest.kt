@@ -15,7 +15,10 @@ class DovecotIsolationLiveTest {
             repositoryRoot = repositoryRoot,
         )
         live.awaitReady()
-        val topology = FixedTask6DockerTopology(live.profile)
+        val launchProfile = live.operatorRuntime.launchProfile
+        val eligibilityAdapter =
+            Task6LaunchProfileEligibilityAdapter(launchProfile)
+        val topology = FixedTask6DockerTopology(launchProfile)
         val runtime = topology.inspect()
         runtime.requireExactIsolation()
 
@@ -44,15 +47,7 @@ class DovecotIsolationLiveTest {
         val eligibilityPaths = live.profile.eligibilityPaths()
         val eligibilityCli = EligibilityFileCli(
             pathsProvider = { eligibilityPaths },
-            hasherFactory = { root ->
-                DovecotPasswordHasher(
-                    root,
-                    JvmEligibilityProcessRunner(
-                        dockerRouting =
-                            DovecotDockerRouting.task5Proof(live.profile),
-                    ),
-                )
-            },
+            hasherFactory = { eligibilityAdapter },
         )
         val store = DovecotOperatorCredentialStore(
             paths = live.profile.operatorPaths(),
@@ -62,13 +57,7 @@ class DovecotIsolationLiveTest {
             hasher = DovecotOperatorHashBoundary {
                 error("isolation proof must not hash an operator secret")
             },
-            verifier = ExistingDovecotOperatorHashVerifier(
-                repositoryRoot,
-                JvmEligibilityProcessRunner(
-                    dockerRouting =
-                        DovecotDockerRouting.task5Proof(live.profile),
-                ),
-            ),
+            verifier = eligibilityAdapter,
         )
         val transportFactory = live.operatorRuntime.transportFactory()
         val probe = DovecotOperatorProbe(

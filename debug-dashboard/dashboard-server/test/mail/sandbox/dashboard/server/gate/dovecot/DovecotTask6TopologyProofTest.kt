@@ -155,6 +155,89 @@ class DovecotTask6TopologyProofTest {
     }
 
     @Test
+    fun remainingLiveProofsUseOnlyTheEnvironmentBoundLaunchProfile() {
+        val sourceRoot = repositoryRoot().resolve(
+            "debug-dashboard/dashboard-server/test/mail/sandbox/" +
+                "dashboard/server/gate/dovecot",
+        )
+        val sources = listOf(
+            "DovecotOperatorStartupLiveTest.kt",
+            "DovecotIsolationLiveTest.kt",
+            "DovecotOperatorRotationLiveTest.kt",
+        ).associateWith { fileName ->
+            Files.readString(sourceRoot.resolve(fileName))
+        }
+        sources.forEach { (fileName, source) ->
+            assertEquals(
+                1,
+                Regex(
+                    """val\s+launchProfile\s*=\s*""" +
+                        """live\.operatorRuntime\.launchProfile""",
+                ).findAll(source).count(),
+                "$fileName must bind the validated runtime launch profile once",
+            )
+            assertEquals(
+                1,
+                Regex(
+                    """Task6LaunchProfileEligibilityAdapter\s*""" +
+                        """\(\s*launchProfile\s*\)""",
+                ).findAll(source).count(),
+                "$fileName must reuse one launch-profile eligibility adapter",
+            )
+            listOf(
+                "DovecotDockerRouting",
+                "JvmEligibilityProcessRunner",
+                "DovecotPasswordHasher",
+                "JvmDockerExecDovecotOperatorTransportFactory",
+                "DovecotOperatorBoundedExchange(",
+            ).forEach { forbidden ->
+                assertFalse(
+                    forbidden in source,
+                    "$fileName retains ambient process routing: $forbidden",
+                )
+            }
+            assertFalse(
+                Regex("""DovecotOperatorRuntime\s*\.""")
+                    .containsMatchIn(source),
+                "$fileName must not construct another operator runtime",
+            )
+        }
+
+        val startup = sources.getValue(
+            "DovecotOperatorStartupLiveTest.kt",
+        )
+        assertTrue("live.operatorRuntime.probe()" in startup)
+        assertTrue("live.operatorExchange" in startup)
+        assertFalse("transportFactory()" in startup)
+
+        listOf(
+            "DovecotIsolationLiveTest.kt",
+            "DovecotOperatorRotationLiveTest.kt",
+        ).forEach { fileName ->
+            assertEquals(
+                1,
+                Regex(
+                    """live\.operatorRuntime\.transportFactory\s*\(\s*\)""",
+                ).findAll(sources.getValue(fileName)).count(),
+                "$fileName must reuse the runtime-owned transport factory",
+            )
+        }
+
+        val isolation = sources.getValue("DovecotIsolationLiveTest.kt")
+        assertTrue(
+            "FixedTask6DockerTopology(launchProfile)" in isolation,
+        )
+        val topologySource = Files.readString(
+            sourceRoot.resolve("DovecotTask6TopologyProof.kt"),
+        )
+        assertFalse(
+            "constructor(profile: DovecotTask5ProofProfile)" in
+                topologySource,
+            "Topology must not create an implicit second proof runtime",
+        )
+    }
+
+    @Test
     fun fixedTopologyUsesCanonicalLaunchProfileForEveryDockerCommand() =
         withTopologyLaunchFixture { fixture ->
             val observed = mutableListOf<ObservedProcessRequest>()

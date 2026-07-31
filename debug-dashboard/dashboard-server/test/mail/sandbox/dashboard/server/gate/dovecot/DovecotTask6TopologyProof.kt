@@ -132,11 +132,6 @@ internal class FixedTask6DockerTopology(
             isApprovedCommand = ::isFixedCommand,
         )
 
-    constructor(profile: DovecotTask5ProofProfile) : this(
-        launchProfile =
-            DovecotOperatorRuntime.task5Proof(profile).launchProfile,
-    )
-
     fun inspect(): Task6RuntimeTopology {
         val containers = FIXED_SERVICES.associateWith(::composeContainerId)
         val ports = containers.mapValues { (_, id) ->

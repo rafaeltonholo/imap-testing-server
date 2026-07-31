@@ -19,6 +19,9 @@ class DovecotOperatorRotationLiveTest {
             repositoryRoot = repositoryRoot,
         )
         live.awaitReady()
+        val launchProfile = live.operatorRuntime.launchProfile
+        val eligibilityAdapter =
+            Task6LaunchProfileEligibilityAdapter(launchProfile)
         val address =
             "task6-rotation-" +
                 UUID.randomUUID().toString().replace("-", "") +
@@ -27,36 +30,16 @@ class DovecotOperatorRotationLiveTest {
         val eligibilityPaths = live.profile.eligibilityPaths()
         val eligibilityCli = EligibilityFileCli(
             pathsProvider = { eligibilityPaths },
-            hasherFactory = { root ->
-                DovecotPasswordHasher(
-                    root,
-                    JvmEligibilityProcessRunner(
-                        dockerRouting =
-                            DovecotDockerRouting.task5Proof(live.profile),
-                    ),
-                )
-            },
+            hasherFactory = { eligibilityAdapter },
         )
         val operatorPaths = live.profile.operatorPaths()
         val store = DovecotOperatorCredentialStore(
             paths = operatorPaths,
             generator = SecureDovecotOperatorSecretGenerator(),
             hasher = ExistingDovecotOperatorHashBoundary(
-                DovecotPasswordHasher(
-                    repositoryRoot,
-                    JvmEligibilityProcessRunner(
-                        dockerRouting =
-                            DovecotDockerRouting.task5Proof(live.profile),
-                    ),
-                ),
+                eligibilityAdapter,
             ),
-            verifier = ExistingDovecotOperatorHashVerifier(
-                repositoryRoot,
-                JvmEligibilityProcessRunner(
-                    dockerRouting =
-                        DovecotDockerRouting.task5Proof(live.profile),
-                ),
-            ),
+            verifier = eligibilityAdapter,
         )
         val transportFactory = live.operatorRuntime.transportFactory()
         val probe = DovecotOperatorProbe(

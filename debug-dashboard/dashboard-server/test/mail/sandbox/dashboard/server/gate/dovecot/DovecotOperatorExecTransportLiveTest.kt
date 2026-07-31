@@ -18,18 +18,45 @@ class DovecotOperatorExecTransportLiveTest {
     @Test
     fun fixedExecTransportOwnsAndReapsEveryOperatorProcess() {
         val environment = System.getenv()
-        if (!dovecotTask6ExecLiveProofSelected(environment)) return
+        val mode = task5OperatorExecProofMode(environment)
+        if (mode == Task5OperatorExecProofMode.Dormant) return
 
         val repositoryRoot = repositoryRoot()
         val live = DovecotLiveTestEnvironment.load(
             environment = environment,
             repositoryRoot = repositoryRoot,
         )
-        live.awaitReady()
-
         val launchProfile = live.operatorRuntime.launchProfile
         val inventory =
             DovecotTask6OperatorProcessInventory(launchProfile)
+
+        Task5OperatorExecProofDispatcher(
+            awaitReady = live::awaitReady,
+            requireExactTopology = {
+                FixedTask6DockerTopology(launchProfile)
+                    .inspect()
+                    .requireExactIsolation()
+            },
+            requireZeroInventory = {
+                check(inventory.count() == 0) {
+                    FINAL_INVENTORY_FAILURE
+                }
+            },
+            runFullProof = {
+                runFullProcessProof(
+                    live = live,
+                    launchProfile = launchProfile,
+                    inventory = inventory,
+                )
+            },
+        ).run(mode)
+    }
+
+    private fun runFullProcessProof(
+        live: DovecotLiveTestEnvironment,
+        launchProfile: DovecotOperatorLaunchProfile,
+        inventory: DovecotTask6ProcessInventory,
+    ) {
         val transportFactory =
             live.operatorRuntime.transportFactory()
         val eligibilityAdapter =
@@ -51,50 +78,30 @@ class DovecotOperatorExecTransportLiveTest {
         val rejectionProbe = DovecotOperatorProbe(
             transportFactory = transportFactory,
         )
-        var primaryFailure: Throwable? = null
-        try {
-            task6DisposableEligibilityFixture(
-                address = address,
-                paths = eligibilityPaths,
-                executor = eligibilityCli,
-                rejectionProof = {
-                    awaitDovecotOperatorTargetRejection(
-                        resultSupplier = {
-                            rejectionProbe.probe(
-                                target,
-                                credentialStore.loadActive(),
-                            )
-                        },
-                    )
-                },
-            ).run { targetPassword ->
-                DovecotTask6ProcessProof(inventory).run(
-                    LiveExecProcessScenarios(
-                        transportFactory = transportFactory,
-                        target = target,
-                        targetPassword = targetPassword,
-                        credentialSupplier =
-                            credentialStore::loadActive,
-                    ),
+        task6DisposableEligibilityFixture(
+            address = address,
+            paths = eligibilityPaths,
+            executor = eligibilityCli,
+            rejectionProof = {
+                awaitDovecotOperatorTargetRejection(
+                    resultSupplier = {
+                        rejectionProbe.probe(
+                            target,
+                            credentialStore.loadActive(),
+                        )
+                    },
                 )
-            }
-        } catch (failure: Throwable) {
-            primaryFailure = failure
-            throw failure
-        } finally {
-            val finalInventoryFailure = runCatching {
-                check(inventory.count() == 0) {
-                    FINAL_INVENTORY_FAILURE
-                }
-            }.exceptionOrNull()
-            if (finalInventoryFailure != null) {
-                val primary = primaryFailure
-                if (primary != null) {
-                    primary.addSuppressed(finalInventoryFailure)
-                } else {
-                    throw finalInventoryFailure
-                }
-            }
+            },
+        ).run { targetPassword ->
+            DovecotTask6ProcessProof(inventory).run(
+                LiveExecProcessScenarios(
+                    transportFactory = transportFactory,
+                    target = target,
+                    targetPassword = targetPassword,
+                    credentialSupplier =
+                        credentialStore::loadActive,
+                ),
+            )
         }
     }
 
@@ -142,10 +149,102 @@ class DovecotOperatorExecTransportLiveTest {
     }
 }
 
+internal enum class Task5OperatorExecProofMode {
+    Dormant,
+    Full,
+    Preflight,
+    InventoryOnly,
+}
+
+internal class Task5OperatorExecProofDispatcher(
+    private val awaitReady: () -> Unit,
+    private val requireExactTopology: () -> Unit,
+    private val requireZeroInventory: () -> Unit,
+    private val runFullProof: () -> Unit,
+) {
+    fun run(mode: Task5OperatorExecProofMode) {
+        when (mode) {
+            Task5OperatorExecProofMode.Dormant -> Unit
+            Task5OperatorExecProofMode.InventoryOnly ->
+                requireZeroInventory()
+            Task5OperatorExecProofMode.Preflight ->
+                runWithFinalZero {
+                    awaitReady()
+                    requireExactTopology()
+                }
+            Task5OperatorExecProofMode.Full ->
+                runWithFinalZero {
+                    awaitReady()
+                    runFullProof()
+                }
+        }
+    }
+
+    private fun runWithFinalZero(action: () -> Unit) {
+        var primaryFailure: Throwable? = null
+        try {
+            action()
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+        }
+        val inventoryFailure = try {
+            requireZeroInventory()
+            null
+        } catch (failure: Throwable) {
+            failure
+        }
+        val primary = primaryFailure
+        if (primary != null) {
+            if (
+                inventoryFailure != null &&
+                inventoryFailure !== primary
+            ) {
+                primary.addSuppressed(inventoryFailure)
+            }
+            throw primary
+        }
+        if (inventoryFailure != null) {
+            throw inventoryFailure
+        }
+    }
+}
+
+internal fun task5OperatorExecProofMode(
+    environment: Map<String, String>,
+): Task5OperatorExecProofMode {
+    val selected = dovecotTask6ExecLiveProofSelected(environment)
+    val requested = environment[TASK5_OPERATOR_EXEC_PROOF_MODE_KEY]
+    if (!selected) {
+        require(requested == null) {
+            TASK5_OPERATOR_EXEC_PROOF_MODE_FAILURE
+        }
+        return Task5OperatorExecProofMode.Dormant
+    }
+    return when (requested) {
+        null -> Task5OperatorExecProofMode.Full
+        "preflight" -> Task5OperatorExecProofMode.Preflight
+        "inventory-only" ->
+            Task5OperatorExecProofMode.InventoryOnly
+        else -> throw IllegalArgumentException(
+            TASK5_OPERATOR_EXEC_PROOF_MODE_FAILURE,
+        )
+    }
+}
+
 internal fun dovecotTask6ExecLiveProofSelected(
     environment: Map<String, String>,
 ): Boolean {
-    val liveTests = environment["DOVECOT_LIVE_TESTS"] ?: return false
+    val liveTests = environment["DOVECOT_LIVE_TESTS"]
+    if (liveTests == null) {
+        require(
+            environment.keys.none { key ->
+                key.startsWith("DOVECOT_")
+            },
+        ) {
+            "The fixed Dovecot Task 6 live profile was not selected"
+        }
+        return false
+    }
     require(
         liveTests == "1" &&
             environment["DOVECOT_LIVE_PROFILE"] == "task5-proof",
@@ -154,6 +253,11 @@ internal fun dovecotTask6ExecLiveProofSelected(
     }
     return true
 }
+
+private const val TASK5_OPERATOR_EXEC_PROOF_MODE_KEY =
+    "TASK5_OPERATOR_EXEC_PROOF_MODE"
+private const val TASK5_OPERATOR_EXEC_PROOF_MODE_FAILURE =
+    "The fixed Dovecot operator exec proof mode was not selected"
 
 internal class Task6OperatorTransportStartCounter(
     private val delegate: DovecotOperatorTransportFactory,

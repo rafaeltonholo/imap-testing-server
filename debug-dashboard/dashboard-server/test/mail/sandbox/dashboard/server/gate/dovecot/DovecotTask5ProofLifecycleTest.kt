@@ -553,13 +553,14 @@ class DovecotTask5ProofLifecycleTest {
             assertEquals(2, upCommands.size)
             assertTrue(
                 upCommands[0].endsWith(
-                    "up --detach --no-deps --wait dovecot",
+                    "up --detach --build --force-recreate --wait " +
+                        "oauth2-mock dovecot postfix",
                 ),
             )
             assertTrue(
                 upCommands[1].endsWith(
-                    "up --detach --build --force-recreate --wait " +
-                        "dovecot dovecot-operator postfix oauth2-mock",
+                    "--profile dovecot-operator up --detach --build " +
+                        "--force-recreate --no-deps --wait dovecot-operator",
                 ),
             )
             assertEquals(
@@ -628,15 +629,12 @@ class DovecotTask5ProofLifecycleTest {
                 it.startsWith("proof-env ")
             }
             assertEquals(
-                listOf(
-                    UNSET_PROOF_ENVIRONMENT,
-                    UNSET_PROOF_ENVIRONMENT,
-                ),
-                proofEnvironments.take(2),
+                listOf(UNSET_PROOF_ENVIRONMENT),
+                proofEnvironments.take(1),
             )
-            assertTrue(proofEnvironments.drop(2).isNotEmpty())
+            assertTrue(proofEnvironments.drop(1).isNotEmpty())
             assertTrue(
-                proofEnvironments.drop(2).all {
+                proofEnvironments.drop(1).all {
                     it == FIXED_PROOF_ENVIRONMENT
                 },
                 proofEnvironments.joinToString("\n"),
@@ -649,6 +647,190 @@ class DovecotTask5ProofLifecycleTest {
                     LinkOption.NOFOLLOW_LINKS,
                 ),
             )
+        }
+    }
+
+    @Test
+    fun successfulLifecycleRunsTheExactCheckedTask7Sequence() {
+        withFixture { fixture ->
+            val result = fixture.run("success")
+            val composePrefix =
+                "docker compose --project-name mail-sandbox-task5-proof " +
+                    "--file docker-compose.yml --file " +
+                    "debug-dashboard/dashboard-server/testResources/" +
+                    "dovecot-gate0c/compose.task5-proof.yml"
+            val nonLiveKotlin =
+                "kotlin test --include-module dashboard-server " +
+                    TASK7_NON_LIVE_CLASSES.joinToString(" ") {
+                        "--include-classes $DOVECOT_GATE_PACKAGE.$it"
+                    }
+            val certificateRequest =
+                "openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 " +
+                    "-subj /CN=localhost " +
+                    "-addext subjectAltName=DNS:localhost " +
+                    "-keyout ${fixture.proofRoot}/ssl/tls.key " +
+                    "-out ${fixture.proofRoot}/ssl/tls.crt"
+            val certificateVerification =
+                "openssl verify -CAfile ${fixture.proofRoot}/ssl/tls.crt " +
+                    "-verify_hostname localhost " +
+                    "${fixture.proofRoot}/ssl/tls.crt"
+            val ordinaryStart =
+                "$composePrefix up --detach --build --force-recreate --wait " +
+                    "oauth2-mock dovecot postfix"
+            val operatorStart =
+                "$composePrefix --profile dovecot-operator up --detach " +
+                    "--build --force-recreate --no-deps --wait " +
+                    "dovecot-operator"
+            val eligibilityPreflight =
+                "kotlin run --module dashboard-server --main-class " +
+                    "$DOVECOT_GATE_PACKAGE.EligibilityFileCli -- " +
+                    "task5-proof preflight"
+            val bootstrapEligibility =
+                "kotlin run --module dashboard-server --main-class " +
+                    "$DOVECOT_GATE_PACKAGE.EligibilityFileCli -- " +
+                    "task5-proof add task5-bootstrap@local.test"
+            val bootstrapCredential =
+                "kotlin run --module dashboard-server --main-class " +
+                    "$DOVECOT_GATE_PACKAGE." +
+                    "DovecotOperatorCredentialStoreCli -- " +
+                    "bootstrap-task5-proof"
+            val startup = liveClassCommand("DovecotOperatorStartupLiveTest")
+            val isolation = liveClassCommand("DovecotIsolationLiveTest")
+            val rotation = liveClassCommand("DovecotOperatorRotationLiveTest")
+            val exec = liveClassCommand("DovecotOperatorExecTransportLiveTest")
+            val cleanupEligibility =
+                "kotlin run --module dashboard-server --main-class " +
+                    "$DOVECOT_GATE_PACKAGE.EligibilityFileCli -- " +
+                    "task5-proof remove task5-bootstrap@local.test"
+            val cleanup =
+                "$composePrefix down --volumes --remove-orphans"
+
+            assertEquals(0, result.exitCode, result.output)
+            assertOrdered(
+                result.commands,
+                "docker ps --all --quiet --filter " +
+                    "label=com.docker.compose.project=" +
+                    "mail-sandbox-task5-proof",
+                "docker ps --quiet",
+                "lsof -nP -iTCP:2993 -sTCP:LISTEN",
+                nonLiveKotlin,
+                "python3 -m unittest " +
+                    "debug-dashboard/dashboard-server/testResources/" +
+                    "dovecot-gate0c/test_network_isolation_check.py",
+                "docker compose --file docker-compose.yml config --quiet",
+                "$composePrefix config --quiet",
+                certificateRequest,
+                certificateVerification,
+                ordinaryStart,
+                eligibilityPreflight,
+                bootstrapEligibility,
+                bootstrapCredential,
+                operatorStart,
+                exec,
+                execModeTranscript("preflight"),
+                startup,
+                isolation,
+                rotation,
+                exec,
+                execModeTranscript("full"),
+                exec,
+                execModeTranscript("inventory-only"),
+                cleanupEligibility,
+                cleanup,
+            )
+            assertEquals(
+                listOf(ordinaryStart, operatorStart),
+                result.commands.filter { " compose " in it && " up " in it },
+            )
+            assertEquals(
+                listOf(
+                    execModeTranscript("preflight"),
+                    execModeTranscript("full"),
+                    execModeTranscript("inventory-only"),
+                ),
+                result.commands.filter {
+                    it.startsWith("task5-exec-proof-mode ")
+                },
+                "Checkpoint modes must be scoped to their exact invocations",
+            )
+            assertTrue(
+                result.commands.none {
+                    "stalwart" in it.lowercase()
+                },
+                result.commands.joinToString("\n"),
+            )
+        }
+    }
+
+    @Test
+    fun lifecycleSourceScopesExactExecCheckpointsAndIsolatedOperatorStart() {
+        val source = Files.readString(lifecycleScript)
+        val operatorStart = """
+            |task5_compose_with_lock \
+            |  --profile dovecot-operator \
+            |  up --detach --build --force-recreate --no-deps --wait \
+            |  dovecot-operator
+        """.trimMargin()
+        val preflight = """
+            |TASK5_OPERATOR_EXEC_PROOF_MODE=preflight \
+            |    "${'$'}TASK5_KOTLIN" test \
+            |      --include-module dashboard-server \
+            |      --include-classes "${'$'}TASK5_EXEC_TRANSPORT_LIVE_CLASS"
+        """.trimMargin()
+        val finalInventory = """
+            |TASK5_OPERATOR_EXEC_PROOF_MODE=inventory-only \
+            |    "${'$'}TASK5_KOTLIN" test \
+            |      --include-module dashboard-server \
+            |      --include-classes "${'$'}TASK5_EXEC_TRANSPORT_LIVE_CLASS"
+        """.trimMargin()
+
+        assertTrue(operatorStart in source)
+        assertTrue(preflight in source)
+        assertTrue(finalInventory in source)
+        assertFalse("export TASK5_OPERATOR_EXEC_PROOF_MODE" in source)
+        assertEquals(
+            1,
+            source.windowed(
+                "TASK5_OPERATOR_EXEC_PROOF_MODE=preflight".length,
+            ).count {
+                it == "TASK5_OPERATOR_EXEC_PROOF_MODE=preflight"
+            },
+        )
+        assertEquals(
+            1,
+            source.windowed(
+                "TASK5_OPERATOR_EXEC_PROOF_MODE=inventory-only".length,
+            ).count {
+                it == "TASK5_OPERATOR_EXEC_PROOF_MODE=inventory-only"
+            },
+        )
+        assertFalse(
+            Regex("""\bup\b[^\n]*\bdovecot-operator\b[^\n]*\b(?:dovecot|postfix|oauth2-mock)\b""")
+                .containsMatchIn(source),
+        )
+    }
+
+    @Test
+    fun everyTask7CheckpointFailureStillRunsCheckedCleanup() {
+        listOf(
+            "task7-preflight-fails",
+            "task7-exec-full-fails",
+            "task7-final-inventory-fails",
+        ).forEach { scenario ->
+            withFixture { fixture ->
+                val result = fixture.run(scenario)
+
+                assertTrue(result.exitCode != 0, "$scenario: ${result.output}")
+                assertCleanupInventoriesAndBaselineAfterDown(result.commands)
+                assertFalse(
+                    Files.exists(fixture.proofRoot, LinkOption.NOFOLLOW_LINKS),
+                    "$scenario retained the owned proof root",
+                )
+                assertFalse(
+                    Files.exists(fixture.lifecycleLock, LinkOption.NOFOLLOW_LINKS),
+                    "$scenario retained the owned lifecycle lock",
+                )
+            }
         }
     }
 
@@ -1456,6 +1638,13 @@ class DovecotTask5ProofLifecycleTest {
         assertTrue("`33/33`" in evidence)
     }
 
+    private fun liveClassCommand(simpleName: String): String =
+        "kotlin test --include-module dashboard-server " +
+            "--include-classes $DOVECOT_GATE_PACKAGE.$simpleName"
+
+    private fun execModeTranscript(mode: String): String =
+        "task5-exec-proof-mode $mode"
+
     private fun assertNoProofMutation(commands: List<String>) {
         assertFalse(commands.any { " compose " in it && " up " in it })
         assertFalse(commands.any { " compose " in it && " down " in it })
@@ -2090,8 +2279,7 @@ class DovecotTask5ProofLifecycleTest {
             val directCommand = listOf(script.toString()) + arguments
             val command = if (isolatedProcessGroup) {
                 listOf(
-                    "/usr/bin/env",
-                    "python3",
+                    "/usr/bin/python3",
                     "-c",
                     "import os,sys; os.setsid(); " +
                         "os.execv(sys.argv[1], sys.argv[1:])",
@@ -2213,6 +2401,7 @@ class DovecotTask5ProofLifecycleTest {
                 writeExecutable(fakeBin.resolve("mktemp"), FAKE_MKTEMP)
                 writeExecutable(fakeBin.resolve("lsof"), FAKE_LSOF)
                 writeExecutable(fakeBin.resolve("openssl"), FAKE_OPENSSL)
+                writeExecutable(fakeBin.resolve("python3"), FAKE_PYTHON)
                 writeExecutable(fakeBin.resolve("stat"), FAKE_STAT)
                 writeExecutable(
                     fakeBin.resolve("task5-child-env-guard"),
@@ -2303,6 +2492,12 @@ class DovecotTask5ProofLifecycleTest {
                     resourceDirectory.resolve("network-isolation-check.py"),
                     "# fixed test fixture\n",
                 )
+                Files.writeString(
+                    resourceDirectory.resolve(
+                        "test_network_isolation_check.py",
+                    ),
+                    "# fixed test fixture\n",
+                )
                 val script = resourceDirectory.resolve("run-task5-proof.sh")
                 Files.writeString(script, scriptContent)
                 makeExecutable(script)
@@ -2381,6 +2576,20 @@ class DovecotTask5ProofLifecycleTest {
             "proof-env 1 task5-proof mail-sandbox-task5-proof " +
                 "docker-compose.yml:debug-dashboard/dashboard-server/" +
                 "testResources/dovecot-gate0c/compose.task5-proof.yml 1"
+        private const val DOVECOT_GATE_PACKAGE =
+            "mail.sandbox.dashboard.server.gate.dovecot"
+        private val TASK7_NON_LIVE_CLASSES = listOf(
+            "DovecotOperatorConfigTest",
+            "DovecotOperatorCredentialStoreTest",
+            "DovecotOperatorProcessTransportTest",
+            "DovecotOperatorApplicationLeaseRegistryTest",
+            "DovecotOperatorBoundedExchangeTest",
+            "DovecotTask6TopologyProofTest",
+            "DovecotTask6OperatorProcessInventoryTest",
+            "DovecotTask6ProcessProofTest",
+            "DovecotOperatorExecTransportLiveTest",
+            "DovecotTask5ProofLifecycleTest",
+        )
         private val FIXED_PROOF_RESOURCE_NAMES = listOf(
             "mail-sandbox-task5-proof-dovecot-1",
             "mail-sandbox-task5-proof-dovecot-operator-1",
@@ -2535,7 +2744,7 @@ class DovecotTask5ProofLifecycleTest {
             |  *" down --volumes --remove-orphans")
             |    if [ "§TASK5_FAKE_SCENARIO" = signal-during-cleanup-down ] ||
             |      [ "§TASK5_FAKE_SCENARIO" = signal-during-successful-cleanup-down ]; then
-            |      /usr/bin/env python3 -c '
+            |      /usr/bin/python3 -c '
             |import os
             |import signal
             |import sys
@@ -2757,7 +2966,7 @@ class DovecotTask5ProofLifecycleTest {
             |proof_environment="§{DOVECOT_LIVE_TESTS:-unset} §{DOVECOT_LIVE_PROFILE:-unset} §{COMPOSE_PROJECT_NAME:-unset} §{COMPOSE_FILE:-unset} §{COMPOSE_DISABLE_ENV_FILE:-unset}"
             |printf '%s\n' "proof-env §proof_environment" >> "§TASK5_FAKE_LOG"
             |case "§*" in
-            |  *"DovecotOperatorConfigTest"|*"DovecotOperatorCredentialStoreTest")
+            |  *"DovecotOperatorConfigTest"|*"DovecotOperatorCredentialStoreTest"|*"DovecotTask5ProofLifecycleTest")
             |    [ "§proof_environment" = "unset unset unset unset unset" ] ||
             |      exit 61
             |    ;;
@@ -2767,6 +2976,28 @@ class DovecotTask5ProofLifecycleTest {
             |    ;;
             |esac
             |case "§*" in
+            |  "test --include-module dashboard-server --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorExecTransportLiveTest")
+            |    exec_proof_mode="§{TASK5_OPERATOR_EXEC_PROOF_MODE:-full}"
+            |    case "§exec_proof_mode" in
+            |      preflight|full|inventory-only) ;;
+            |      *) exit 66 ;;
+            |    esac
+            |    printf '%s\n' \
+            |      "task5-exec-proof-mode §exec_proof_mode" \
+            |      >> "§TASK5_FAKE_LOG"
+            |    if [ "§TASK5_FAKE_SCENARIO" = task7-preflight-fails ] &&
+            |      [ "§exec_proof_mode" = preflight ]; then
+            |      exit 31
+            |    fi
+            |    if [ "§TASK5_FAKE_SCENARIO" = task7-exec-full-fails ] &&
+            |      [ "§exec_proof_mode" = full ]; then
+            |      exit 32
+            |    fi
+            |    if [ "§TASK5_FAKE_SCENARIO" = task7-final-inventory-fails ] &&
+            |      [ "§exec_proof_mode" = inventory-only ]; then
+            |      exit 33
+            |    fi
+            |    ;;
             |  *"task5-proof preflight")
             |    root="§TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof"
             |    IFS= read -r lock_token < "§TASK5_FAKE_GLOBAL_LOCK/owner"
@@ -2873,6 +3104,23 @@ class DovecotTask5ProofLifecycleTest {
             |    fi
             |    ;;
             |esac
+            |
+        """.trimMargin().replace('§', '$')
+
+        private val FAKE_PYTHON = """
+            |#!/bin/sh
+            |set -eu
+            |if [ "§{TASK5_FAKE_GUARD_CHILD_ENV:-0}" = 1 ]; then
+            |  task5-child-env-guard python3
+            |fi
+            |printf '%s\n' "python3 §*" >> "§TASK5_FAKE_LOG"
+            |[ "§*" = "-m unittest debug-dashboard/dashboard-server/testResources/dovecot-gate0c/test_network_isolation_check.py" ]
+            |[ "§{DOVECOT_LIVE_TESTS:-unset}" = unset ]
+            |[ "§{DOVECOT_LIVE_PROFILE:-unset}" = unset ]
+            |[ "§{COMPOSE_PROJECT_NAME:-unset}" = unset ]
+            |[ "§{COMPOSE_FILE:-unset}" = unset ]
+            |[ "§{COMPOSE_DISABLE_ENV_FILE:-unset}" = unset ]
+            |[ "§{TASK5_OPERATOR_EXEC_PROOF_MODE:-unset}" = unset ]
             |
         """.trimMargin().replace('§', '$')
 

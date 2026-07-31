@@ -143,9 +143,12 @@ TASK5_BASE_COMPOSE="$TASK5_REPOSITORY_ROOT/docker-compose.yml"
 TASK5_PROOF_COMPOSE_RELATIVE="debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml"
 TASK5_PROOF_COMPOSE="$TASK5_REPOSITORY_ROOT/$TASK5_PROOF_COMPOSE_RELATIVE"
 TASK5_NETWORK_ISOLATION_HELPER="$TASK5_SCRIPT_DIRECTORY/network-isolation-check.py"
+TASK5_NETWORK_ISOLATION_TEST_RELATIVE="debug-dashboard/dashboard-server/testResources/dovecot-gate0c/test_network_isolation_check.py"
+TASK5_NETWORK_ISOLATION_TEST="$TASK5_REPOSITORY_ROOT/$TASK5_NETWORK_ISOLATION_TEST_RELATIVE"
 TASK5_RUNTIME_ROOT="$TASK5_DASHBOARD_ROOT/.runtime"
 TASK5_PROOF_ROOT="$TASK5_RUNTIME_ROOT/task5-proof"
 TASK5_PROOF_OWNER_MARKER="$TASK5_PROOF_ROOT/.task5-proof-owner"
+readonly TASK5_EXEC_TRANSPORT_LIVE_CLASS="mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorExecTransportLiveTest"
 readonly TASK5_LIFECYCLE_LOCK="/private/tmp/mail-sandbox-task5-proof.lifecycle.lock"
 readonly TASK5_LIFECYCLE_LOCK_PARENT="${TASK5_LIFECYCLE_LOCK%/*}"
 readonly TASK5_LIFECYCLE_LOCK_OWNER="$TASK5_LIFECYCLE_LOCK/owner"
@@ -195,6 +198,8 @@ if [[ "$TASK5_SCRIPT_DIRECTORY" != "$TASK5_EXPECTED_SCRIPT_DIRECTORY" ]] ||
   [[ -L "$TASK5_PROOF_COMPOSE" ]] ||
   [[ ! -f "$TASK5_NETWORK_ISOLATION_HELPER" ]] ||
   [[ -L "$TASK5_NETWORK_ISOLATION_HELPER" ]] ||
+  [[ ! -f "$TASK5_NETWORK_ISOLATION_TEST" ]] ||
+  [[ -L "$TASK5_NETWORK_ISOLATION_TEST" ]] ||
   ! task5_directory_is_exact_physical "$TASK5_SCRIPT_DIRECTORY" ||
   ! task5_proof_ancestors_are_safe; then
   task5_error "canonical non-symbolic repository layout validation failed"
@@ -1080,15 +1085,22 @@ unset TASK5_PROOF_PORT TASK5_LSOF_STATUS
 task5_require_lifecycle_lock_ownership "non-live configuration checks"
 (
   cd -- "$TASK5_DASHBOARD_ROOT"
-  task5_require_lifecycle_lock_ownership "operator config test"
+  task5_require_lifecycle_lock_ownership "non-live Kotlin checks"
   "$TASK5_KOTLIN" test \
     --include-module dashboard-server \
-    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest
-  task5_require_lifecycle_lock_ownership "credential-store test"
-  "$TASK5_KOTLIN" test \
-    --include-module dashboard-server \
-    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorCredentialStoreTest
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorCredentialStoreTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorProcessTransportTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorApplicationLeaseRegistryTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorBoundedExchangeTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotTask6TopologyProofTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotTask6OperatorProcessInventoryTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotTask6ProcessProofTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorExecTransportLiveTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotTask5ProofLifecycleTest
 )
+task5_require_lifecycle_lock_ownership "network isolation Python checks"
+python3 -m unittest "$TASK5_NETWORK_ISOLATION_TEST_RELATIVE"
 task5_require_lifecycle_lock_ownership "base Compose config"
 COMPOSE_DISABLE_ENV_FILE=1 docker compose --file docker-compose.yml config --quiet
 task5_require_lifecycle_lock_ownership "proof Compose config"
@@ -1127,6 +1139,12 @@ task5_require_mode "$TASK5_PROOF_ROOT/ssl/tls.key" 600
 task5_require_proof_root_ownership "TLS certificate hostname verification"
 openssl verify -CAfile "$TASK5_PROOF_ROOT/ssl/tls.crt" -verify_hostname localhost "$TASK5_PROOF_ROOT/ssl/tls.crt"
 
+task5_require_lifecycle_lock_ownership "ordinary proof services start"
+TASK5_PROOF_START_ATTEMPTED=1
+task5_compose_with_lock \
+  up --detach --build --force-recreate --wait \
+  oauth2-mock dovecot postfix
+
 task5_require_proof_root_ownership "proof preflight"
 (
   cd -- "$TASK5_DASHBOARD_ROOT"
@@ -1135,10 +1153,6 @@ task5_require_proof_root_ownership "proof preflight"
     --main-class mail.sandbox.dashboard.server.gate.dovecot.EligibilityFileCli \
     -- task5-proof preflight
 )
-
-task5_require_lifecycle_lock_ownership "ordinary Dovecot start"
-TASK5_PROOF_START_ATTEMPTED=1
-task5_compose_with_lock up --detach --no-deps --wait dovecot
 
 task5_require_proof_root_ownership "bootstrap eligibility creation"
 if openssl rand -hex 32 |
@@ -1164,11 +1178,23 @@ task5_require_proof_root_ownership "operator credential bootstrap"
     -- bootstrap-task5-proof
 )
 
-task5_require_lifecycle_lock_ownership "complete proof start"
+task5_require_lifecycle_lock_ownership "isolated operator start"
 task5_compose_with_lock \
-  up --detach --build --force-recreate --wait \
-  dovecot dovecot-operator postfix oauth2-mock
-task5_compose_with_lock ps dovecot dovecot-operator postfix oauth2-mock
+  --profile dovecot-operator \
+  up --detach --build --force-recreate --no-deps --wait \
+  dovecot-operator
+task5_compose_with_lock \
+  --profile dovecot-operator \
+  ps oauth2-mock dovecot postfix dovecot-operator
+
+task5_require_proof_root_ownership "operator preflight checkpoint"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  TASK5_OPERATOR_EXEC_PROOF_MODE=preflight \
+    "$TASK5_KOTLIN" test \
+      --include-module dashboard-server \
+      --include-classes "$TASK5_EXEC_TRANSPORT_LIVE_CLASS"
+)
 
 task5_require_proof_root_ownership "startup live test"
 (
@@ -1192,6 +1218,23 @@ task5_require_proof_root_ownership "operator rotation live test"
   "$TASK5_KOTLIN" test \
     --include-module dashboard-server \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorRotationLiveTest
+)
+
+task5_require_proof_root_ownership "operator process lifecycle live test"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  "$TASK5_KOTLIN" test \
+    --include-module dashboard-server \
+    --include-classes "$TASK5_EXEC_TRANSPORT_LIVE_CLASS"
+)
+
+task5_require_proof_root_ownership "final zero-process inventory"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  TASK5_OPERATOR_EXEC_PROOF_MODE=inventory-only \
+    "$TASK5_KOTLIN" test \
+      --include-module dashboard-server \
+      --include-classes "$TASK5_EXEC_TRANSPORT_LIVE_CLASS"
 )
 
 printf '%s\n' "Task 5 proof completed; mandatory cleanup follows."

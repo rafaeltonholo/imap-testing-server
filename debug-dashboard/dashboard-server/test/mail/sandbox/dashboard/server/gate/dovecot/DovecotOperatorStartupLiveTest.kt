@@ -21,34 +21,23 @@ class DovecotOperatorStartupLiveTest {
             repositoryRoot = repositoryRoot,
         )
         live.awaitReady()
+        val launchProfile = live.operatorRuntime.launchProfile
+        val eligibilityAdapter =
+            Task6LaunchProfileEligibilityAdapter(launchProfile)
 
         val address = disposableTargetAddress()
         val target = DovecotOperatorTarget.create(address)
         val eligibilityPaths = live.profile.eligibilityPaths()
         val eligibilityCli = EligibilityFileCli(
             pathsProvider = { eligibilityPaths },
-            hasherFactory = { root ->
-                DovecotPasswordHasher(
-                    root,
-                    JvmEligibilityProcessRunner(
-                        dockerRouting =
-                            DovecotDockerRouting.task5Proof(live.profile),
-                    ),
-                )
-            },
+            hasherFactory = { eligibilityAdapter },
         )
         val credentialStore = DovecotOperatorCredentialStore(
             paths = live.profile.operatorPaths(),
             hasher = DovecotOperatorHashBoundary {
                 error("startup proof must not hash operator credentials")
             },
-            verifier = ExistingDovecotOperatorHashVerifier(
-                repositoryRoot,
-                JvmEligibilityProcessRunner(
-                    dockerRouting =
-                        DovecotDockerRouting.task5Proof(live.profile),
-                ),
-            ),
+            verifier = eligibilityAdapter,
             generator = DovecotOperatorSecretGenerator {
                 error("startup proof must not bootstrap operator credentials")
             },

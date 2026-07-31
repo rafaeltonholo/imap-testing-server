@@ -21,14 +21,73 @@ import kotlin.test.assertTrue
 
 class DovecotTask6ProcessProofTest {
     @Test
+    fun execTransportLiveProofDeclaresTheFixedLifecycleModeContract() {
+        val fileClass = Class.forName(
+            "mail.sandbox.dashboard.server.gate.dovecot." +
+                "DovecotOperatorExecTransportLiveTestKt",
+        )
+
+        assertTrue(
+            fileClass.declaredMethods.any { method ->
+                method.name == "task5OperatorExecProofMode"
+            },
+        )
+        assertTrue(
+            runCatching {
+                Class.forName(
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                        "Task5OperatorExecProofMode",
+                )
+            }.isSuccess,
+        )
+        assertTrue(
+            runCatching {
+                Class.forName(
+                    "mail.sandbox.dashboard.server.gate.dovecot." +
+                        "Task5OperatorExecProofDispatcher",
+                )
+            }.isSuccess,
+        )
+    }
+
+    @Test
     fun execTransportLiveProofIsDormantWithoutExplicitFixedSelection() {
         assertFalse(dovecotTask6ExecLiveProofSelected(emptyMap()))
+        assertEquals(
+            Task5OperatorExecProofMode.Dormant,
+            task5OperatorExecProofMode(emptyMap()),
+        )
+        val fixedSelection = mapOf(
+            "DOVECOT_LIVE_TESTS" to "1",
+            "DOVECOT_LIVE_PROFILE" to "task5-proof",
+        )
         assertTrue(
             dovecotTask6ExecLiveProofSelected(
-                mapOf(
-                    "DOVECOT_LIVE_TESTS" to "1",
-                    "DOVECOT_LIVE_PROFILE" to "task5-proof",
-                ),
+                fixedSelection,
+            ),
+        )
+        assertEquals(
+            Task5OperatorExecProofMode.Full,
+            task5OperatorExecProofMode(fixedSelection),
+        )
+        assertEquals(
+            Task5OperatorExecProofMode.Preflight,
+            task5OperatorExecProofMode(
+                fixedSelection +
+                    (
+                        "TASK5_OPERATOR_EXEC_PROOF_MODE" to
+                            "preflight"
+                        ),
+            ),
+        )
+        assertEquals(
+            Task5OperatorExecProofMode.InventoryOnly,
+            task5OperatorExecProofMode(
+                fixedSelection +
+                    (
+                        "TASK5_OPERATOR_EXEC_PROOF_MODE" to
+                            "inventory-only"
+                        ),
             ),
         )
         assertFailsWith<IllegalArgumentException> {
@@ -42,6 +101,109 @@ class DovecotTask6ProcessProofTest {
                     "DOVECOT_LIVE_TESTS" to "0",
                     "DOVECOT_LIVE_PROFILE" to "task5-proof",
                 ),
+            )
+        }
+        listOf("", "full", "PREflight", "inventory", "other").forEach { mode ->
+            assertFailsWith<IllegalArgumentException> {
+                task5OperatorExecProofMode(
+                    fixedSelection +
+                        ("TASK5_OPERATOR_EXEC_PROOF_MODE" to mode),
+                )
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            task5OperatorExecProofMode(
+                mapOf(
+                    "TASK5_OPERATOR_EXEC_PROOF_MODE" to
+                        "inventory-only",
+                ),
+            )
+        }
+        listOf(
+            mapOf(
+                "DOVECOT_LIVE_PROFILE" to "task5-proof",
+            ),
+            mapOf(
+                "DOVECOT_OPERATOR_HOST" to "127.0.0.1",
+            ),
+        ).forEach { partialSelection ->
+            assertFailsWith<IllegalArgumentException> {
+                task5OperatorExecProofMode(partialSelection)
+            }
+        }
+    }
+
+    @Test
+    fun execProofDispatcherRunsOnlyTheExactLifecycleModeBoundaries() {
+        fun eventsFor(
+            mode: Task5OperatorExecProofMode,
+        ): List<String> {
+            val events = mutableListOf<String>()
+            Task5OperatorExecProofDispatcher(
+                awaitReady = { events += "ready" },
+                requireExactTopology = { events += "topology" },
+                requireZeroInventory = { events += "zero" },
+                runFullProof = { events += "full" },
+            ).run(mode)
+            return events
+        }
+
+        assertEquals(
+            emptyList(),
+            eventsFor(Task5OperatorExecProofMode.Dormant),
+        )
+        assertEquals(
+            listOf("ready", "topology", "zero"),
+            eventsFor(Task5OperatorExecProofMode.Preflight),
+        )
+        assertEquals(
+            listOf("zero"),
+            eventsFor(Task5OperatorExecProofMode.InventoryOnly),
+        )
+        assertEquals(
+            listOf("ready", "full", "zero"),
+            eventsFor(Task5OperatorExecProofMode.Full),
+        )
+    }
+
+    @Test
+    fun execProofDispatcherAlwaysChecksFinalZeroAndPreservesPrimaryFailure() {
+        listOf(
+            Task5OperatorExecProofMode.Preflight,
+            Task5OperatorExecProofMode.Full,
+        ).forEach { mode ->
+            val primary = IllegalStateException("primary-$mode")
+            val inventory = IllegalStateException("inventory-$mode")
+            val events = mutableListOf<String>()
+            val failure = assertFailsWith<IllegalStateException> {
+                Task5OperatorExecProofDispatcher(
+                    awaitReady = { events += "ready" },
+                    requireExactTopology = {
+                        events += "topology"
+                        if (mode == Task5OperatorExecProofMode.Preflight) {
+                            throw primary
+                        }
+                    },
+                    requireZeroInventory = {
+                        events += "zero"
+                        throw inventory
+                    },
+                    runFullProof = {
+                        events += "full"
+                        throw primary
+                    },
+                ).run(mode)
+            }
+
+            assertSame(primary, failure)
+            assertEquals(listOf(inventory), failure.suppressed.toList())
+            assertEquals(
+                if (mode == Task5OperatorExecProofMode.Preflight) {
+                    listOf("ready", "topology", "zero")
+                } else {
+                    listOf("ready", "full", "zero")
+                },
+                events,
             )
         }
     }
@@ -370,6 +532,78 @@ class DovecotTask6ProcessProofTest {
                 assertExactlySixteen: () -> Unit,
                 assertNoSeventeenthStarted: () -> Unit,
             ) = error("Saturation proof must not run after a finite failure")
+        }
+
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotTask6ProcessProof {
+                counts.removeFirst()
+            }.run(scenarios)
+        }
+
+        assertSame(primary, failure)
+        assertTrue(counts.isEmpty())
+    }
+
+    @Test
+    fun processProofStillChecksZeroAfterAFailedHeldScenario() {
+        val primary = IllegalStateException("held scenario failed")
+        val counts = ArrayDeque(
+            List(12) { 0 } + listOf(0, 0),
+        )
+        val scenarios = object : DovecotTask6ProcessScenarios {
+            override fun runFinite(
+                case: DovecotTask6FiniteProcessCase,
+            ) = Unit
+
+            override fun withHeldProcess(
+                assertExactlyOne: () -> Unit,
+            ) {
+                throw primary
+            }
+
+            override fun withSaturatedProcesses(
+                assertExactlySixteen: () -> Unit,
+                assertNoSeventeenthStarted: () -> Unit,
+            ) = error("Saturation proof must not run")
+        }
+
+        val failure = assertFailsWith<IllegalStateException> {
+            DovecotTask6ProcessProof {
+                counts.removeFirst()
+            }.run(scenarios)
+        }
+
+        assertSame(primary, failure)
+        assertTrue(counts.isEmpty())
+    }
+
+    @Test
+    fun processProofStillChecksZeroAfterAFailedSaturationScenario() {
+        val primary = IllegalStateException("saturation scenario failed")
+        val counts = ArrayDeque(
+            List(12) { 0 } +
+                listOf(
+                    0, 1, 0,
+                    0, 0,
+                ),
+        )
+        val scenarios = object : DovecotTask6ProcessScenarios {
+            override fun runFinite(
+                case: DovecotTask6FiniteProcessCase,
+            ) = Unit
+
+            override fun withHeldProcess(
+                assertExactlyOne: () -> Unit,
+            ) {
+                assertExactlyOne()
+            }
+
+            override fun withSaturatedProcesses(
+                assertExactlySixteen: () -> Unit,
+                assertNoSeventeenthStarted: () -> Unit,
+            ) {
+                throw primary
+            }
         }
 
         val failure = assertFailsWith<IllegalStateException> {
