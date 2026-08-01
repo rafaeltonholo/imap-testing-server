@@ -60,27 +60,31 @@ internal class DovecotIsolationProtocolProof private constructor(
         combinedUsername: String,
         password: EligibilityPassword,
     ) {
-        check(
+        requirePermanentOperatorImapRejection(
             requireOperatorExchange().authenticateLogin(
                 username = combinedUsername,
                 password = password,
-            ) == DovecotOperatorProbeResult.AuthenticationFailure,
-        ) {
-            "Operator IMAP rejection was not permanent"
-        }
+            ),
+        )
     }
 
     fun requireOperatorImapRejected(
         combinedUsername: String,
         credential: DovecotOperatorCredential,
     ) {
-        check(
+        requirePermanentOperatorImapRejection(
             requireOperatorExchange().authenticateLogin(
                 username = combinedUsername,
                 credential = credential,
-            ) == DovecotOperatorProbeResult.AuthenticationFailure,
-        ) {
-            "Operator IMAP rejection was not permanent"
+            ),
+        )
+    }
+
+    private fun requirePermanentOperatorImapRejection(
+        result: DovecotOperatorProbeResult,
+    ) {
+        check(result == DovecotOperatorProbeResult.AuthenticationFailure) {
+            "Operator IMAP rejection was not permanent: ${result.name}"
         }
     }
 

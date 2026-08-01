@@ -256,24 +256,35 @@ internal class DovecotOperatorBoundedExchange(
 
     private fun readAuthenticationCompletion(
         io: DovecotOperatorBoundedIo,
-    ): DovecotOperatorProbeResult =
-        io.readLine().useWiped { completion ->
-            when (
-                DovecotAuthenticationResponseClassifier.classifyImap(
-                    line = completion,
-                    tag = AUTHENTICATE_LOGIN_TAG,
-                )
-            ) {
-                DovecotAuthenticationResponse.Success ->
-                    DovecotOperatorProbeResult.Success
-                DovecotAuthenticationResponse.PermanentFailure ->
-                    DovecotOperatorProbeResult.AuthenticationFailure
-                DovecotAuthenticationResponse.AuthorizationFailure ->
-                    DovecotOperatorProbeResult.AuthorizationFailure
-                DovecotAuthenticationResponse.Indeterminate ->
-                    DovecotOperatorProbeResult.ProtocolFailure
+    ): DovecotOperatorProbeResult {
+        repeat(MAX_RESPONSE_LINES) {
+            io.readLine().useWiped { completion ->
+                if (
+                    completion.hasAsciiTokenAt(
+                        offset = 0,
+                        token = AUTHENTICATE_LOGIN_TAG_TEXT,
+                    )
+                ) {
+                    return when (
+                        DovecotAuthenticationResponseClassifier.classifyImap(
+                            line = completion,
+                            tag = AUTHENTICATE_LOGIN_TAG,
+                        )
+                    ) {
+                        DovecotAuthenticationResponse.Success ->
+                            DovecotOperatorProbeResult.Success
+                        DovecotAuthenticationResponse.PermanentFailure ->
+                            DovecotOperatorProbeResult.AuthenticationFailure
+                        DovecotAuthenticationResponse.AuthorizationFailure ->
+                            DovecotOperatorProbeResult.AuthorizationFailure
+                        DovecotAuthenticationResponse.Indeterminate ->
+                            DovecotOperatorProbeResult.ProtocolFailure
+                    }
+                }
             }
         }
+        return DovecotOperatorProbeResult.ProtocolFailure
+    }
 
     private fun writeBase64Line(
         io: DovecotOperatorBoundedIo,

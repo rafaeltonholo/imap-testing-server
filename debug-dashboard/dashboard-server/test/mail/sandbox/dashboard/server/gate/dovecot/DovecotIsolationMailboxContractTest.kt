@@ -3,6 +3,7 @@ package mail.sandbox.dashboard.server.gate.dovecot
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -315,6 +316,44 @@ class DovecotIsolationMailboxContractTest {
         assertFailsWith<IllegalStateException> {
             credential.withSecretBytes { }
         }
+    }
+
+    @Test
+    fun portFreeOperatorRejectionReportsOnlyTheTypedTransportFailure() {
+        val secretBytes =
+            "operator-diagnostic-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val credential = DovecotOperatorCredential(
+            id = DovecotOperatorId.A,
+            secret = DovecotOperatorSecret.takeOwnership(secretBytes),
+        )
+        val rawTransportDetail = "raw-transport-detail"
+        val combinedUsername =
+            "diagnostic-target@local.test*dashboard-operator-b"
+        val exchange = DovecotOperatorBoundedExchange(
+            DovecotOperatorTransportFactory {
+                throw IOException(rawTransportDetail)
+            },
+        )
+        val proof = task6ProtocolProofForOperatorExchange(exchange)
+
+        val failure = assertFailsWith<IllegalStateException> {
+            proof.requireOperatorImapRejected(
+                combinedUsername = combinedUsername,
+                credential = credential,
+            )
+        }
+
+        assertEquals(
+            "Operator IMAP rejection was not permanent: TransportFailure",
+            failure.message,
+        )
+        assertFalse(failure.message.orEmpty().contains(combinedUsername))
+        assertFalse(failure.message.orEmpty().contains(rawTransportDetail))
+        assertFalse(
+            failure.message.orEmpty().contains("operator-diagnostic-secret"),
+        )
+        assertTrue(secretBytes.all { it == 0.toByte() })
     }
 
     @Test

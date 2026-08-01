@@ -80,6 +80,20 @@ class DovecotOperatorConfigTest {
     }
 
     @Test
+    fun operatorAuthenticationFailuresDoNotAddReplyDelayOrPenalty() {
+        val assignments = topLevelAssignments(
+            Files.readString(operatorConfigPath),
+        )
+
+        assertEquals(
+            "0s",
+            assignments["auth_failure_delay"],
+            "Expected operator failures not to enqueue a reply delay or " +
+                "increment Dovecot's per-source penalty",
+        )
+    }
+
+    @Test
     fun pinnedEffectiveConfigKeepsPreinitSafeMasterDirectEligibilityMissingOrder() {
         val effective = effectiveOperatorConfig()
         val passdbs = topLevelNamedBlocks(effective, "passdb")
@@ -1689,6 +1703,7 @@ class DovecotOperatorConfigTest {
             auth_allow_cleartext = no
             auth_master_user_separator = *
             auth_username_format = %{user}
+            auth_failure_delay = 0s
 
             passdb operator-master {
               driver = passwd-file

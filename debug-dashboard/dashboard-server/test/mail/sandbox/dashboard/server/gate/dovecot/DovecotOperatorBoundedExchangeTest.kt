@@ -335,6 +335,27 @@ class DovecotOperatorBoundedExchangeTest {
     }
 
     @Test
+    fun loginSkipsUntaggedStatusUntilTheTaggedCompletion() {
+        val secretBytes =
+            "delayed-authentication-secret"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val transport = authenticationTransport(
+            "* OK Waiting for authentication process to respond..\r\n" +
+                "A901 NO [AUTHENTICATIONFAILED] Authentication failed.\r\n",
+        )
+
+        assertEquals(
+            DovecotOperatorProbeResult.AuthenticationFailure,
+            exchange(transport).authenticateLogin(
+                username = TARGET.address,
+                credential = credential(secretBytes),
+            ),
+        )
+        assertTrue(secretBytes.all { it == 0.toByte() })
+        assertTrue(transport.closed)
+    }
+
+    @Test
     fun plainAuthzidMasterFormIsExactAndWipesEveryWorkerOwnedCommand() {
         val copiedCommands = CopyOnWriteArrayList<ByteArray>()
         val workers = DovecotBoundedOperationWorkers(
