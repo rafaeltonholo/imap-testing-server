@@ -216,6 +216,99 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun discoversAndRejectsDynamicImportsAfterExpressionEndingIdentifiers() {
+        val expressions = mapOf(
+            "return property" to "obj.return",
+            "await property" to "obj.await",
+            "throw property" to "obj.throw",
+            "case property" to "obj.case",
+            "delete property" to "obj.delete",
+            "void property" to "obj.void",
+            "typeof property" to "obj.typeof",
+            "new property" to "obj.new",
+            "in property" to "obj.in",
+            "yield property" to "obj.yield",
+            "else property" to "obj.else",
+            "do property" to "obj.do",
+            "optional return property" to "obj?.return",
+            "bare contextual of identifier" to "of",
+        )
+
+        expressions.forEach { (label, expression) ->
+            val importSpecifier = "evil-${label.replace(" ", "-")}"
+            val source = "$expression / import('$importSpecifier') / 2"
+            val references = scanModuleReferences(source)
+
+            assertEquals(1, references.size, label)
+            assertTrue(references.single().toString().contains(importSpecifier), label)
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun discoversAndRejectsDynamicImportsAfterPrivateKeywordNamedMembers() {
+        val importSpecifier = "evil-private-return"
+        val source =
+            "class ScannerProof { #return = 1; scan() { " +
+                "return this.#return / import('$importSpecifier') / 2 } }"
+        val references = scanModuleReferences(source)
+
+        assertEquals(1, references.size)
+        assertTrue(references.single().toString().contains(importSpecifier))
+        withFixture { fixture ->
+            fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+            assertFailsWith<IllegalArgumentException> { fixture.load() }
+        }
+    }
+
+    @Test
+    fun discoversAndRejectsDynamicImportsAfterCompletedTemplates() {
+        val templates = mapOf(
+            "plain template" to "`value`",
+            "substituted template" to "`value \${counter}`",
+        )
+
+        templates.forEach { (label, expression) ->
+            val importSpecifier = "evil-${label.replace(" ", "-")}"
+            val source = "$expression / import('$importSpecifier') / 2"
+            val references = scanModuleReferences(source)
+
+            assertEquals(1, references.size, label)
+            assertTrue(references.single().toString().contains(importSpecifier), label)
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun rejectsUnsupportedRegexesBeforeEscapedSlashCommentDecoys() {
+        val sources = mapOf(
+            "block comment decoy" to
+                ";/([^\\/]+|\\/)\\/*$/; import('evil-block'); /*x*/",
+            "line comment decoy" to
+                ";/\\//; import('evil-line')",
+        )
+
+        sources.forEach { (label, source) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("escaped slash"),
+                "$label produced: ${failure.message}",
+            )
+        }
+    }
+
+    @Test
     fun acceptsTheGeneratedSkikoDeadLoaderDestructure() {
         withFixture { fixture ->
             fixture.entry.writeText(
@@ -823,11 +916,13 @@ private fun sha256ForTest(bytes: ByteArray): String =
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
 
-private fun scanModuleReferences(source: String): List<*> {
+private fun scanModuleReferences(source: String): List<*> = try {
     val scannerClass = Class.forName("mail.sandbox.dashboard.server.web.ModuleReferenceScanner")
     val constructor = scannerClass.getDeclaredConstructor(String::class.java)
     constructor.isAccessible = true
     val references = scannerClass.getDeclaredMethod("references")
     references.isAccessible = true
-    return references.invoke(constructor.newInstance(source)) as List<*>
+    references.invoke(constructor.newInstance(source)) as List<*>
+} catch (failure: java.lang.reflect.InvocationTargetException) {
+    throw failure.targetException
 }

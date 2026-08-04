@@ -1148,6 +1148,8 @@ private sealed interface JsToken {
 
     data class RegexLiteral(override val start: Int) : JsToken
 
+    data class TemplateLiteral(override val start: Int) : JsToken
+
     data class Punctuation(val value: String, override val start: Int) : JsToken
 
     data class TemplateBoundary(
@@ -1183,6 +1185,8 @@ private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean 
 
             is JsToken.RegexLiteral -> false
 
+            is JsToken.TemplateLiteral -> false
+
             is JsToken.Punctuation ->
                 expected[index] == JsTokenShape.Punctuation(token.value)
 
@@ -1207,8 +1211,15 @@ private class JsTokenizer(private val source: String) {
             val character = source[index]
             when {
                 character.isWhitespace() -> index++
-                character == '/' && source.getOrNull(index + 1) == '/' -> scanLineComment()
-                character == '/' && source.getOrNull(index + 1) == '*' -> scanBlockComment()
+                character == '/' && source.getOrNull(index + 1) == '/' -> {
+                    requireCommentOpenerIsNotEscaped()
+                    scanLineComment()
+                }
+
+                character == '/' && source.getOrNull(index + 1) == '*' -> {
+                    requireCommentOpenerIsNotEscaped()
+                    scanBlockComment()
+                }
                 character == '/' && canStartRegexLiteral() -> scanRegexLiteral()
                 character == '/' && inTemplateSubstitution ->
                     throw IllegalArgumentException(
@@ -1254,6 +1265,12 @@ private class JsTokenizer(private val source: String) {
         while (index < source.length && source[index] != '\n') index++
     }
 
+    private fun requireCommentOpenerIsNotEscaped() {
+        require(source.getOrNull(index - 1) != '\\') {
+            "Unreviewed escaped slash before JavaScript comment opener"
+        }
+    }
+
     private fun scanBlockComment() {
         val end = source.indexOf("*/", index + 2)
         require(end >= 0) { "Unterminated JavaScript block comment" }
@@ -1261,25 +1278,8 @@ private class JsTokenizer(private val source: String) {
     }
 
     private fun canStartRegexLiteral(): Boolean {
-        if (hasPostfixUpdateBeforeRegexCandidate()) return false
-        return when (val previous = tokens.lastOrNull()) {
-            null -> true
-            is JsToken.Punctuation -> previous.value in REGEX_EXPRESSION_PREFIXES
-            is JsToken.Identifier -> previous.value in REGEX_EXPRESSION_KEYWORDS
-            else -> false
-        }
-    }
-
-    private fun hasPostfixUpdateBeforeRegexCandidate(): Boolean {
-        val operator = tokens.getOrNull(tokens.lastIndex) as? JsToken.Punctuation ?: return false
-        val repeatedOperator = tokens.getOrNull(tokens.lastIndex - 1) as? JsToken.Punctuation ?: return false
-        val operand = tokens.getOrNull(tokens.lastIndex - 2)
-        return operator.value in POSTFIX_UPDATE_OPERATORS &&
-            operator.value == repeatedOperator.value &&
-            (
-                operand is JsToken.Identifier ||
-                    operand is JsToken.Punctuation && operand.value in POSTFIX_UPDATE_OPERANDS
-                )
+        val previous = tokens.lastOrNull() as? JsToken.Punctuation ?: return false
+        return previous.value in REVIEWED_REGEX_PREFIXES
     }
 
     private fun scanRegexLiteral() {
@@ -1344,6 +1344,7 @@ private class JsTokenizer(private val source: String) {
     }
 
     private fun scanTemplate() {
+        val start = index
         index++
         while (index < source.length) {
             when {
@@ -1356,6 +1357,7 @@ private class JsTokenizer(private val source: String) {
 
                 source[index] == '`' -> {
                     index++
+                    tokens += JsToken.TemplateLiteral(start)
                     return
                 }
 
@@ -1383,13 +1385,6 @@ private class JsTokenizer(private val source: String) {
     }
 
     private companion object {
-        val REGEX_EXPRESSION_PREFIXES = setOf(
-            "(", "[", "{", "=", ":", ",", ";", "!", "?", "&", "|", "+", "-", "*", "/", "%", "~", "^", "<", ">",
-        )
-        val REGEX_EXPRESSION_KEYWORDS = setOf(
-            "return", "throw", "case", "delete", "void", "typeof", "new", "in", "of", "yield", "await", "else", "do",
-        )
-        val POSTFIX_UPDATE_OPERATORS = setOf("+", "-")
-        val POSTFIX_UPDATE_OPERANDS = setOf("]", ")")
+        val REVIEWED_REGEX_PREFIXES = setOf("(", "=")
     }
 }

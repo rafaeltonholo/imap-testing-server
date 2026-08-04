@@ -775,3 +775,35 @@ Final correction verification:
 | production `KotlinToolchainBrowserGateTest` command from the preceding entry | PASS; 1/1 in 11.418 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
 
 **Gate 0A latest-stack scanner correction: PASS. No stop condition remains.**
+
+#### 2026-08-04 UTC: expression-context hardening
+
+A second adversarial review supersedes the lexer description above. Keyword
+text and a broad punctuation set are no longer used to guess whether `/`
+opens a regex. The reviewed production closure contains exactly seven regex
+literals (five in Skiko, one in `dashboard-web.mjs`, and one in JS-Joda), and
+every one begins after either `(` or `=`. Those are now the only two accepted
+regex-prefix contexts. New generated regex shapes therefore require explicit
+review instead of extending a fragile expression heuristic.
+
+Node `v24.4.0` module parsing confirmed the regression probes are valid
+JavaScript. The focused scanner tests require discovery and loader rejection
+after postfix updates; dot, optional-chain, and private keyword-named members;
+bare contextual `of`; and completed plain or substituted template literals.
+Completed templates now emit an opaque expression-ending token. Unsupported
+regex shapes containing an escaped slash immediately before a raw `/*` or
+`//` comment opener fail closed, preventing either comment form from hiding a
+later executable import. The real Skiko basename regex and the complete
+production bundle remain accepted.
+
+The exact `find` and `rg` closure commands and four-file/edge results in the
+preceding correction were rerun unchanged after this hardening. Final results:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
+| focused `WebAssetBundleTest` | PASS; 26/26 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 30/30 |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 12.749 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A latest-stack expression-context correction: PASS. No stop condition remains.**
