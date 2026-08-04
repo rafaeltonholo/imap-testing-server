@@ -5,7 +5,6 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DependencyBaselineTest {
@@ -133,11 +132,11 @@ class DependencyBaselineTest {
             """,
         )
 
-        assertFalse(contract.content.contains("\n  compose:"), ownershipFailure(contract, "enable Compose"))
-        assertFalse(server.content.contains("\n  compose:"), ownershipFailure(server, "enable Compose"))
-        assertFalse(contract.content.contains("\n  ktor:"), ownershipFailure(contract, "enable Ktor"))
-        assertFalse(web.content.contains("\n  serialization:"), ownershipFailure(web, "configure serialization"))
-        assertFalse(web.content.contains("junit"), ownershipFailure(web, "own JUnit"))
+        assertNoActiveKey(contract, "compose")
+        assertNoActiveKey(server, "compose")
+        assertNoActiveKey(contract, "ktor")
+        assertNoActiveKey(web, "serialization")
+        assertNoActiveJUnitOwnership(web)
     }
 
     @Test
@@ -214,8 +213,13 @@ class DependencyBaselineTest {
 
         assertEquals(
             listOf(
-                ActiveYamlValue(lineNumber = 2, value = "2.4.10", isListItem = false),
-                ActiveYamlValue(lineNumber = 3, value = "\"hash # stays\"", isListItem = false),
+                ActiveYamlValue(lineNumber = 2, key = "version", value = "2.4.10", isListItem = false),
+                ActiveYamlValue(
+                    lineNumber = 3,
+                    key = "note",
+                    value = "\"hash # stays\"",
+                    isListItem = false,
+                ),
             ),
             values,
         )
@@ -262,6 +266,51 @@ class DependencyBaselineTest {
         )
     }
 
+    @Test
+    fun activeYamlScannerRetainsQuotedKeysAndIgnoresCommentedOwnershipWords() {
+        val yaml =
+            """
+            "compose":
+            'ktor': enabled
+            # "serialization": enabled
+            note: harmless # junit
+            """.trimIndent()
+        val declarations = scanActiveYamlValues(yaml)
+
+        assertEquals(
+            listOf(
+                ActiveYamlValue(lineNumber = 1, key = "compose", value = "", isListItem = false),
+                ActiveYamlValue(lineNumber = 2, key = "ktor", value = "enabled", isListItem = false),
+                ActiveYamlValue(lineNumber = 4, key = "note", value = "harmless", isListItem = false),
+            ),
+            declarations,
+        )
+        assertEquals(listOf(1), activeKeyDeclarations(declarations, "compose").map { it.lineNumber })
+        assertEquals(listOf(2), activeKeyDeclarations(declarations, "ktor").map { it.lineNumber })
+        assertEquals(emptyList(), junitOwnershipDeclarations(declarations))
+    }
+
+    @Test
+    fun activeYamlScannerPreservesEmbeddedPlainScalarHashes() {
+        val values = scanActiveYamlValues("source: artifact#2.3.21")
+
+        assertEquals(
+            listOf(
+                ActiveYamlValue(
+                    lineNumber = 1,
+                    key = "source",
+                    value = "artifact#2.3.21",
+                    isListItem = false,
+                ),
+            ),
+            values,
+        )
+        assertEquals(
+            listOf(ActiveVersion(lineNumber = 1, version = "2.3.21")),
+            prohibitedVersionDeclarations(values),
+        )
+    }
+
     private fun assertJUnitOwnership(module: ModuleYaml, section: String) {
         assertSnippet(
             module,
@@ -283,8 +332,21 @@ class DependencyBaselineTest {
         )
     }
 
-    private fun ownershipFailure(module: ModuleYaml, operation: String): String =
-        "${module.name} (${module.path}) must not $operation"
+    private fun assertNoActiveKey(module: ModuleYaml, prohibitedKey: String) {
+        val findings = activeKeyDeclarations(scanActiveYamlValues(module.content), prohibitedKey)
+            .map { declaration ->
+                "${module.name} (${module.path}):${declaration.lineNumber}: active key '$prohibitedKey'"
+            }
+        assertEquals(emptyList(), findings, "Prohibited active YAML key was found")
+    }
+
+    private fun assertNoActiveJUnitOwnership(module: ModuleYaml) {
+        val findings = junitOwnershipDeclarations(scanActiveYamlValues(module.content)).map { declaration ->
+            "${module.name} (${module.path}):${declaration.lineNumber}: " +
+                "active JUnit declaration '${declaration.key ?: declaration.value}'"
+        }
+        assertEquals(emptyList(), findings, "The Wasm web module must not own JUnit")
+    }
 
     private fun moduleYamls(): Map<String, ModuleYaml> {
         val root = repositoryRoot()
@@ -306,25 +368,57 @@ class DependencyBaselineTest {
             if (activeLine.isEmpty()) return@mapIndexedNotNull null
 
             val isListItem = activeLine.startsWith("- ")
-            val value = if (isListItem) {
-                activeLine.removePrefix("- ").trim()
+            val key: String?
+            val value: String
+            if (isListItem) {
+                key = null
+                value = activeLine.removePrefix("- ").trim()
             } else {
                 val separator = firstUnquotedIndex(activeLine, ':')
                 if (separator < 0) return@mapIndexedNotNull null
-                activeLine.substring(separator + 1).trim()
+                key = activeLine.substring(0, separator).trim().unquotedYamlScalar()
+                value = activeLine.substring(separator + 1).trim()
             }
-            if (value.isEmpty()) return@mapIndexedNotNull null
+            if (isListItem && value.isEmpty()) return@mapIndexedNotNull null
 
             ActiveYamlValue(
                 lineNumber = index + 1,
                 value = value,
                 isListItem = isListItem,
+                key = key,
             )
         }.toList()
 
     private fun stripYamlComment(line: String): String {
-        val comment = firstUnquotedIndex(line, '#')
+        val comment = firstYamlCommentIndex(line)
         return if (comment < 0) line else line.substring(0, comment)
+    }
+
+    private fun firstYamlCommentIndex(value: String): Int {
+        var inSingleQuotes = false
+        var inDoubleQuotes = false
+        var index = 0
+        while (index < value.length) {
+            val character = value[index]
+            when {
+                character == '\'' && !inDoubleQuotes -> {
+                    if (inSingleQuotes && value.getOrNull(index + 1) == '\'') {
+                        index += 2
+                        continue
+                    }
+                    inSingleQuotes = !inSingleQuotes
+                }
+                character == '"' && !inSingleQuotes && !value.isEscaped(index) -> {
+                    inDoubleQuotes = !inDoubleQuotes
+                }
+                character == '#' &&
+                    !inSingleQuotes &&
+                    !inDoubleQuotes &&
+                    (index == 0 || value[index - 1].isWhitespace()) -> return index
+            }
+            index++
+        }
+        return -1
     }
 
     private fun firstUnquotedIndex(value: String, target: Char): Int {
@@ -376,6 +470,18 @@ class DependencyBaselineTest {
             declaration.isListItem && declaration.value.unquotedYamlScalar() == "${'$'}compose.material3"
         }
 
+    private fun activeKeyDeclarations(
+        values: List<ActiveYamlValue>,
+        key: String,
+    ): List<ActiveYamlValue> = values.filter { declaration -> declaration.key == key }
+
+    private fun junitOwnershipDeclarations(values: List<ActiveYamlValue>): List<ActiveYamlValue> =
+        values.filter { declaration ->
+            declaration.key?.contains("junit", ignoreCase = true) == true ||
+                declaration.isListItem &&
+                declaration.value.unquotedYamlScalar().contains("junit", ignoreCase = true)
+        }
+
     private fun String.unquotedYamlScalar(): String {
         val scalar = trim()
         return when {
@@ -425,6 +531,7 @@ class DependencyBaselineTest {
         val lineNumber: Int,
         val value: String,
         val isListItem: Boolean,
+        val key: String? = null,
     )
 
     private data class ActiveVersion(
