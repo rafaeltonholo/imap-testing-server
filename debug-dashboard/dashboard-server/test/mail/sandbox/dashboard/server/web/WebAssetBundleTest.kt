@@ -365,6 +365,8 @@ class WebAssetBundleTest {
             "side-effect import" to "import './loader.mjs'",
             "import-from" to "import value from './loader.mjs'",
             "export-from" to "export { value } from './loader.mjs'",
+            "export namespace identifier alias" to
+                "export * as namespace from './loader.mjs'",
         )
         val regexDecoys = mapOf(
             "line marker" to "/[//]/; import('EVIL')",
@@ -386,6 +388,46 @@ class WebAssetBundleTest {
                     "$label produced: ${failure.message}",
                 )
             }
+        }
+    }
+
+    @Test
+    fun rejectsRegexDecoysAfterDefaultNamespaceExportAlias() {
+        val declaration = "export * as default from './loader.mjs'"
+        val regexDecoys = mapOf(
+            "line marker" to "/[//]/; import('evil-default')",
+            "block marker" to "/[/*]x/; import('evil-default'); /*close*/",
+            "quote" to "/[']/; import('evil-default'); // '",
+        )
+
+        regexDecoys.forEach { (label, decoy) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences("$declaration\n$decoy")
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("Unreviewed slash context"),
+                "$label produced: ${failure.message}",
+            )
+        }
+    }
+
+    @Test
+    fun rejectsRegexDecoysAfterStringNamespaceExportAlias() {
+        val declaration = "export * as 'named-space' from './loader.mjs'"
+        val regexDecoys = mapOf(
+            "line marker" to "/[//]/; import('evil-string')",
+            "block marker" to "/[/*]x/; import('evil-string'); /*close*/",
+            "quote" to "/[']/; import('evil-string'); // '",
+        )
+
+        regexDecoys.forEach { (label, decoy) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences("$declaration\n$decoy")
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("Unreviewed slash context"),
+                "$label produced: ${failure.message}",
+            )
         }
     }
 

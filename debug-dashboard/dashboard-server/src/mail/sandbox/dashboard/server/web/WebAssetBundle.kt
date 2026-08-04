@@ -1344,6 +1344,7 @@ private class JsTokenizer(private val source: String) {
     }
 
     private fun isStaticModuleFromKeyword(fromIndex: Int): Boolean {
+        if (isExportNamespaceAliasFromKeyword(fromIndex)) return true
         var braces = 0
         for (candidateIndex in fromIndex - 1 downTo 0) {
             when (val candidate = tokens[candidateIndex]) {
@@ -1369,6 +1370,19 @@ private class JsTokenizer(private val source: String) {
             }
         }
         return false
+    }
+
+    private fun isExportNamespaceAliasFromKeyword(fromIndex: Int): Boolean {
+        val alias = tokens.getOrNull(fromIndex - 1)
+        if (alias !is JsToken.Identifier && alias !is JsToken.StringLiteral) return false
+        val asKeyword = tokens.getOrNull(fromIndex - 2) as? JsToken.Identifier ?: return false
+        val star = tokens.getOrNull(fromIndex - 3) as? JsToken.Punctuation ?: return false
+        val exportIndex = fromIndex - 4
+        val exportKeyword = tokens.getOrNull(exportIndex) as? JsToken.Identifier ?: return false
+        return asKeyword.value == "as" &&
+            star.value == "*" &&
+            exportKeyword.value == "export" &&
+            !isMemberProperty(exportIndex)
     }
 
     private fun isUninitializedVariableBinding(identifierIndex: Int): Boolean {

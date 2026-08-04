@@ -864,3 +864,48 @@ edge table remains unchanged. Final results:
 | production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 13.830 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
 
 **Gate 0A latest-stack token-role correction: PASS. No stop condition remains.**
+
+#### 2026-08-04 UTC: export namespace alias correction
+
+A fifth bounded review supersedes the immediately preceding PASS. ECMAScript
+allows namespace re-exports whose `ModuleExportName` is the keyword `default`
+or a string literal, including:
+
+```javascript
+export * as default from './loader.mjs'
+export * as 'named-space' from './loader.mjs'
+```
+
+The prior backward `from` classifier intentionally stopped at top-level
+`default` and string tokens, so a next-line regex could be misclassified as
+division and hide an executable dynamic import. The scanner now recognizes
+only the exact backward namespace-export suffix: bare `export`, `*`, `as`, one
+identifier-or-string alias, then `from`. The general top-level default/string
+stops remain unchanged, so arbitrary strings or defaults before `from` are not
+broadly accepted as module syntax.
+
+Node `v24.4.0` accepted both exact declarations followed independently by the
+line-marker, block-marker, and quote regex decoys. Test-only RED produced two
+failures out of 38 tests: each scanner result contained only the legitimate
+`ExportFrom('./loader.mjs')` edge and omitted the hidden `evil-default` or
+`evil-string` import. Final tests require all six cases to fail closed at the
+slash. Normal identifier namespace aliases, ordinary `from` identifiers,
+literal divisions, and dynamic-import-call divisions remain covered.
+
+The scanner remains deliberately fail-closed for import/export bindings whose
+alias itself is the identifier `from`; supporting those safe-but-rejected
+forms would require a separate nesting-aware FromClause search. None occurs in
+the reviewed production closure.
+
+The exact `find` and `rg` closure commands were rerun. The linker output is
+still exactly the same four files and the reviewed edge table is unchanged.
+Final results:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
+| focused `WebAssetBundleTest` | PASS; 38/38 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 42/42 |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 46.761 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A export namespace alias correction: PASS. No stop condition remains.**
