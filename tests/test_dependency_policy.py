@@ -12,6 +12,26 @@ GATE_0B_PLAN = "2026-07-23-debug-dashboard-gate-0b-stalwart.md"
 MAIL_PROVIDERS_PLAN = "2026-07-23-debug-dashboard-mail-providers.md"
 MESSAGE_LAB_PLAN = "2026-07-23-debug-dashboard-message-lab-observability.md"
 
+OAUTH2_DOCKERFILE = REPOSITORY_ROOT / "oauth2-mock" / "Dockerfile"
+POSTFIX_DOCKERFILE = REPOSITORY_ROOT / "postfix" / "Dockerfile"
+POSTFIX_MAIN_CF = REPOSITORY_ROOT / "postfix" / "main.cf"
+
+PYTHON_BASE = (
+    "FROM python:3.14.6-slim-trixie@"
+    "sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
+)
+DEBIAN_BASE = (
+    "FROM debian:13.6-slim@"
+    "sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd"
+)
+POSTFIX_PACKAGES = {
+    "postfix": "3.10.12-0+deb13u2",
+    "libsasl2-2": "2.1.28+dfsg1-9",
+    "libsasl2-modules": "2.1.28+dfsg1-9",
+    "sasl2-bin": "2.1.28+dfsg1-9",
+    "netcat-openbsd": "1.229-1",
+}
+
 GATE_0B_SUPERSESSION_BANNER = (
     "> **Superseded dependency baseline:** This completed Gate 0B plan "
     "preserves the Stalwart v0.16.14 commands and evidence it actually "
@@ -133,6 +153,88 @@ class FuturePlanDependencyPolicyTest(unittest.TestCase):
         self.assertLess(banner_index, first_historical_index)
         self.assertIn("stalwartlabs/stalwart:v0.16.14", text)
         self.assertIn("passes on Community v0.16.14", text)
+
+
+class BaseStackDependencyPolicyTest(unittest.TestCase):
+    def test_oauth2_image_uses_exact_python_base_and_index_digest(self) -> None:
+        lines = [
+            line.strip()
+            for line in OAUTH2_DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        ]
+        from_lines = [
+            line
+            for line in lines
+            if line and line.split(maxsplit=1)[0].casefold() == "from"
+        ]
+
+        self.assertEqual([PYTHON_BASE], from_lines)
+
+    def test_postfix_image_uses_exact_debian_base_and_index_digest(self) -> None:
+        lines = [
+            line.strip()
+            for line in POSTFIX_DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        ]
+        from_lines = [
+            line
+            for line in lines
+            if line and line.split(maxsplit=1)[0].casefold() == "from"
+        ]
+
+        self.assertEqual([DEBIAN_BASE], from_lines)
+
+    def test_postfix_direct_packages_are_exactly_versioned(self) -> None:
+        text = POSTFIX_DOCKERFILE.read_text(encoding="utf-8")
+        instructions = [
+            line.strip()
+            for line in text.replace("\\\n", " ").splitlines()
+            if line.strip()
+        ]
+        install_instructions = [
+            instruction
+            for instruction in instructions
+            if (
+                instruction.split(maxsplit=1)[0].casefold() == "run"
+                and "apt-get install" in instruction
+            )
+        ]
+
+        self.assertEqual(1, len(install_instructions))
+        install_instruction = install_instructions[0]
+        self.assertEqual(1, install_instruction.count("apt-get install"))
+        install_arguments = install_instruction.split(
+            "apt-get install",
+            maxsplit=1,
+        )[1].split("&&", maxsplit=1)[0].split()
+        self.assertIn("--no-install-recommends", install_arguments)
+        self.assertEqual(
+            {f"{package}={version}" for package, version in POSTFIX_PACKAGES.items()},
+            {
+                argument
+                for argument in install_arguments
+                if not argument.startswith("-")
+            },
+        )
+        for package in POSTFIX_PACKAGES:
+            with self.subTest(package=package):
+                self.assertNotIn(package, install_arguments)
+        self.assertIn(
+            "apt-get update && apt-get install -y --no-install-recommends",
+            install_instruction,
+        )
+        self.assertIn(
+            "&& rm -rf /var/lib/apt/lists/*",
+            install_instruction,
+        )
+
+    def test_postfix_declares_one_current_compatibility_level(self) -> None:
+        lines = POSTFIX_MAIN_CF.read_text(encoding="utf-8").splitlines()
+        assignments = [
+            line
+            for line in lines
+            if line.strip().startswith("compatibility_level")
+        ]
+
+        self.assertEqual(["compatibility_level = 3.6"], assignments)
 
 
 if __name__ == "__main__":
