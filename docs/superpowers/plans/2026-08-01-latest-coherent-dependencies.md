@@ -310,10 +310,11 @@ Skiko, or Wasm failure.
 
 - [ ] **Step 6: Update Gate 0A without rewriting history**
 
-Append a dated 2026-08-01 superseding run containing Toolchain/Kotlin/Compose/
-Ktor/JUnit/Skiko versions, resolved managed exceptions, artifact hashes,
-browser/driver versions, exact commands, and PASS/STOP. Keep the original
-2.3.21/1.10.3/3.4.3 evidence explicitly historical.
+Append a superseding run dated with the actual UTC execution date containing
+Toolchain/Kotlin/Compose/Ktor/JUnit/Skiko versions, resolved managed
+exceptions, artifact hashes, browser/driver versions, exact commands, and
+PASS/STOP. Keep the original 2.3.21/1.10.3/3.4.3 evidence explicitly
+historical; never backdate the new evidence to the design date.
 
 - [ ] **Step 7: Commit**
 
