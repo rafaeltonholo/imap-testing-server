@@ -1,12 +1,12 @@
 services:
   dovecot:
-    image: dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b
+    image: dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4
     restart: unless-stopped
     ports:
       - "127.0.0.1:1143:31143"   # IMAP (STARTTLS)
       - "127.0.0.1:1993:31993"   # IMAPS (TLS)
       - "127.0.0.1:1110:31110"   # POP3 (STARTTLS)
-      - "127.0.0.1:1995:31990"   # POP3S (TLS; image listens on 31990)
+      - "127.0.0.1:1995:31995"   # POP3S (TLS; image listens on 31995)
     volumes:
       - ./config:/etc/dovecot/conf.d:ro
       - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
@@ -26,10 +26,11 @@ services:
   dovecot-operator:
     profiles:
       - dovecot-operator
-    image: dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b
+    image: dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4
     restart: unless-stopped
     volumes:
       - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./config/operator/healthcheck.sh:/usr/local/bin/operator-healthcheck:ro
       - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
       - type: bind
         source: ./debug-dashboard/.runtime/dovecot-operator
@@ -42,28 +43,7 @@ services:
     networks:
       - operator-ingress
     healthcheck:
-      test:
-        - CMD
-        - sh
-        - -c
-        - >-
-          auth_status="$$(doveadm service status auth)" &&
-          printf '%s\n' "$$auth_status" |
-          grep -Eqx 'process_count: [1-9][0-9]*' &&
-          printf '%s\n' "$$auth_status" |
-          grep -qx 'throttle_secs: 0' &&
-          printf '%s\n' "$$auth_status" |
-          grep -qx 'doveadm_stop: n' &&
-          imap_login_status="$$(doveadm service status imap-login)" &&
-          printf '%s\n' "$$imap_login_status" |
-          grep -Eqx 'process_count: [1-9][0-9]*' &&
-          printf '%s\n' "$$imap_login_status" |
-          grep -qx 'throttle_secs: 0' &&
-          printf '%s\n' "$$imap_login_status" |
-          grep -qx 'doveadm_stop: n' &&
-          listener="$$(awk 'FNR == 1 { next } { expected_address_length = FILENAME ~ /tcp6$$/ ? 32 : 8; local_field_count = split($$2, parts, ":"); if (NF < 10 || $$1 !~ /^[0-9]+:$$/ || local_field_count != 2 || length(parts[1]) != expected_address_length || parts[1] !~ /^[[:xdigit:]]+$$/ || length(parts[2]) != 4 || parts[2] !~ /^[[:xdigit:]]+$$/ || length($$4) != 2 || $$4 !~ /^[[:xdigit:]]+$$/) { malformed = 1; next } if ($$4 == "0A" && parts[2] == "7CF9") { count++; listener = $$2 } } END { if (!malformed && count == 1 && listener == "0100007F:7CF9") { print listener; exit 0 } exit 1 }'
-          /proc/net/tcp /proc/net/tcp6)" &&
-          test "$$listener" = '0100007F:7CF9'
+      test: ["CMD", "/usr/local/bin/operator-healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 5

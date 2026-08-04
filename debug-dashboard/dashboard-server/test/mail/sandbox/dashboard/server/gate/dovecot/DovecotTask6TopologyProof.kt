@@ -512,10 +512,10 @@ internal data class Task6RuntimeTopology(
         )
         requireExactPublishedPorts(
             service = "dovecot",
-            expected = setOf("31993/tcp", "31990/tcp"),
+            expected = setOf("31993/tcp", "31995/tcp"),
         )
         requirePort("dovecot", "31993/tcp", "1993")
-        requirePort("dovecot", "31990/tcp", "21995")
+        requirePort("dovecot", "31995/tcp", "21995")
         requireExactPublishedPorts(
             service = "postfix",
             expected = setOf("25/tcp"),

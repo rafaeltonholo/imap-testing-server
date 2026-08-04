@@ -306,7 +306,7 @@ class DovecotTask6TopologyProofTest {
                             it.value == command.last()
                         }.key) {
                             "dovecot" ->
-                                """{"31993/tcp":[{"HostIp":"127.0.0.1","HostPort":"1993"}],"31990/tcp":[{"HostIp":"127.0.0.1","HostPort":"21995"}]}"""
+                                """{"31993/tcp":[{"HostIp":"127.0.0.1","HostPort":"1993"}],"31995/tcp":[{"HostIp":"127.0.0.1","HostPort":"21995"}]}"""
                             "dovecot-operator" -> "{}"
                             "postfix" ->
                                 """{"25/tcp":[{"HostIp":"127.0.0.1","HostPort":"21025"}]}"""
@@ -653,7 +653,7 @@ class DovecotTask6TopologyProofTest {
     fun runtimeTopologyRedactsEveryMalformedPortShape() {
         val canary = "runtime-port-secret-canary"
         val validPop3Binding =
-            """"31990/tcp":[{"HostIp":"127.0.0.1","HostPort":"21995"}]"""
+            """"31995/tcp":[{"HostIp":"127.0.0.1","HostPort":"21995"}]"""
         val malformedDocuments = listOf(
             """"$canary"""",
             """{"31993/tcp":"$canary",$validPop3Binding}""",
@@ -830,7 +830,7 @@ class DovecotTask6TopologyProofTest {
                 service = "dovecot",
                 expected = listOf(
                     "31993/tcp" to "1993",
-                    "31990/tcp" to "21995",
+                    "31995/tcp" to "21995",
                 ),
                 extraPublishedService = extraPublishedService,
                 includeUnboundPorts = includeUnboundPorts,

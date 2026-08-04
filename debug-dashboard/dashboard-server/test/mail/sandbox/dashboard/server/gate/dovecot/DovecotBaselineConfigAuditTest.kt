@@ -25,8 +25,8 @@ class DovecotBaselineConfigAuditTest {
             ?.get(1)
 
         assertEquals(
-            "dovecot/dovecot:2.4.1@" +
-                "sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b",
+            "dovecot/dovecot:2.4.4@" +
+                "sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4",
             dovecotImage,
         )
     }
@@ -39,7 +39,7 @@ class DovecotBaselineConfigAuditTest {
                     "127.0.0.1:1143:31143",
                     "127.0.0.1:1993:31993",
                     "127.0.0.1:1110:31110",
-                    "127.0.0.1:1995:31990",
+                    "127.0.0.1:1995:31995",
                 ),
                 "postfix" to listOf(
                     "127.0.0.1:1025:25",

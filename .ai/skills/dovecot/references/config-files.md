@@ -28,6 +28,9 @@ read-only at `/etc/dovecot/dovecot.conf` by the profile-selected
 `dovecot-operator` service. It enables only TLS IMAP on container port 31993,
 loads a hash-only master credential, checks targets against the shared runtime
 eligibility authority, and denies direct ordinary-password login.
+`operator/healthcheck.sh` is mounted read-only at
+`/usr/local/bin/operator-healthcheck`; it uses POSIX shell built-ins plus
+`doveadm` and fails closed on malformed or duplicate service/listener data.
 
 ## Generated Runtime Authorities
 

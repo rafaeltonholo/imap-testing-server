@@ -328,7 +328,7 @@ class DovecotLiveTestEnvironmentTest {
               dovecot:
                 ports: !override
                   - "127.0.0.1:1993:31993"
-                  - "127.0.0.1:21995:31990"
+                  - "127.0.0.1:21995:31995"
                 volumes: !override
                   - ./config:/etc/dovecot/conf.d:ro
                   - type: bind
@@ -351,6 +351,7 @@ class DovecotLiveTestEnvironmentTest {
                 ports: !override []
                 volumes: !override
                   - ./config/operator/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+                  - ./config/operator/healthcheck.sh:/usr/local/bin/operator-healthcheck:ro
                   - type: bind
                     source: ./debug-dashboard/.runtime/task5-proof/dovecot
                     target: /etc/dovecot/runtime

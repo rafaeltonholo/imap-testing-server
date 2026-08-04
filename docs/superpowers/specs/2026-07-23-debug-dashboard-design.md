@@ -759,13 +759,14 @@ Before dashboard provider implementation:
 5. Route every account-file writer through one file-global lock and atomic writer, or retire the direct mutation path before Gate 1.
 6. Configure a dedicated hashed master credential that is neither a normal passdb identity nor a mailbox/userdb account and is unavailable through POP3, SMTP SASL, OAuth, or ordinary self-login.
 7. Establish an unpublished operator on a dedicated internal project bridge
-   whose only service member is the operator. Its Dovecot 2.4 IMAPS listener
-   sets `listen = 127.0.0.1` for port `31993`. Its bounded, quiet POSIX `sh`
+   whose only service member is the operator. Its proven Dovecot 2.4.4 IMAPS
+   listener sets `listen = 127.0.0.1` for port `31993`. Its bounded, quiet POSIX `sh`
    healthcheck requires a positive integer `process_count`, exact
    `throttle_secs: 0`, and exact `doveadm_stop: n` for both `auth` and
-   `imap-login`, preserving every query and grep failure without relying on
-   `pipefail`. It counts every state `0A` entry for port `7CF9` across
-   `/proc/net/tcp` and `/proc/net/tcp6`, requires exactly one, and requires
+   `imap-login`. A mounted POSIX helper uses only shell built-ins plus
+   `doveadm`, preserving every query and parser failure without relying on
+   `pipefail` or image utilities. It counts every state `0A` entry for port
+   `7CF9` across `/proc/net/tcp` and `/proc/net/tcp6`, requires exactly one, and requires
    that entry to be exact IPv4 container loopback `0100007F:7CF9`. The
    host-native backend uses only the fixed, sanitized, non-shell
    `docker compose exec -T` OpenSSL stdio transport, including for readiness
@@ -775,7 +776,7 @@ Before dashboard provider implementation:
    close/reap, lease-capacity, process-inventory, and cleanup requirements are
    defined by
    [the reviewed stdio transport amendment](./2026-07-30-dovecot-operator-stdio-transport-design.md).
-8. Require master authentication to continue into the canonical target-eligibility lookup without enabling direct ordinary-password authentication on the operator ingress. The exact chain is `operator-master` → `deny-direct` → `eligible-target` → `deny-missing`. Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and uses `skip = authenticated`. The canonical `result_success = continue` marks the master password verified, jumps to the first non-master passdb, and does not pre-authorize the target. A verified master continuation therefore skips `deny-direct`, while a direct bare-target LOGIN remains unauthenticated and stops there. `eligible-target` uses `skip = unauthenticated`, `result_failure = continue-fail`, and `result_internalfail = return-fail`. A found target's default `return-ok` finalizes success; a missing target clears any prior success and continues to `deny-missing`; an internal eligibility error fails immediately instead of being masked. Both deny passdbs set `deny = yes`, `nopassword = yes`, and `nodelay = yes`. The live proof first requires a timely tagged `NO` from bare-target SASL LOGIN with an eligible target's own generated password, then proves PLAIN rejection and combined master LOGIN success. This makes arbitrary, deleted, and protected targets fail while preserving the Dovecot 2.4 master-continuation semantics.
+8. Require master authentication to continue into the canonical target-eligibility lookup without enabling direct ordinary-password authentication on the operator ingress. The exact chain is `operator-master` → `deny-direct` → `eligible-target` → `deny-missing`. Dovecot 2.4.4 re-proves the historical Gate 0C finding: Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with `skip = unauthenticated`, so `deny-direct` is the first non-master passdb and uses `skip = authenticated`. The canonical `result_success = continue` marks the master password verified, jumps to the first non-master passdb, and does not pre-authorize the target. A verified master continuation therefore skips `deny-direct`, while a direct bare-target LOGIN remains unauthenticated and stops there. `eligible-target` uses `skip = unauthenticated`, `result_failure = continue-fail`, and `result_internalfail = return-fail`. A found target's default `return-ok` finalizes success; a missing target clears any prior success and continues to `deny-missing`; an internal eligibility error fails immediately instead of being masked. Both deny passdbs set `deny = yes`, `nopassword = yes`, and `nodelay = yes`. The live proof first requires a timely tagged `NO` from bare-target SASL LOGIN with an eligible target's own generated password, then proves PLAIN rejection and combined master LOGIN success. This makes arbitrary, deleted, and protected targets fail while preserving the Dovecot 2.4 master-continuation semantics.
 9. Prove the operator can list, read, append, and mutate mail for disposable eligible users through supported IMAP paths, and prove Postfix routes only to eligible sandbox recipients and mailbox arrival is observable, while the host-command surface remains the typed `doveadm` allowlist.
 10. Delete a disposable identity and prove password login, OAuth login, refresh/introspection, operator targeting, `doveadm` targeting, and LMTP lookup fail while retained mailbox data stays inert.
 11. Verify password reset and deletion do not require retaining the user's prior password.
@@ -920,7 +921,7 @@ These are implementation gates, not unresolved product choices:
 - [Stalwart Log object](https://stalw.art/docs/ref/object/log/)
 - [Stalwart API-key authentication](https://stalw.art/docs/auth/authentication/api-key/)
 - [Stalwart permissions](https://stalw.art/docs/auth/authorization/permissions/)
-- [Dovecot password databases](https://doc.dovecot.org/2.4.1/core/config/auth/passdb.html)
-- [Dovecot master users](https://doc.dovecot.org/2.4.1/core/config/auth/master_users.html)
+- [Dovecot password databases](https://doc.dovecot.org/2.4.4/core/config/auth/passdb.html)
+- [Dovecot master users](https://doc.dovecot.org/2.4.4/core/config/auth/master_users.html)
 - [JMAP core, RFC 8620](https://www.rfc-editor.org/rfc/rfc8620.html)
 - [JMAP mail and submission, RFC 8621](https://www.rfc-editor.org/rfc/rfc8621.html)

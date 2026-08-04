@@ -10,7 +10,7 @@ Compose generates project-scoped container names.
 | `dovecot` | Default | `127.0.0.1:1143` → `31143` | IMAP STARTTLS |
 | `dovecot` | Default | `127.0.0.1:1993` → `31993` | IMAPS |
 | `dovecot` | Default | `127.0.0.1:1110` → `31110` | POP3 STARTTLS |
-| `dovecot` | Default | `127.0.0.1:1995` → `31990` | POP3S |
+| `dovecot` | Default | `127.0.0.1:1995` → `31995` | POP3S |
 | `dovecot-operator` | Explicit profile only | None | Container-loopback IMAPS through fixed Docker-exec/stdio |
 | `postfix` | Default | `127.0.0.1:1025` → `25` | SMTP |
 | `postfix` | Default | `127.0.0.1:1465` → `465` | SMTPS |
@@ -46,7 +46,7 @@ stalwart         (independent)
 | Service | Method | Interval | Timeout | Start period |
 |---------|--------|----------|---------|--------------|
 | `dovecot` | `doveadm who` | 10s | 5s | 15s |
-| `dovecot-operator` | Quiet POSIX service-status checks plus exactly one state `0A` listener across `/proc/net/tcp{,6}`, at IPv4 loopback `0100007F:7CF9` | 5s | 3s | 10s |
+| `dovecot-operator` | Mounted POSIX helper using shell built-ins plus `doveadm`; exact service-status checks plus exactly one state `0A` listener across `/proc/net/tcp{,6}`, at IPv4 loopback `0100007F:7CF9` | 5s | 3s | 10s |
 | `oauth2-mock` | HTTP `/health` plus an internal socketmap `NOTFOUND` query on port 10001 | 5s | 3s | 5s |
 | `stalwart` | Bash TCP open on container port 8443 | 10s | 5s | 15s |
 | `postfix` | No healthcheck defined | — | — | — |

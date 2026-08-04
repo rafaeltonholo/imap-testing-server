@@ -18,6 +18,7 @@ profile.
 | Host path | Container path | Mode | Purpose |
 |-----------|----------------|------|---------|
 | `./config/operator/dovecot.conf` | `/etc/dovecot/dovecot.conf` | ro | Standalone IMAP-only operator configuration |
+| `./config/operator/healthcheck.sh` | `/usr/local/bin/operator-healthcheck` | ro | POSIX operator service/listener healthcheck |
 | `./debug-dashboard/.runtime/dovecot` | `/etc/dovecot/runtime` | ro | Shared generated target-eligibility authority |
 | `./debug-dashboard/.runtime/dovecot-operator` | `/etc/dovecot/operator-auth` | ro | Security-owned directory containing the hash-only `master-users` input |
 | `./ssl` | `/etc/dovecot/ssl` | ro | TLS certificate and private key |

@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -29,6 +30,9 @@ class DovecotOperatorConfigTest {
     private val repositoryRoot = repositoryRoot()
     private val baseComposePath = repositoryRoot.resolve("docker-compose.yml")
     private val operatorConfigPath = repositoryRoot.resolve("config/operator/dovecot.conf")
+    private val operatorHealthcheckPath = repositoryRoot.resolve(
+        "config/operator/healthcheck.sh",
+    )
     private val proofComposePath = repositoryRoot.resolve(
         "debug-dashboard/dashboard-server/testResources/" +
             "dovecot-gate0c/compose.task5-proof.yml",
@@ -158,7 +162,8 @@ class DovecotOperatorConfigTest {
             )
         }
         assertFalse("noauthenticate" in effective)
-        assertEquals("2.4.0", assignments.getValue("dovecot_storage_version"))
+        assertEquals("2.4.4", assignments.getValue("dovecot_config_version"))
+        assertEquals("2.4.3", assignments.getValue("dovecot_storage_version"))
         assertEquals("maildir", assignments.getValue("mail_driver"))
         assertEquals("~/Maildir", assignments.getValue("mail_path"))
         assertEquals("index", assignments.getValue("mailbox_list_layout"))
@@ -176,7 +181,7 @@ class DovecotOperatorConfigTest {
         assertEquals(
             "deny-direct",
             firstNonMaster.key,
-            "Dovecot 2.4.1 auth_preinit silently omits a leading non-master " +
+            "Dovecot 2.4.4 auth_preinit silently omits a leading non-master " +
                 "passdb with skip=unauthenticated",
         )
         assertEquals(
@@ -417,6 +422,7 @@ class DovecotOperatorConfigTest {
 
     @Test
     fun operatorAuthDocumentationRequiresPreinitSafeFourPassdbChain() {
+        val completeDesign = Files.readString(designSpecPath)
         val plan = Files.readString(implementationPlanPath)
             .substringAfter("## Task 5:")
             .substringBefore("## Task 6:")
@@ -452,6 +458,15 @@ class DovecotOperatorConfigTest {
             assertTrue(behaviorContract in document)
             assertTrue(resultContract in document)
         }
+        assertTrue(
+            "https://doc.dovecot.org/2.4.4/core/config/auth/passdb.html" in
+                completeDesign,
+        )
+        assertTrue(
+            "https://doc.dovecot.org/2.4.4/core/config/auth/master_users.html" in
+                completeDesign,
+        )
+        assertFalse("https://doc.dovecot.org/2.4.1/core/config/auth/" in completeDesign)
     }
 
     @Test
@@ -520,7 +535,7 @@ class DovecotOperatorConfigTest {
             "`127.0.0.1:1143` → `31143`",
             "`127.0.0.1:1993` → `31993`",
             "`127.0.0.1:1110` → `31110`",
-            "`127.0.0.1:1995` → `31990`",
+            "`127.0.0.1:1995` → `31995`",
             "`127.0.0.1:1025` → `25`",
             "`127.0.0.1:1465` → `465`",
             "`127.0.0.1:1587` → `587`",
@@ -607,6 +622,11 @@ class DovecotOperatorConfigTest {
                     readOnly = true,
                 ),
                 Mount(
+                    source = repositoryRoot.resolve("config/operator/healthcheck.sh"),
+                    target = "/usr/local/bin/operator-healthcheck",
+                    readOnly = true,
+                ),
+                Mount(
                     source = repositoryRoot.resolve("debug-dashboard/.runtime/dovecot"),
                     target = "/etc/dovecot/runtime",
                     readOnly = true,
@@ -654,45 +674,86 @@ class DovecotOperatorConfigTest {
 
     @Test
     fun resolvedComposePinsBoundedQuietOperationalHealthcheck() {
-        val health = resolvedOperatorCompose()
+        val operator = resolvedOperatorCompose()
             .requiredObject("services")
             .requiredObject("dovecot-operator")
-            .requiredObject("healthcheck")
+        val health = operator.requiredObject("healthcheck")
 
         assertEquals(
-            listOf(
-                "CMD",
-                "sh",
-                "-c",
-                "auth_status=\"\$\$(doveadm service status auth)\" && " +
-                    "printf '%s\\n' \"\$\$auth_status\" | " +
-                    "grep -Eqx 'process_count: [1-9][0-9]*' && " +
-                    "printf '%s\\n' \"\$\$auth_status\" | " +
-                    "grep -qx 'throttle_secs: 0' && " +
-                    "printf '%s\\n' \"\$\$auth_status\" | " +
-                    "grep -qx 'doveadm_stop: n' && " +
-                    "imap_login_status=\"\$\$(" +
-                    "doveadm service status imap-login)\" && " +
-                    "printf '%s\\n' \"\$\$imap_login_status\" | " +
-                    "grep -Eqx 'process_count: [1-9][0-9]*' && " +
-                    "printf '%s\\n' \"\$\$imap_login_status\" | " +
-                    "grep -qx 'throttle_secs: 0' && " +
-                    "printf '%s\\n' \"\$\$imap_login_status\" | " +
-                    "grep -qx 'doveadm_stop: n' && " +
-                    "listener=\"\$\$(awk '$COMPOSE_LISTENER_AWK_PROGRAM' " +
-                    "/proc/net/tcp /proc/net/tcp6)\" && " +
-                    "test \"\$\$listener\" = '0100007F:7CF9'",
-            ),
+            listOf("CMD", "/usr/local/bin/operator-healthcheck"),
             health.requiredArray("test").map { it.jsonPrimitive.content },
         )
         assertEquals("5s", health.requiredString("interval"))
         assertEquals("3s", health.requiredString("timeout"))
         assertEquals("10s", health.requiredString("start_period"))
         assertEquals(5, health.requiredInt("retries"))
+        assertFalse("environment" in operator)
+
+        assertTrue(Files.isRegularFile(operatorHealthcheckPath))
+        assertTrue(Files.isExecutable(operatorHealthcheckPath))
+        assertEquals(
+            PosixFilePermissions.fromString("rwxr-xr-x"),
+            Files.getPosixFilePermissions(operatorHealthcheckPath),
+        )
+        val source = Files.readString(operatorHealthcheckPath)
+        assertTrue(source.startsWith("#!/bin/sh\n"))
+        assertTrue("doveadm service status auth" in source)
+        assertTrue("doveadm service status imap-login" in source)
+        assertTrue("DOVECOT_OPERATOR_PROC_TCP" in source)
+        assertTrue("DOVECOT_OPERATOR_PROC_TCP6" in source)
+        listOf("grep", "awk", "sed", "ps", "pgrep", "procps").forEach { utility ->
+            assertFalse(
+                Regex(
+                    "(?m)(?:^|[\\s;&|()])${Regex.escape(utility)}" +
+                        "(?=\$|[\\s;&|()])",
+                ).containsMatchIn(source),
+                "operator healthcheck must not require $utility",
+            )
+        }
     }
 
     @Test
-    fun exactListenerAwkAcceptsOnlyOneIpv4LoopbackListenSocket() {
+    fun operatorHealthcheckAcceptsOnlyHealthyServiceStatus() {
+        val healthy = serviceStatus()
+        val invalidStatuses = listOf(
+            "missing process_count" to "throttle_secs: 0\ndoveadm_stop: n",
+            "zero process_count" to serviceStatus(processCount = "0"),
+            "nonnumeric process_count" to serviceStatus(processCount = "one"),
+            "duplicate process_count" to "$healthy\nprocess_count: 2",
+            "missing throttle_secs" to "process_count: 1\ndoveadm_stop: n",
+            "nonzero throttle_secs" to serviceStatus(throttleSecs = "1"),
+            "duplicate throttle_secs" to "$healthy\nthrottle_secs: 0",
+            "missing doveadm_stop" to "process_count: 1\nthrottle_secs: 0",
+            "stopped doveadm" to serviceStatus(doveadmStop = "y"),
+            "duplicate doveadm_stop" to "$healthy\ndoveadm_stop: n",
+            "malformed required key" to
+                healthy.replace("process_count: 1", "process count: 1"),
+            "duplicate service key" to "$healthy\nname: duplicate",
+            "malformed status row" to "$healthy\nmalformed",
+            "empty status" to "",
+        )
+
+        val valid = runOperatorHealthcheck()
+        assertEquals(0, valid.exitCode, valid.stderr)
+        assertEquals("", valid.stdout)
+        assertEquals("", valid.stderr)
+
+        invalidStatuses.forEach { (name, status) ->
+            assertTrue(
+                runOperatorHealthcheck(authStatus = status).exitCode != 0,
+                "auth: $name",
+            )
+            assertTrue(
+                runOperatorHealthcheck(imapLoginStatus = status).exitCode != 0,
+                "imap-login: $name",
+            )
+        }
+        assertTrue(runOperatorHealthcheck(failingService = "auth").exitCode != 0)
+        assertTrue(runOperatorHealthcheck(failingService = "imap-login").exitCode != 0)
+    }
+
+    @Test
+    fun operatorHealthcheckAcceptsOnlyOneIpv4LoopbackListenSocket() {
         val fixtures = listOf(
             ListenerFixture(
                 name = "exact plus irrelevant",
@@ -738,6 +799,25 @@ class DovecotOperatorConfigTest {
                 emptyList(),
             ),
             ListenerFixture(
+                "duplicate slot",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(0, "00000000:008F", "0A"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "unterminated duplicate",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:7CF9", "0A"),
+                ),
+                emptyList(),
+                tcpFinalNewline = false,
+            ),
+            ListenerFixture(
                 "exact plus wildcard",
                 false,
                 listOf(
@@ -759,11 +839,30 @@ class DovecotOperatorConfigTest {
                 ),
             ),
             ListenerFixture(
+                "exact plus lowercase wildcard",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:7cf9", "0a"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
                 "exact plus malformed",
                 false,
                 listOf(
                     procNetRow(0, "0100007F:7CF9", "0A"),
                     "  1: malformed",
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed slot",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace("  1:", "  slot:"),
                 ),
                 emptyList(),
             ),
@@ -791,27 +890,100 @@ class DovecotOperatorConfigTest {
                 listOf(procNetRow(0, "0100007F:7CF9", "01")),
                 emptyList(),
             ),
+            ListenerFixture(
+                "malformed remote endpoint",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A")
+                        .replace("00000000:0000", "NOT_REMOTE"),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed queue",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 00000000:00000000 ", " INVALID_QUEUE "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed timer",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 00:00000000 ", " INVALID_TIMER "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed retransmit",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 00000000 1000 ", " INVALID_RETRANSMIT 1000 "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed uid",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 1000 0 1 1 ", " UID 0 1 1 "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed timeout",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 1000 0 1 1 ", " 1000 TIMEOUT 1 1 "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed inode",
+                false,
+                listOf(
+                    procNetRow(0, "0100007F:7CF9", "0A"),
+                    procNetRow(1, "00000000:008F", "0A")
+                        .replace(" 1000 0 1 1 ", " 1000 0 INODE 1 "),
+                ),
+                emptyList(),
+            ),
+            ListenerFixture(
+                "malformed header",
+                false,
+                listOf(procNetRow(0, "0100007F:7CF9", "0A")),
+                emptyList(),
+                tcpHeader = "malformed header",
+            ),
         )
 
-        val program = listenerAwkProgram()
         fixtures.forEach { fixture ->
-            withProcNetFixtures(fixture.tcpRows, fixture.tcp6Rows) { tcp, tcp6 ->
-                assertEquals(
-                    fixture.expected,
-                    runListenerAssignment(program, tcp, tcp6) == 0,
-                    fixture.name,
-                )
-            }
+            assertEquals(
+                fixture.expected,
+                runOperatorHealthcheck(
+                    tcpRows = fixture.tcpRows,
+                    tcp6Rows = fixture.tcp6Rows,
+                    tcpHeader = fixture.tcpHeader,
+                    tcp6Header = fixture.tcp6Header,
+                    tcpFinalNewline = fixture.tcpFinalNewline,
+                    tcp6FinalNewline = fixture.tcp6FinalNewline,
+                ).exitCode == 0,
+                fixture.name,
+            )
         }
-    }
-
-    @Test
-    fun listenerAssignmentSubstitutionPreservesTheExtractedAwkFailure() {
-        withProcNetFixtures(emptyList(), emptyList()) { tcp, tcp6 ->
-            val program = listenerAwkProgram()
-            assertEquals(1, runAwk(program, tcp, tcp6))
-            assertEquals(1, runListenerAssignment(program, tcp, tcp6))
-        }
+        assertTrue(runOperatorHealthcheck(omitTcp = true).exitCode != 0)
+        assertTrue(runOperatorHealthcheck(omitTcp6 = true).exitCode != 0)
     }
 
     @Test
@@ -867,7 +1039,7 @@ class DovecotOperatorConfigTest {
                     PortPublication(
                         hostIp = "127.0.0.1",
                         published = "21995",
-                        target = 31990,
+                        target = 31995,
                         protocol = "tcp",
                         mode = "ingress",
                     ),
@@ -925,6 +1097,10 @@ class DovecotOperatorConfigTest {
         assertEquals(
             proofRoot.resolve("dovecot-operator").toString(),
             source("dovecot-operator", "/etc/dovecot/operator-auth"),
+        )
+        assertEquals(
+            repositoryRoot.resolve("config/operator/healthcheck.sh").toString(),
+            source("dovecot-operator", "/usr/local/bin/operator-healthcheck"),
         )
         assertEquals(
             proofRoot.resolve("dovecot").toString(),
@@ -1131,7 +1307,7 @@ class DovecotOperatorConfigTest {
                     PortPublication("127.0.0.1", "1143", 31143, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1993", 31993, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1110", 31110, "tcp", "ingress"),
-                    PortPublication("127.0.0.1", "1995", 31990, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "1995", 31995, "tcp", "ingress"),
                 ),
                 "postfix" to listOf(
                     PortPublication("127.0.0.1", "1025", 25, "tcp", "ingress"),
@@ -1168,7 +1344,7 @@ class DovecotOperatorConfigTest {
             mapOf(
                 "dovecot" to listOf(
                     PortPublication("127.0.0.1", "1993", 31993, "tcp", "ingress"),
-                    PortPublication("127.0.0.1", "21995", 31990, "tcp", "ingress"),
+                    PortPublication("127.0.0.1", "21995", 31995, "tcp", "ingress"),
                 ),
                 "postfix" to listOf(
                     PortPublication("127.0.0.1", "21025", 25, "tcp", "ingress"),
@@ -1219,85 +1395,142 @@ class DovecotOperatorConfigTest {
     private fun String.normalizeDocumentationWhitespace(): String =
         replace(Regex("""\s+"""), " ").trim()
 
-    private fun listenerAwkProgram(): String {
-        val command = resolvedOperatorCompose()
-            .requiredObject("services")
-            .requiredObject("dovecot-operator")
-            .requiredObject("healthcheck")
-            .requiredArray("test")
-            .map { it.jsonPrimitive.content }
-            .single { it.contains("doveadm service status auth") }
-        val prefix = "listener=\"\$\$(awk '"
-        val suffix = "' /proc/net/tcp /proc/net/tcp6)"
-        assertTrue(prefix in command, "missing listener awk assignment")
-        assertTrue(suffix in command, "missing listener awk input paths")
-        return command
-            .substringAfter(prefix)
-            .substringBefore(suffix)
-            .replace("\$\$", "\$")
-    }
-
-    private fun procNetRow(slot: Int, local: String, state: String): String =
-        "  $slot: $local 00000000:0000 $state " +
+    private fun procNetRow(slot: Int, local: String, state: String): String {
+        val remoteAddress = if (local.substringBefore(':').length == 32) {
+            "00000000000000000000000000000000:0000"
+        } else {
+            "00000000:0000"
+        }
+        return "  $slot: $local $remoteAddress $state " +
             "00000000:00000000 00:00000000 00000000 1000 0 1 1 " +
             "0000000000000000 100 0 0 10 0"
+    }
 
-    private fun withProcNetFixtures(
-        tcpRows: List<String>,
-        tcp6Rows: List<String>,
-        block: (Path, Path) -> Unit,
-    ) {
-        val directory = Files.createTempDirectory("dovecot-listener-health-")
+    private fun serviceStatus(
+        processCount: String = "1",
+        throttleSecs: String = "0",
+        doveadmStop: String = "n",
+    ): String = listOf(
+        "name: fixture",
+        "process_count: $processCount",
+        "process_avail: 0",
+        "throttle_secs: $throttleSecs",
+        "doveadm_stop: $doveadmStop",
+    ).joinToString("\n")
+
+    private fun runOperatorHealthcheck(
+        authStatus: String = serviceStatus(),
+        imapLoginStatus: String = serviceStatus(),
+        failingService: String = "",
+        tcpRows: List<String> = listOf(
+            procNetRow(0, "0100007F:7CF9", "0A"),
+            procNetRow(1, "00000000:008F", "0A"),
+        ),
+        tcp6Rows: List<String> = listOf(
+            procNetRow(
+                0,
+                "00000000000000000000000000000000:008F",
+                "0A",
+            ),
+        ),
+        tcpHeader: String = PROC_NET_HEADER,
+        tcp6Header: String = PROC_NET_HEADER,
+        tcpFinalNewline: Boolean = true,
+        tcp6FinalNewline: Boolean = true,
+        omitTcp: Boolean = false,
+        omitTcp6: Boolean = false,
+    ): HealthcheckResult {
+        assertTrue(
+            Files.isRegularFile(operatorHealthcheckPath),
+            "missing operator healthcheck script",
+        )
+        assertTrue(
+            Files.isExecutable(operatorHealthcheckPath),
+            "operator healthcheck script must be executable",
+        )
+        val directory = Files.createTempDirectory("dovecot-operator-health-")
+        val bin = directory.resolve("bin")
+        val fakeDoveadm = bin.resolve("doveadm")
         val tcp = directory.resolve("tcp")
         val tcp6 = directory.resolve("tcp6")
         try {
-            listOf(tcp to tcpRows, tcp6 to tcp6Rows).forEach { (path, rows) ->
-                Files.writeString(
-                    path,
-                    (listOf(PROC_NET_HEADER) + rows).joinToString(
-                        separator = "\n",
-                        postfix = "\n",
-                    ),
-                )
+            Files.createDirectory(bin)
+            Files.writeString(
+                fakeDoveadm,
+                """
+                #!/bin/sh
+                case "${'$'}1:${'$'}2:${'$'}3" in
+                  service:status:auth)
+                    case "${'$'}{FAKE_DOVEADM_FAIL:-}" in auth) exit 23 ;; esac
+                    printf '%s\n' "${'$'}FAKE_DOVEADM_AUTH"
+                    ;;
+                  service:status:imap-login)
+                    case "${'$'}{FAKE_DOVEADM_FAIL:-}" in imap-login) exit 23 ;; esac
+                    printf '%s\n' "${'$'}FAKE_DOVEADM_IMAP_LOGIN"
+                    ;;
+                  *)
+                    exit 24
+                    ;;
+                esac
+                """.trimIndent() + "\n",
+            )
+            Files.setPosixFilePermissions(
+                fakeDoveadm,
+                PosixFilePermissions.fromString("rwx------"),
+            )
+            if (!omitTcp) {
+                writeProcNetFixture(tcp, tcpHeader, tcpRows, tcpFinalNewline)
             }
-            block(tcp, tcp6)
+            if (!omitTcp6) {
+                writeProcNetFixture(tcp6, tcp6Header, tcp6Rows, tcp6FinalNewline)
+            }
+
+            val process = ProcessBuilder(operatorHealthcheckPath.toString())
+                .apply {
+                    environment().clear()
+                    environment()["PATH"] = bin.toString()
+                    environment()["FAKE_DOVEADM_AUTH"] = authStatus
+                    environment()["FAKE_DOVEADM_IMAP_LOGIN"] = imapLoginStatus
+                    environment()["FAKE_DOVEADM_FAIL"] = failingService
+                    environment()["DOVECOT_OPERATOR_PROC_TCP"] = tcp.toString()
+                    environment()["DOVECOT_OPERATOR_PROC_TCP6"] = tcp6.toString()
+                }
+                .start()
+            try {
+                assertTrue(
+                    process.waitFor(OUTPUT_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS),
+                    "operator healthcheck fixture timed out",
+                )
+                return HealthcheckResult(
+                    exitCode = process.exitValue(),
+                    stdout = process.inputStream.readBytes().toString(StandardCharsets.UTF_8),
+                    stderr = process.errorStream.readBytes().toString(StandardCharsets.UTF_8),
+                )
+            } finally {
+                process.destroyForcibly()
+            }
         } finally {
             Files.deleteIfExists(tcp)
             Files.deleteIfExists(tcp6)
+            Files.deleteIfExists(fakeDoveadm)
+            Files.deleteIfExists(bin)
             Files.deleteIfExists(directory)
         }
     }
 
-    private fun runAwk(program: String, tcp: Path, tcp6: Path): Int =
-        runFixtureProcess(listOf("awk", program, tcp.toString(), tcp6.toString()))
-
-    private fun runListenerAssignment(program: String, tcp: Path, tcp6: Path): Int =
-        runFixtureProcess(
-            listOf(
-                "sh",
-                "-c",
-                "listener=\"\$(awk '$program' \"\$1\" \"\$2\")\" && " +
-                    "test \"\$listener\" = '0100007F:7CF9'",
-                "dovecot-listener-health",
-                tcp.toString(),
-                tcp6.toString(),
+    private fun writeProcNetFixture(
+        path: Path,
+        header: String,
+        rows: List<String>,
+        finalNewline: Boolean,
+    ) {
+        Files.writeString(
+            path,
+            (listOf(header) + rows).joinToString(
+                separator = "\n",
+                postfix = if (finalNewline) "\n" else "",
             ),
         )
-
-    private fun runFixtureProcess(command: List<String>): Int {
-        val process = ProcessBuilder(command)
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            .redirectError(ProcessBuilder.Redirect.DISCARD)
-            .start()
-        return try {
-            assertTrue(
-                process.waitFor(OUTPUT_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS),
-                "listener fixture process timed out",
-            )
-            process.exitValue()
-        } finally {
-            process.destroyForcibly()
-        }
     }
 
     private fun resolvedCompose(): JsonObject {
@@ -1657,40 +1890,32 @@ class DovecotOperatorConfigTest {
         val expected: Boolean,
         val tcpRows: List<String>,
         val tcp6Rows: List<String>,
+        val tcpHeader: String = PROC_NET_HEADER,
+        val tcp6Header: String = PROC_NET_HEADER,
+        val tcpFinalNewline: Boolean = true,
+        val tcp6FinalNewline: Boolean = true,
+    )
+
+    private data class HealthcheckResult(
+        val exitCode: Int,
+        val stdout: String,
+        val stderr: String,
     )
 
     companion object {
         private const val OPERATOR_PROFILE = "dovecot-operator"
         private const val PINNED_DOVECOT_IMAGE =
-            "dovecot/dovecot:2.4.1@" +
-                "sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316cea678de75254b"
+            "dovecot/dovecot:2.4.4@" +
+                "sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4"
         private val COMPOSE_TIMEOUT = Duration.ofSeconds(10)
         private val OUTPUT_JOIN_TIMEOUT = Duration.ofSeconds(2)
         private const val MAX_COMPOSE_OUTPUT_BYTES = 1024 * 1024
         private const val PROC_NET_HEADER =
             "  sl  local_address rem_address   st tx_queue rx_queue tr " +
                 "tm->when retrnsmt   uid  timeout inode"
-        private const val COMPOSE_LISTENER_AWK_PROGRAM =
-            "FNR == 1 { next } " +
-                "{ expected_address_length = FILENAME ~ /tcp6\$\$/ ? 32 : 8; " +
-                "local_field_count = split(\$\$2, parts, \":\"); " +
-                "if (NF < 10 || \$\$1 !~ /^[0-9]+:\$\$/ || " +
-                "local_field_count != 2 || " +
-                "length(parts[1]) != expected_address_length || " +
-                "parts[1] !~ /^[[:xdigit:]]+\$\$/ || " +
-                "length(parts[2]) != 4 || " +
-                "parts[2] !~ /^[[:xdigit:]]+\$\$/ || " +
-                "length(\$\$4) != 2 || " +
-                "\$\$4 !~ /^[[:xdigit:]]+\$\$/) " +
-                "{ malformed = 1; next } " +
-                "if (\$\$4 == \"0A\" && parts[2] == \"7CF9\") " +
-                "{ count++; listener = \$\$2 } } " +
-                "END { if (!malformed && count == 1 && " +
-                "listener == \"0100007F:7CF9\") " +
-                "{ print listener; exit 0 } exit 1 }"
         private val EXPECTED_OPERATOR_CONFIG = """
-            dovecot_config_version = 2.4.1
-            dovecot_storage_version = 2.4.0
+            dovecot_config_version = 2.4.4
+            dovecot_storage_version = 2.4.3
 
             base_dir = /run/dovecot
             state_dir = /run/dovecot

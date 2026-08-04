@@ -43,7 +43,8 @@ this ordered passdb chain:
    canonical `result_success = continue`. This marks the master password
    verified, jumps to the first non-master passdb, and does not pre-authorize
    the target.
-2. Dovecot 2.4.1 `auth_preinit` silently omits a first non-master passdb with
+2. Dovecot 2.4.4 retains the Gate 0C behavior first recorded on 2.4.1:
+   `auth_preinit` silently omits a first non-master passdb with
    `skip = unauthenticated`. `deny-direct` is therefore the first non-master
    passdb and uses `skip = authenticated`: a verified master continuation
    skips it, while a direct bare-target LOGIN remains unauthenticated and is
