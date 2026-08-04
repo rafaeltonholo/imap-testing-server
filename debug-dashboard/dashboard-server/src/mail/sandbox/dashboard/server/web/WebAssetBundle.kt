@@ -1214,6 +1214,9 @@ private class JsTokenizer(private val source: String) {
         while (index < source.length) {
             val character = source[index]
             when {
+                character.code > ASCII_MAX_CODE_POINT -> throw IllegalArgumentException(
+                    "Unreviewed non-ASCII JavaScript syntax outside an opaque literal",
+                )
                 character.isWhitespace() -> index++
                 character == '/' && source.getOrNull(index + 1) == '/' -> {
                     requireCommentOpenerIsNotEscaped()
@@ -1238,6 +1241,9 @@ private class JsTokenizer(private val source: String) {
 
                 character == '\'' || character == '"' -> scanString()
                 character == '`' -> scanTemplate()
+                character == '\\' -> throw IllegalArgumentException(
+                    "Unreviewed JavaScript escape outside an opaque literal",
+                )
                 character == '{' -> {
                     tokens += JsToken.Punctuation(character.toString(), index)
                     braceDepth++
@@ -1309,9 +1315,13 @@ private class JsTokenizer(private val source: String) {
 
     private fun tokenEndsExpression(token: JsToken, tokenIndex: Int): Boolean = when (token) {
         is JsToken.Identifier ->
-            isMemberProperty(tokenIndex) || token.value !in AMBIGUOUS_SLASH_IDENTIFIERS
+            isMemberProperty(tokenIndex) ||
+                token.value !in AMBIGUOUS_SLASH_IDENTIFIERS &&
+                !isUninitializedVariableBinding(tokenIndex) &&
+                !isControlFlowLabel(tokenIndex)
 
-        is JsToken.StringLiteral,
+        is JsToken.StringLiteral -> !isStaticModuleSpecifier(tokenIndex)
+
         is JsToken.RegexLiteral,
         is JsToken.TemplateLiteral,
         is JsToken.NumericLiteral,
@@ -1323,6 +1333,101 @@ private class JsTokenizer(private val source: String) {
             else -> false
         }
         is JsToken.TemplateBoundary -> false
+    }
+
+    private fun isStaticModuleSpecifier(stringIndex: Int): Boolean {
+        val precedingIndex = stringIndex - 1
+        val preceding = tokens.getOrNull(precedingIndex) as? JsToken.Identifier ?: return false
+        if (isMemberProperty(precedingIndex)) return false
+        return preceding.value == "import" ||
+            preceding.value == "from" && isStaticModuleFromKeyword(precedingIndex)
+    }
+
+    private fun isStaticModuleFromKeyword(fromIndex: Int): Boolean {
+        var braces = 0
+        for (candidateIndex in fromIndex - 1 downTo 0) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.Identifier -> {
+                    if (braces == 0 && candidate.value == "default") return false
+                    if (braces == 0 &&
+                        candidate.value in MODULE_DECLARATION_KEYWORDS &&
+                        !isMemberProperty(candidateIndex)
+                    ) {
+                        return true
+                    }
+                }
+
+                is JsToken.StringLiteral -> if (braces == 0) return false
+                is JsToken.Punctuation -> when (candidate.value) {
+                    "}" -> braces++
+                    "{" -> if (braces > 0) braces-- else return false
+                    ",", "*" -> Unit
+                    else -> return false
+                }
+
+                else -> return false
+            }
+        }
+        return false
+    }
+
+    private fun isUninitializedVariableBinding(identifierIndex: Int): Boolean {
+        val precedingIndex = identifierIndex - 1
+        return when (val preceding = tokens.getOrNull(precedingIndex)) {
+            is JsToken.Identifier ->
+                preceding.value in VARIABLE_DECLARATION_KEYWORDS &&
+                    !isMemberProperty(precedingIndex)
+
+            is JsToken.Punctuation ->
+                preceding.value == "," && commaBelongsToVariableDeclaration(precedingIndex)
+
+            else -> false
+        }
+    }
+
+    private fun commaBelongsToVariableDeclaration(commaIndex: Int): Boolean {
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        for (candidateIndex in commaIndex - 1 downTo 0) {
+            when (val candidate = tokens[candidateIndex]) {
+                is JsToken.Identifier -> if (
+                    parentheses == 0 && brackets == 0 && braces == 0 &&
+                    candidate.value in VARIABLE_DECLARATION_KEYWORDS &&
+                    !isMemberProperty(candidateIndex)
+                ) {
+                    return true
+                }
+
+                is JsToken.Punctuation -> when (candidate.value) {
+                    ")" -> parentheses++
+                    "]" -> brackets++
+                    "}" -> braces++
+                    "(" -> if (parentheses > 0) parentheses-- else return false
+                    "[" -> if (brackets > 0) brackets-- else return false
+                    "{" -> if (braces > 0) braces-- else return false
+                    ";" -> if (parentheses == 0 && brackets == 0 && braces == 0) {
+                        return false
+                    }
+
+                    else -> Unit
+                }
+
+                else -> Unit
+            }
+        }
+        return false
+    }
+
+    private fun isControlFlowLabel(identifierIndex: Int): Boolean {
+        val precedingIndex = identifierIndex - 1
+        val preceding = tokens.getOrNull(precedingIndex) as? JsToken.Identifier ?: return false
+        if (preceding.value !in CONTROL_FLOW_LABEL_KEYWORDS || isMemberProperty(precedingIndex)) {
+            return false
+        }
+        val identifier = tokens[identifierIndex] as JsToken.Identifier
+        return source.substring(preceding.start + preceding.value.length, identifier.start)
+            .none { it in JAVASCRIPT_LINE_TERMINATORS }
     }
 
     private fun closesDivisionSafeParenthesizedExpression(closeIndex: Int): Boolean {
@@ -1368,6 +1473,9 @@ private class JsTokenizer(private val source: String) {
                 }
 
                 '[' -> {
+                    require(!inCharacterClass) {
+                        "Unreviewed nested character class in JavaScript regex literal"
+                    }
                     inCharacterClass = true
                     index++
                 }
@@ -1483,6 +1591,11 @@ private class JsTokenizer(private val source: String) {
     private companion object {
         val REVIEWED_REGEX_PREFIXES = setOf("(", "=")
         val CONTROL_HEADER_KEYWORDS = setOf("if", "for", "while", "switch", "with", "catch")
+        val MODULE_DECLARATION_KEYWORDS = setOf("import", "export")
+        val VARIABLE_DECLARATION_KEYWORDS = setOf("let", "var")
+        val CONTROL_FLOW_LABEL_KEYWORDS = setOf("break", "continue")
+        val JAVASCRIPT_LINE_TERMINATORS = setOf('\n', '\r', '\u2028', '\u2029')
+        const val ASCII_MAX_CODE_POINT = 0x7f
         val AMBIGUOUS_SLASH_IDENTIFIERS = setOf(
             "await", "break", "case", "catch", "class", "const", "continue", "debugger",
             "default", "delete", "do", "else", "export", "extends", "finally", "for",

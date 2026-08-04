@@ -818,3 +818,49 @@ preceding correction were rerun unchanged after this hardening. Final results:
 | production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 12.436 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
 
 **Gate 0A latest-stack expression-context correction: PASS. No stop condition remains.**
+
+#### 2026-08-04 UTC: token-role and lexical-boundary hardening
+
+A fourth adversarial review supersedes the immediately preceding PASS. A
+string literal is not necessarily an expression value: side-effect imports,
+import-from declarations, and export-from declarations all end in a static
+module-specifier string. The scanner now rejects division classification after
+those strings. It distinguishes a real import/export `from` clause from an
+ordinary identifier named `from`; divisions after normal string values and
+dynamic-import calls remain discoverable.
+
+Identifiers are likewise classified by their immediate grammatical role.
+Uninitialized `let` and `var` bindings, including the final binding after a
+comma and after a ternary initializer, no longer authorize division. Neither
+do same-line labels following `break` or `continue`. The scanner does not try
+to become a general JavaScript parser: raw identifier escapes and every
+non-ASCII code unit reached in code are rejected. Comments, strings,
+templates, and reviewed regexes remain opaque, so non-ASCII comment text in
+JS-Joda is unaffected. This closes fragmentation through Unicode escapes,
+combining marks, ZWNJ/ZWJ, and astral identifier parts.
+
+Regex scanning also rejects nested character classes. That fail-closed rule
+prevents a Unicode-set `/v` class from closing early and turning its remaining
+slashes into a line comment. The reviewed seven production regexes contain no
+nested class.
+
+Node `v24.4.0` accepted the complete 3×3 static-declaration/regex-decoy corpus,
+the declaration and label ASI probes, their escaped/BMP/astral variants, and
+the exact nested `/v` probe. Test-only REDs showed the old scanner returning
+only the legitimate static import or no references while swallowing each
+later executable import. Positive coverage preserves divisions after ordinary
+strings, numeric and template literals, arrays, grouped expressions, ordinary
+and keyword-named calls, and dynamic-import calls.
+
+The exact `find` and `rg` closure commands from the earlier correction were
+rerun. The linker output remains exactly the same four files and the reviewed
+edge table remains unchanged. Final results:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
+| focused `WebAssetBundleTest` | PASS; 36/36 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 40/40 |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 13.830 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A latest-stack token-role correction: PASS. No stop condition remains.**

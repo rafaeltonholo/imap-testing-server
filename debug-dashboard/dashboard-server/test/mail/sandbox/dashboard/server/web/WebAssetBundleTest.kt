@@ -273,6 +273,18 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun discoversExecutableImportAfterDynamicImportCallDivision() {
+        val source =
+            "import('./loader.mjs') / import('evil-after-dynamic-import') / 2"
+
+        val references = scanModuleReferences(source)
+
+        assertEquals(2, references.size)
+        assertTrue(references.any { it.toString().contains("./loader.mjs") })
+        assertTrue(references.any { it.toString().contains("evil-after-dynamic-import") })
+    }
+
+    @Test
     fun discoversAndRejectsDynamicImportsAfterPrivateKeywordNamedMembers() {
         val importSpecifier = "evil-private-return"
         val source =
@@ -308,6 +320,129 @@ class WebAssetBundleTest {
 
                 assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
             }
+        }
+    }
+
+    @Test
+    fun discoversAndRejectsDynamicImportsAfterLiteralAndArrayExpressions() {
+        val expressions = mapOf(
+            "string literal" to "'value'",
+            "decimal literal" to "42",
+            "hex literal" to "0xff",
+            "bigint literal" to "10n",
+            "array literal" to "[value]",
+        )
+
+        expressions.forEach { (label, expression) ->
+            val importSpecifier = "evil-${label.replace(" ", "-")}"
+            val source = "$expression / import('$importSpecifier') / 2"
+            val references = scanModuleReferences(source)
+
+            assertEquals(1, references.size, label)
+            assertTrue(references.single().toString().contains(importSpecifier), label)
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun discoversImportAfterOrdinaryFromIdentifierAndStringDivision() {
+        val importSpecifier = "evil-after-ordinary-from"
+        val source = "from\n'value' / import('$importSpecifier') / 2"
+
+        val references = scanModuleReferences(source)
+
+        assertEquals(1, references.size)
+        assertTrue(references.single().toString().contains(importSpecifier))
+    }
+
+    @Test
+    fun rejectsRegexDecoysAfterStaticModuleSpecifiers() {
+        val declarations = mapOf(
+            "side-effect import" to "import './loader.mjs'",
+            "import-from" to "import value from './loader.mjs'",
+            "export-from" to "export { value } from './loader.mjs'",
+        )
+        val regexDecoys = mapOf(
+            "line marker" to "/[//]/; import('EVIL')",
+            "block marker" to "/[/*]x/; import('EVIL'); /*close*/",
+            "quote" to "/[']/; import('EVIL'); // '",
+        )
+
+        declarations.forEach { (declarationLabel, declaration) ->
+            regexDecoys.forEach { (decoyLabel, decoy) ->
+                val label = "$declarationLabel $decoyLabel"
+                val importSpecifier = "evil-${label.replace(" ", "-")}"
+                val source = "$declaration\n${decoy.replace("EVIL", importSpecifier)}"
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) {
+                    scanModuleReferences(source)
+                }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed slash context"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsRegexDecoysAfterUninitializedBindingsAndControlFlowLabels() {
+        val sources = mapOf(
+            "direct let binding" to
+                "let directLet\n/[//]/; import('evil-let-line')",
+            "direct var binding" to
+                "var directVar\n/[/*]x/; import('evil-var-block'); /*close*/",
+            "final let binding" to
+                "let initializedLet = 1, finalLet\n/[']/; import('evil-let-quote'); // '",
+            "final var binding" to
+                "var initializedVar = 1, finalVar\n/[//]/; import('evil-var-line')",
+            "final let binding after ternary" to
+                "let initializedLet = true ? 1 : 2, finalLet\n" +
+                    "/[/*]x/; import('evil-let-ternary'); /*close*/",
+            "final var binding after ternary" to
+                "var initializedVar = true ? 1 : 2, finalVar\n" +
+                    "/[//]/; import('evil-var-ternary')",
+            "break label" to
+                "outer: while (true) { break outer\n" +
+                    "/[/*]x/; import('evil-break-block'); /*close*/ }",
+            "continue label" to
+                "next: for (;;) { continue next\n" +
+                    "/[']/; import('evil-continue-quote'); // '\n}",
+            "escaped direct let binding" to
+                "let \\u0061\n/[/*]x/; import('evil-let-escaped'); /*close*/",
+            "escaped final var binding" to
+                "var first, \\u0062\n/[//]/; import('evil-var-escaped')",
+            "escaped break label" to
+                "outer: while (true) { break \\u006futer\n" +
+                    "/[/*]x/; import('evil-break-escaped'); /*close*/ }",
+            "escaped continue label" to
+                "next: for (;;) { continue \\u006eext\n" +
+                    "/[']/; import('evil-continue-escaped'); // '\n}",
+            "zero-width non-joiner binding" to
+                "let a\u200Cb\n/[/*]x/; import('evil-zwnj-binding'); /*close*/",
+            "zero-width joiner binding" to
+                "var c\u200Dd\n/[//]/; import('evil-zwj-binding')",
+            "combining-mark binding" to
+                "let e\u0301\n/[']/; import('evil-combining-binding'); // '",
+            "astral identifier-part binding" to
+                "let a\uD801\uDC00b\n/[/*]x/; import('evil-astral-binding'); /*close*/",
+            "zero-width non-joiner label" to
+                "outer\u200Clabel: while (true) { break outer\u200Clabel\n" +
+                    "/[/*]x/; import('evil-zwnj-label'); /*close*/ }",
+        )
+
+        sources.forEach { (label, source) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("Unreviewed"),
+                "$label produced: ${failure.message}",
+            )
         }
     }
 
@@ -351,6 +486,20 @@ class WebAssetBundleTest {
                 "$label produced: ${failure.message}",
             )
         }
+    }
+
+    @Test
+    fun rejectsNestedRegexCharacterClassesBeforeTheirContentsCanHideImports() {
+        val source = "const nestedSet = /[[a]///]/v; import('evil-v-regex')"
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            scanModuleReferences(source)
+        }
+
+        assertTrue(
+            failure.message.orEmpty().contains("nested character class"),
+            "Unexpected failure: ${failure.message}",
+        )
     }
 
     @Test
