@@ -66,7 +66,7 @@ receive a supersession note instead of being rewritten.
 | Kotlin | 2.3.21 | 2.4.10 | direct, latest stable |
 | Kotlin Toolchain CLI/wrapper | 0.11.1 | 0.11.1 | direct, already latest stable |
 | Compose Multiplatform | 1.10.3 | 1.11.1 | direct, latest stable |
-| Compose Material3 | 1.10.0-alpha05 managed | 1.11.0-alpha07 managed | Compose 1.11.1 bundle |
+| Compose Material3 | 1.10.0-alpha05 managed | 1.11.0-alpha07 managed | Compose 1.11.1 release component, explicit coordinate because Toolchain 0.11.1 predates the mapping |
 | Skiko Wasm runtime | 0.9.37.4 | 0.144.6 | Compose 1.11.1 managed runtime |
 | Ktor | 3.4.3 | 3.5.2 | direct, latest stable |
 | kotlinx.serialization | 1.10.0 effective | 1.11.0 | direct Toolchain setting |
@@ -143,6 +143,17 @@ component. Its prerelease-looking suffix is allowed only because it is part of
 the stable Compose release's official graph; it is not an independently chosen
 prerelease.
 
+Kotlin Toolchain 0.11.1 was released before Compose 1.11.1 and its built-in
+`$compose.material3` mapping recognizes Compose only through 1.10.3. For an
+unknown newer stable Compose version, that catalog emits a warning and falls
+back to its last-known Material3 1.10.0-alpha05. The warning explicitly directs
+the project to use Maven coordinates from the Compose release page. Therefore
+`dashboard-web` must declare
+`org.jetbrains.compose.material3:material3:1.11.0-alpha07` explicitly. This is
+not an independently forced child: the coordinate is the exact component
+published in the official Compose 1.11.1 release table, and it is the
+Toolchain-documented escape hatch for a stale built-in mapping.
+
 The server-side asset allowlist must move to the exact 0.144.6 resources:
 
 | Resource | SHA-256 |
@@ -179,8 +190,10 @@ or bypass a failure in an earlier one.
   the Wasm-only app.
 - In `dashboard-server`, pin Ktor 3.5.2, Logback 1.6.1, the Compose-matched
   Skiko runtime 0.144.6, Selenium 4.46.0, and js-joda 3.2.0.
-- In `dashboard-web`, pin Compose 1.11.1 and Ktor 3.5.2; let Compose own its
-  Material3 and Skiko graph and let Ktor own its supported coroutines graph.
+- In `dashboard-web`, pin Compose 1.11.1 and Ktor 3.5.2. Declare Compose's
+  official Material3 1.11.0-alpha07 coordinate explicitly because Toolchain
+  0.11.1's built-in alias predates the Compose 1.11.1 mapping; let Compose own
+  the remaining Skiko graph and Ktor own its supported coroutines graph.
 - Keep the checked-in Toolchain wrapper at verified 0.11.1.
 - Update the Skiko classpath-resource hashes and any changed linker/import
   closure in `WebAssetBundle` and its tests.

@@ -68,6 +68,7 @@ private val selected = mapOf(
     "toolchain" to "0.11.1",
     "kotlin" to "2.4.10",
     "compose" to "1.11.1",
+    "material3" to "1.11.0-alpha07",
     "ktor" to "3.5.2",
     "serialization" to "1.11.0",
     "junit" to "6.1.2",
@@ -85,6 +86,12 @@ Wasm-only module does not declare JUnit; and the server owns the exact Skiko,
 Logback, Selenium, and js-joda dependencies. Reject the old selected versions
 `2.3.21`, `1.10.3`, `3.4.3`, `1.10.0`, `6.0.3`, `0.9.37.4`, and `1.5.18` in
 active module files.
+
+Require the web module to declare the exact official Compose 1.11.1 component
+`org.jetbrains.compose.material3:material3:1.11.0-alpha07` and to contain no
+active `$compose.material3` alias. Toolchain 0.11.1's built-in alias predates
+Compose 1.11.1, warns that its mapping is unknown, and otherwise falls back to
+Material3 1.10.0-alpha05.
 
 Also read both wrapper scripts as text. Require
 `kotlin_cli_version=0.11.1`/`set kotlin_cli_version=0.11.1`, require both to
@@ -173,9 +180,12 @@ settings:
     version: 3.5.2
 ```
 
-Do not directly pin Material3 or coroutines. `$compose.material3` must resolve
-to Compose's `1.11.0-alpha07` component, Skiko in the web graph must resolve to
-`0.144.6`, and Ktor/Compose must resolve coroutines `1.11.0`.
+Replace `$compose.material3` with the exact official Compose 1.11.1 component
+`org.jetbrains.compose.material3:material3:1.11.0-alpha07`. This explicit
+coordinate is required by Toolchain 0.11.1's unknown-version warning and is a
+Compose-owned mapping, not an independently selected child. Do not directly
+pin coroutines. Skiko in the web graph must resolve to `0.144.6`, and
+Ktor/Compose must resolve coroutines `1.11.0`.
 
 - [ ] **Step 4: Validate the Toolchain model and resolved graph**
 
@@ -189,8 +199,10 @@ shasum -a 256 kotlin kotlin.bat
 
 Expected: wrapper hashes match Step 1; Toolchain reports exactly `0.11.1`;
 model accepted; exact selected top-level versions; no unexplained conflict;
-JUnit 6.1.2 wins in JVM test runtime; no JUnit in the Wasm-only app; Material3,
-Skiko, and coroutines match their approved managed versions.
+JUnit 6.1.2 wins in JVM test runtime; no JUnit in the Wasm-only app; Material3
+1.11.0-alpha07 resolves in every web compile/runtime/test scope without the
+unknown-mapping warning; Skiko and coroutines match their approved managed
+versions.
 
 - [ ] **Step 5: Rerun the RED test and focused module tests**
 
