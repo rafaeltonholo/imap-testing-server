@@ -1260,11 +1260,26 @@ private class JsTokenizer(private val source: String) {
         index = end + 2
     }
 
-    private fun canStartRegexLiteral(): Boolean = when (val previous = tokens.lastOrNull()) {
-        null -> true
-        is JsToken.Punctuation -> previous.value in REGEX_EXPRESSION_PREFIXES
-        is JsToken.Identifier -> previous.value in REGEX_EXPRESSION_KEYWORDS
-        else -> false
+    private fun canStartRegexLiteral(): Boolean {
+        if (hasPostfixUpdateBeforeRegexCandidate()) return false
+        return when (val previous = tokens.lastOrNull()) {
+            null -> true
+            is JsToken.Punctuation -> previous.value in REGEX_EXPRESSION_PREFIXES
+            is JsToken.Identifier -> previous.value in REGEX_EXPRESSION_KEYWORDS
+            else -> false
+        }
+    }
+
+    private fun hasPostfixUpdateBeforeRegexCandidate(): Boolean {
+        val operator = tokens.getOrNull(tokens.lastIndex) as? JsToken.Punctuation ?: return false
+        val repeatedOperator = tokens.getOrNull(tokens.lastIndex - 1) as? JsToken.Punctuation ?: return false
+        val operand = tokens.getOrNull(tokens.lastIndex - 2)
+        return operator.value in POSTFIX_UPDATE_OPERATORS &&
+            operator.value == repeatedOperator.value &&
+            (
+                operand is JsToken.Identifier ||
+                    operand is JsToken.Punctuation && operand.value in POSTFIX_UPDATE_OPERANDS
+                )
     }
 
     private fun scanRegexLiteral() {
@@ -1374,5 +1389,7 @@ private class JsTokenizer(private val source: String) {
         val REGEX_EXPRESSION_KEYWORDS = setOf(
             "return", "throw", "case", "delete", "void", "typeof", "new", "in", "of", "yield", "await", "else", "do",
         )
+        val POSTFIX_UPDATE_OPERATORS = setOf("+", "-")
+        val POSTFIX_UPDATE_OPERANDS = setOf("]", ")")
     }
 }

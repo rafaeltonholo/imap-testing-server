@@ -714,3 +714,64 @@ It passed the unchanged canvas, semantics, history, HTTP/SSE transport,
 console/network, keyboard, and accessibility assertions.
 
 **Gate 0A latest-stack reproof: PASS. No stop condition remains.**
+
+### 2026-08-04 UTC correction: scanner closure reproof
+
+This entry supersedes the latest-stack PASS statement immediately above for
+the module scanner. The earlier regex-literal lexer used only the immediately
+preceding token to determine whether `/` began a regular expression. That
+incorrectly treated a division operator after a postfix update as a regex
+literal, which could hide a following dynamic import. The scanner now first
+recognizes postfix `++` and `--` when their operand ends in an identifier,
+`]`, or `)`, then parses the following `/` as division. It does not special
+case an import string or add a broad import exception.
+
+Focused RED covered `counter++ / import('evil') / 2`; the original scanner
+reported zero references. The final focused test also covers decrement,
+member, indexed, and parenthesized postfix operands, requires every dynamic
+import to be discovered, and requires `WebAssetBundle.load()` to reject it.
+The executable import after the real Skiko basename regex is now both
+discovered and rejected, not merely discovered.
+
+The required closure inspection was rerun from `debug-dashboard/` after the
+fix:
+
+```bash
+find build/tasks/_dashboard-web_linkWasmJs -type f -print
+rg -n "(^|[^[:alnum:]_])(import|export|new URL)" build/tasks/_dashboard-web_linkWasmJs
+```
+
+`find` returned exactly these four linker outputs:
+
+```text
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.import-object.mjs
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.js-builtins.mjs
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.wasm
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.mjs
+```
+
+The complete reviewed closure is:
+
+| Edge class | Exact reviewed edges |
+| --- | --- |
+| Browser-reachable static modules | `dashboard-web.mjs` → `./dashboard-web.import-object.mjs`; `dashboard-web.import-object.mjs` → `./skiko.mjs`, `@js-joda/core`, and `./dashboard-web.js-builtins.mjs` |
+| Browser-reachable Wasm | `new URL('./dashboard-web.wasm', import.meta.url)` from `dashboard-web.mjs` → `dashboard-web.wasm` |
+| Browser-reachable support | `dashboard-web.js-builtins.mjs` exports only local helpers; `@js-joda/core` resolves to the pinned `js-joda.esm.js`; `skiko.mjs` and `skiko.wasm` resolve to the hash-pinned managed runtime |
+| Guarded generated Node/Deno | `node:module` occurs only in the reviewed Node branches of `dashboard-web.mjs` and `dashboard-web.import-object.mjs`; `https://deno.land/std/path/mod.ts` occurs only in the reviewed Deno branch of `dashboard-web.mjs` |
+| Guarded generated Kotlin I/O Node | exact ternaries dynamically import only `node:buffer`, `node:os`, `node:path`, and `node:fs` when `typeof process !== 'undefined' && process.release.name === 'node'` |
+| Dead Skiko compatibility branch | exact `if (false) { const { createRequire } = await import('module') }` only |
+
+The raw `rg` output also contains local `export` declarations and WebAssembly
+API identifiers in the three generated `.mjs` files; these add no module edge.
+No other linker file or browser-reachable import was present.
+
+Final correction verification:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact four-file linker closure above |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.WebAssetBundleTest'` | PASS; 22/22 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 26/26 |
+| production `KotlinToolchainBrowserGateTest` command from the preceding entry | PASS; 1/1 in 11.418 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A latest-stack scanner correction: PASS. No stop condition remains.**

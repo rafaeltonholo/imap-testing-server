@@ -172,13 +172,47 @@ class WebAssetBundleTest {
 
     @Test
     fun findsExecutableImportsAfterTheGeneratedSkikoBasenameRegex() {
-        val references = scanModuleReferences(
+        val source =
             "const basename = path => path.match(/([^\\/]+|\\/)\\/*$/)[1]; " +
-                "await import('https://example.test/runtime.mjs')",
-        )
+                "await import('https://example.test/runtime.mjs')"
+        val references = scanModuleReferences(source)
 
         assertEquals(1, references.size)
         assertTrue(references.single().toString().contains("https://example.test/runtime.mjs"))
+        withFixture { fixture ->
+            fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+            val failure = assertFailsWith<IllegalArgumentException> { fixture.load() }
+            assertTrue(
+                failure.message.orEmpty().contains("Unreviewed absolute, network, or bare module reference"),
+                "Unexpected failure: ${failure.message}",
+            )
+        }
+    }
+
+    @Test
+    fun discoversAndRejectsDynamicImportsAfterPostfixUpdates() {
+        val postfixExpressions = mapOf(
+            "identifier increment" to "counter++",
+            "identifier decrement" to "counter--",
+            "member increment" to "state.counter++",
+            "index decrement" to "items[index]--",
+            "parenthesized increment" to "(counter)++",
+        )
+
+        postfixExpressions.forEach { (label, expression) ->
+            val importSpecifier = "evil-${label.replace(" ", "-")}"
+            val source = "$expression / import('$importSpecifier') / 2"
+            val references = scanModuleReferences(source)
+
+            assertEquals(1, references.size, label)
+            assertTrue(references.single().toString().contains(importSpecifier), label)
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
     }
 
     @Test
