@@ -6,7 +6,7 @@
 
 **Architecture:** Expose one application-facing mail port with sealed provider-specific keys, but keep two direct adapters. Dovecot uses the Gate 0C isolated master/operator IMAP ingress and UID/UIDVALIDITY commands. Stalwart discovers JMAP Session while directly authenticated with a leased Account-bound AppPassword from the Gate 0B encrypted store; an unready Account fails before any JMAP call. Batch results are itemized and state conflicts remain explicit.
 
-**Tech Stack:** Kotlin/JVM, Jakarta Mail API 2.1.5, Angus Mail 2.0.5, Ktor client, kotlinx.serialization, IMAP UIDPLUS/MOVE where advertised, Stalwart v0.16.14 JMAP Mail.
+**Tech Stack:** Kotlin/JVM, Jakarta Mail API 2.1.5, Angus Mail 2.0.5, Ktor client, kotlinx.serialization, IMAP UIDPLUS/MOVE where advertised, Stalwart v0.16.15 JMAP Mail.
 
 ---
 
@@ -153,7 +153,7 @@ Expected: pass.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/mail/HtmlMessageSanitizerTest.kt`
 - Modify: `debug-dashboard/dashboard-server/module.yaml`
 
-- [ ] Add `org.jsoup:jsoup:1.22.2`.
+- [ ] Add `org.jsoup:jsoup:1.23.1`.
 
 - [ ] Drive parser tests with existing fixtures for plain text, HTML-only, multipart alternative/related, encodings, inline CID/content-location images, attachments, suspicious links, remote images, executable/macro/HTML archives, and malformed structures.
 

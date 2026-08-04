@@ -6,7 +6,7 @@
 
 **Architecture:** Keep serializable provider truth—including only safe Stalwart mail-access state—in the KMP contract module. The JVM server owns exact-origin authentication, validation, orchestration, locks, persistence, subprocess allowlists, redaction, and the Gate-0B-proven encrypted AppPassword store. Mutations become durable operation resources before provider calls; reads remain synchronous, while credential bytes remain outside contracts and SQLite.
 
-**Tech Stack:** Kotlin Toolchain, Kotlin/JVM + Wasm shared contracts, Ktor server/client, kotlinx.serialization, SQLite JDBC 3.53.1.0, JDK NIO and ProcessBuilder.
+**Tech Stack:** Kotlin Toolchain, Kotlin/JVM + Wasm shared contracts, Ktor server/client, kotlinx.serialization, SQLite JDBC 3.53.2.1, JDK NIO and ProcessBuilder.
 
 ---
 
@@ -220,7 +220,7 @@ Expected: pass.
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/operation/SqliteOperationLedgerTest.kt`
 - Modify: `debug-dashboard/dashboard-server/module.yaml`
 
-- [ ] Add `org.xerial:sqlite-jdbc:3.53.1.0`.
+- [ ] Add `org.xerial:sqlite-jdbc:3.53.2.1`.
 
 - [ ] Write failing temp-database tests for atomic operation/result writes, idempotency lookup, ordered event IDs, reconciliation links, 30-day/10,000-operation bounds, 24-hour/50,000-event bounds, and explicit Clear Local History.
 
