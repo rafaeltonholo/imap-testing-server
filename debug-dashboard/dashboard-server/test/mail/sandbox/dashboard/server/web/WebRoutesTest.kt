@@ -44,9 +44,17 @@ class WebRoutesTest {
             assertTrue(html.contains("id=\"dashboard-root\""))
             assertTrue(html.contains("<noscript>"))
             assertTrue(html.contains("\"@js-joda/core\": \"/assets/js-joda.esm.js\""))
-            assertTrue(html.contains("src=\"/assets/gate.mjs\""))
+            val importMapIndex = html.indexOf("<script type=\"importmap\">")
+            val bootstrapTag =
+                "<script src=\"/assets/browser-bootstrap.js\" " +
+                    "data-dashboard-entry=\"/assets/gate.mjs\"></script>"
+            val bootstrapIndex = html.indexOf(bootstrapTag)
+            assertTrue(importMapIndex >= 0)
+            assertTrue(bootstrapIndex > importMapIndex)
+            assertEquals(1, Regex(Regex.escape(bootstrapTag)).findAll(html).count())
             assertEquals(1, Regex("""<script\s+type="importmap">""").findAll(html).count())
-            assertEquals(1, Regex("""<script\s+type="module"""").findAll(html).count())
+            assertEquals(0, Regex("""<script\s+type="module"""").findAll(html).count())
+            assertEquals(2, Regex("""<script\b""").findAll(html).count())
             assertTrue(html.contains(":focus-visible"))
         }
     }

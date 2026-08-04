@@ -20,6 +20,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import mail.sandbox.dashboard.server.module
 import org.openqa.selenium.By
+import org.openqa.selenium.JavascriptExecutor
 import org.openqa.selenium.Keys
 import org.openqa.selenium.OutputType
 import org.openqa.selenium.SearchContext
@@ -30,6 +31,7 @@ import org.openqa.selenium.WebElement
 import org.openqa.selenium.chrome.ChromeDriver
 import org.openqa.selenium.chrome.ChromeOptions
 import org.openqa.selenium.devtools.HasDevTools
+import org.openqa.selenium.devtools.DevTools
 import org.openqa.selenium.devtools.v150.accessibility.Accessibility
 import org.openqa.selenium.devtools.v150.accessibility.model.AXNode
 import org.openqa.selenium.devtools.v150.accessibility.model.AXPropertyName
@@ -37,6 +39,7 @@ import org.openqa.selenium.devtools.v150.log.Log
 import org.openqa.selenium.devtools.v150.log.model.LogEntry
 import org.openqa.selenium.devtools.v150.network.Network
 import org.openqa.selenium.devtools.v150.network.model.EventSourceMessageReceived
+import org.openqa.selenium.devtools.v150.page.Page
 import org.openqa.selenium.devtools.v150.runtime.Runtime
 import org.openqa.selenium.devtools.v150.runtime.model.ConsoleAPICalled
 import org.openqa.selenium.interactions.Actions
@@ -190,6 +193,10 @@ class KotlinToolchainBrowserGateTest {
                 server.engine.resolvedConnectors().single().port
             }
             val baseUrl = "http://127.0.0.1:$port"
+            verifyConfigurablePreseedsAreReplaced(baseUrl)
+            verifyUnsafePreseedFailsClosed(baseUrl, "process")
+            verifyUnsafePreseedFailsClosed(baseUrl, "Deno")
+
             val observations = BrowserObservations()
             driver = ChromeDriver(chromeOptions())
             val devTools = (driver as HasDevTools).devTools
@@ -198,6 +205,8 @@ class KotlinToolchainBrowserGateTest {
 
             val wait = WebDriverWait(driver, Duration.ofSeconds(30))
             driver.get("$baseUrl/")
+            assertSealedAmbientGlobals(driver)
+            assertAmbientMutationProbesFail(driver)
 
             val canvas = wait.until { current ->
                 dashboardShadow(current).findElements(By.cssSelector("canvas"))
@@ -236,7 +245,21 @@ class KotlinToolchainBrowserGateTest {
             wait.until { URI(driver.currentUrl).path == "/gate/details" }
             waitForSemanticText(wait, "Selected route: /gate/details")
 
+            val launchesBeforeRefresh = observations.requestCount("/assets/dashboard-web.mjs")
+            assertEquals(1, launchesBeforeRefresh)
+            assertEquals(
+                launchesBeforeRefresh,
+                observations.requestCount("/assets/browser-bootstrap.js"),
+            )
             driver.navigate().refresh()
+            wait.until {
+                observations.requestCount("/assets/dashboard-web.mjs") ==
+                    launchesBeforeRefresh + 1
+            }
+            assertEquals(
+                launchesBeforeRefresh + 1,
+                observations.requestCount("/assets/browser-bootstrap.js"),
+            )
             wait.until { URI(driver.currentUrl).path == "/gate/details" }
             waitForSemanticText(wait, "Selected route: /gate/details")
             waitForSemanticText(wait, "GATE_RESOURCE: toolchain-compose-resource-ok")
@@ -278,8 +301,13 @@ class KotlinToolchainBrowserGateTest {
             assertFalse(disabled, "Increment proof is disabled in the AX tree")
 
             observations.assertClean(baseUrl)
+            assertEquals(
+                observations.requestCount("/assets/browser-bootstrap.js"),
+                observations.requestCount("/assets/dashboard-web.mjs"),
+            )
             reportVersions(driver)
         } catch (failure: Throwable) {
+            if (driver == null) throw failure
             val evidence = captureFailureEvidence(driver, failure)
             throw AssertionError("$failure\nBrowser evidence: $evidence", failure)
         } finally {
@@ -294,6 +322,218 @@ class KotlinToolchainBrowserGateTest {
             )
         }
     }
+
+    private fun verifyConfigurablePreseedsAreReplaced(baseUrl: String) {
+        withFreshBrowser(
+            label = "configurable ambient preseeds",
+            preload = CONFIGURABLE_PRESEED,
+        ) { driver, _, observations ->
+            val wait = WebDriverWait(driver, Duration.ofSeconds(30))
+            driver.get("$baseUrl/")
+
+            assertEquals(
+                "node:preseeded",
+                (driver as JavascriptExecutor).executeScript(
+                    "return globalThis.__dashboardPreseedProof",
+                ),
+                "Preload proof was absent; console=${observations.consoleErrorSnapshot()}",
+            )
+            assertSealedAmbientGlobals(driver)
+            val canvas = wait.until { current ->
+                dashboardShadow(current).findElements(By.cssSelector("canvas"))
+                    .firstOrNull { it.isDisplayed && it.size.width > 0 && it.size.height > 0 }
+            }
+            assertNotNull(canvas, "Compose did not render after configurable preseeds")
+            waitForSemanticText(wait, "Mail Flight Recorder")
+            wait.until { observations.requestCount("/assets/dashboard-web.mjs") >= 1 }
+            assertEquals(1, observations.requestCount("/assets/dashboard-web.mjs"))
+            assertEquals(1, observations.requestCount("/assets/browser-bootstrap.js"))
+            observations.assertSuccessful(baseUrl)
+        }
+    }
+
+    private fun verifyUnsafePreseedFailsClosed(baseUrl: String, name: String) {
+        require(name == "process" || name == "Deno")
+        withFreshBrowser(
+            label = "unsafe non-configurable $name preseed",
+            preload = unsafePreseed(name),
+        ) { driver, _, observations ->
+            val wait = WebDriverWait(driver, Duration.ofSeconds(10))
+            driver.get("$baseUrl/")
+
+            wait.until {
+                observations.hasConsoleErrorContaining(
+                    "Dashboard bootstrap cannot seal unsafe $name",
+                )
+            }
+            wait.until { observations.requestCount("/assets/browser-bootstrap.js") == 1 }
+            assertEquals(0, observations.requestCount("/assets/dashboard-web.mjs"))
+            assertEquals(
+                setOf("/assets/browser-bootstrap.js"),
+                observations.localAssetRequestPaths(baseUrl),
+                "Unsafe $name preseed requested part of the module graph",
+            )
+            val dashboardRoot = driver.findElement(By.id("dashboard-root"))
+            assertTrue(
+                dashboardRoot.findElements(By.cssSelector(":scope > div")).isEmpty(),
+                "Compose rendered despite unsafe $name preseed",
+            )
+            if (name == "Deno") {
+                assertSealedAmbientGlobal(driver, "process")
+            }
+            observations.assertOnlyConsoleErrorsContaining(
+                "Dashboard bootstrap cannot seal unsafe $name",
+            )
+            observations.assertTransportSuccessful(baseUrl)
+        }
+    }
+
+    private fun withFreshBrowser(
+        label: String,
+        preload: String,
+        block: (ChromeDriver, DevTools, BrowserObservations) -> Unit,
+    ) {
+        val driver = ChromeDriver(chromeOptions())
+        try {
+            val devTools = (driver as HasDevTools).devTools
+            devTools.createSession()
+            devTools.send(Page.enable(Optional.empty()))
+            val observations = BrowserObservations()
+            observations.install(devTools)
+            devTools.send(
+                Page.addScriptToEvaluateOnNewDocument(
+                    preload,
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                ),
+            )
+            block(driver, devTools, observations)
+        } catch (failure: Throwable) {
+            val evidence = captureFailureEvidence(driver, failure)
+            throw AssertionError(
+                "$label failed: $failure\nBrowser evidence: $evidence",
+                failure,
+            )
+        } finally {
+            runCatching { driver.quit() }
+        }
+    }
+
+    private fun assertSealedAmbientGlobals(driver: ChromeDriver) {
+        assertSealedAmbientGlobal(driver, "process")
+        assertSealedAmbientGlobal(driver, "Deno")
+    }
+
+    private fun assertSealedAmbientGlobal(driver: ChromeDriver, name: String) {
+        val actual = (driver as JavascriptExecutor).executeScript(
+            """
+            const name = arguments[0];
+            const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+            return [
+              Object.hasOwn(globalThis, name),
+              descriptor?.value === undefined,
+              descriptor?.writable,
+              descriptor?.enumerable,
+              descriptor?.configurable,
+            ];
+            """.trimIndent(),
+            name,
+        )
+        assertEquals(
+            listOf(true, true, false, false, false),
+            actual,
+            "$name is not an own sealed undefined data property",
+        )
+    }
+
+    private fun assertAmbientMutationProbesFail(driver: ChromeDriver) {
+        val actual = (driver as JavascriptExecutor).executeScript(
+            """
+            return (function probeAmbientMutations() {
+              'use strict';
+              const results = [];
+              const fake = { release: { name: 'node' } };
+              const recordThrow = (label, action) => {
+                try {
+                  action();
+                  results.push([label, 'succeeded']);
+                } catch (failure) {
+                  results.push([label, failure.name]);
+                }
+              };
+              const recordReturn = (label, action) => {
+                try {
+                  results.push([label, String(action())]);
+                } catch (failure) {
+                  results.push([label, failure.name]);
+                }
+              };
+              const probe = (name, direct, concatenated, templated, destructured, deleted) => {
+                recordThrow(name + '.direct', direct);
+                recordThrow(name + '.concatenated', concatenated);
+                recordThrow(name + '.template', templated);
+                recordThrow(name + '.defineProperty', () => {
+                  Object.defineProperty(globalThis, name, { value: fake });
+                });
+                recordThrow(name + '.destructuring', destructured);
+                recordThrow(name + '.objectAssign', () => {
+                  Object.assign(globalThis, { [name]: fake });
+                });
+                recordReturn(name + '.reflectSet', () => Reflect.set(globalThis, name, fake));
+                recordThrow(name + '.deletion', deleted);
+                recordReturn(name + '.redefinition', () =>
+                  Reflect.defineProperty(globalThis, name, { value: fake })
+                );
+              };
+              probe(
+                'process',
+                () => { globalThis.process = fake; },
+                () => { globalThis['pro' + 'cess'] = fake; },
+                () => { globalThis[`pro${'$'}{'cess'}`] = fake; },
+                () => { ({ value: globalThis.process } = { value: fake }); },
+                () => { delete globalThis.process; },
+              );
+              probe(
+                'Deno',
+                () => { globalThis.Deno = fake; },
+                () => { globalThis['De' + 'no'] = fake; },
+                () => { globalThis[`De${'$'}{'no'}`] = fake; },
+                () => { ({ value: globalThis.Deno } = { value: fake }); },
+                () => { delete globalThis.Deno; },
+              );
+              return results;
+            })();
+            """.trimIndent(),
+        )
+        val expected = listOf("process", "Deno").flatMap { name ->
+            listOf(
+                listOf("$name.direct", "TypeError"),
+                listOf("$name.concatenated", "TypeError"),
+                listOf("$name.template", "TypeError"),
+                listOf("$name.defineProperty", "TypeError"),
+                listOf("$name.destructuring", "TypeError"),
+                listOf("$name.objectAssign", "TypeError"),
+                listOf("$name.reflectSet", "false"),
+                listOf("$name.deletion", "TypeError"),
+                listOf("$name.redefinition", "false"),
+            )
+        }
+
+        assertEquals(expected, actual)
+        assertSealedAmbientGlobals(driver)
+    }
+
+    private fun unsafePreseed(name: String): String =
+        """
+        'use strict';
+        Object.defineProperty(globalThis, '$name', {
+          value: {},
+          writable: false,
+          enumerable: false,
+          configurable: false,
+        });
+        """.trimIndent()
 
     private fun requiredProductionEnvironment(projectRoot: Path) {
         val assets = Path.of(requiredEnvironment("DASHBOARD_WEB_ASSETS"))
@@ -418,6 +658,27 @@ class KotlinToolchainBrowserGateTest {
         }.getOrElse { evidenceFailure ->
             "capture failed: $evidenceFailure"
         }
+    }
+
+    private companion object {
+        val CONFIGURABLE_PRESEED =
+            """
+            'use strict';
+            Object.defineProperty(globalThis, 'process', {
+              value: { release: { name: 'node' } },
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+            Object.defineProperty(globalThis, 'Deno', {
+              value: { marker: 'preseeded' },
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+            globalThis.__dashboardPreseedProof =
+              globalThis.process.release.name + ':' + globalThis.Deno.marker;
+            """.trimIndent()
     }
 }
 
@@ -588,10 +849,52 @@ private class BrowserObservations {
         }
     }
 
-    fun assertClean(baseUrl: String) {
+    fun requestCount(path: String): Int = requestUrls.values.count { url ->
+        URI(url).path == path
+    }
+
+    fun localAssetRequestPaths(baseUrl: String): Set<String> = requestUrls.values
+        .asSequence()
+        .filter { url -> url.startsWith(baseUrl) }
+        .map { url -> URI(url).path }
+        .filter { path -> path.startsWith("/assets/") }
+        .toSet()
+
+    fun hasConsoleErrorContaining(expected: String): Boolean =
+        consoleErrors.any { error -> error.contains(expected) }
+
+    fun consoleErrorSnapshot(): List<String> = consoleErrors.toList()
+
+    fun assertOnlyConsoleErrorsContaining(expected: String) {
+        assertTrue(consoleErrors.isNotEmpty(), "Expected a browser console failure containing $expected")
+        assertTrue(
+            consoleErrors.all { error -> error.contains(expected) },
+            "Unexpected browser console errors: $consoleErrors",
+        )
+    }
+
+    fun assertTransportSuccessful(baseUrl: String) {
         assertTrue(networkFailures.isEmpty(), "Failed resource requests: $networkFailures")
         val localResponses = responses.filter { it.url.startsWith(baseUrl) }
         assertTrue(localResponses.isNotEmpty(), "CDP did not observe local responses")
+        val badStatus = localResponses.filter { it.status >= 400 }
+        assertTrue(badStatus.isEmpty(), "HTTP failures: $badStatus")
+
+        val wrongMime = localResponses.mapNotNull { response ->
+            val expected = expectedMime(URI(response.url).path) ?: return@mapNotNull response
+            response.takeIf { it.mimeType != expected }
+        }
+        assertTrue(wrongMime.isEmpty(), "Wrong or unreviewed response MIME: $wrongMime")
+    }
+
+    fun assertSuccessful(baseUrl: String) {
+        assertTransportSuccessful(baseUrl)
+        assertTrue(consoleErrors.isEmpty(), "Browser console errors: $consoleErrors")
+    }
+
+    fun assertClean(baseUrl: String) {
+        assertSuccessful(baseUrl)
+        val localResponses = responses.filter { it.url.startsWith(baseUrl) }
         val eventStreams = localResponses.filter {
             URI(it.url).path == "/api/v1/gate/events"
         }
@@ -600,15 +903,6 @@ private class BrowserObservations {
             eventStreams.all { URI(it.url).rawQuery == null },
             "SSE request URL exposed query credentials: $eventStreams",
         )
-        val badStatus = localResponses.filter { it.status >= 400 }
-        assertTrue(badStatus.isEmpty(), "HTTP failures: $badStatus")
-        assertTrue(consoleErrors.isEmpty(), "Browser console errors: $consoleErrors")
-
-        val wrongMime = localResponses.mapNotNull { response ->
-            val expected = expectedMime(URI(response.url).path) ?: return@mapNotNull response
-            response.takeIf { it.mimeType != expected }
-        }
-        assertTrue(wrongMime.isEmpty(), "Wrong or unreviewed response MIME: $wrongMime")
     }
 
     private fun expectedMime(path: String): String? = when {

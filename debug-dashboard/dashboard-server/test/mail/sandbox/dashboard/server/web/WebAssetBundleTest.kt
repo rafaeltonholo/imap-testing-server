@@ -29,6 +29,7 @@ class WebAssetBundleTest {
             assertTrue("/assets/skiko.mjs" in bundle.assetPaths)
             assertTrue("/assets/skiko.wasm" in bundle.assetPaths)
             assertTrue("/assets/js-joda.esm.js" in bundle.assetPaths)
+            assertTrue("/assets/browser-bootstrap.js" in bundle.assetPaths)
             assertTrue(
                 "/assets/composeResources/$GENERATED_RESOURCE_PACKAGE/files/gate-proof.txt" in
                     bundle.assetPaths,
@@ -91,6 +92,125 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun pinsTheAuthoredBrowserBootstrapAsTheSoleEntryLauncher() {
+        val bootstrap = productionWebRuntimeResources().single { resource ->
+            resource.publicFileName == "browser-bootstrap.js"
+        }
+        assertEquals("web/browser-bootstrap.js", bootstrap.classpathResourceName)
+
+        withFixture { fixture ->
+            val bundle = fixture.load()
+            val asset = bundle.requireAsset("/assets/browser-bootstrap.js")
+
+            assertEquals(bootstrap.expectedSha256, asset.sha256)
+            assertEquals("text/javascript", asset.contentType)
+            assertTrue(
+                bundle.html.indexOf("type=\"importmap\"") <
+                    bundle.html.indexOf("src=\"/assets/browser-bootstrap.js\""),
+            )
+            assertEquals(
+                0,
+                Regex("""<script\s+type="module"""").findAll(bundle.html).count(),
+            )
+        }
+    }
+
+    @Test
+    fun acceptsOnlyTheExactParserBlockingBootstrapTagAfterTheImportMap() {
+        val authored = requireNotNull(
+            WebAssetBundleTest::class.java.classLoader.getResource("web/index.html"),
+        ).openStream().bufferedReader().use { it.readText() }
+        val bootstrapTag =
+            "<script src=\"/assets/browser-bootstrap.js\" " +
+                "data-dashboard-entry=\"{{DASHBOARD_WEB_ENTRY}}\"></script>"
+        val reviewed = authored
+        assertTrue(reviewed.contains(bootstrapTag))
+
+        withFixture { fixture ->
+            fixture.loadWithIndexTemplate(reviewed)
+        }
+
+        val importMapStart = reviewed.indexOf("<script type=\"importmap\">")
+        val reordered = reviewed.replace(bootstrapTag, "").let { withoutBootstrap ->
+            withoutBootstrap.substring(0, importMapStart) +
+                bootstrapTag +
+                withoutBootstrap.substring(importMapStart)
+        }
+        val invalidTemplates = mapOf(
+            "missing" to reviewed.replace(bootstrapTag, ""),
+            "duplicate" to reviewed.replace(bootstrapTag, "$bootstrapTag\n$bootstrapTag"),
+            "reordered" to reordered,
+            "changed source" to reviewed.replace("browser-bootstrap.js", "other.js"),
+            "inline body" to reviewed.replace("></script>", ">launch()</script>"),
+            "module type" to reviewed.replace("<script src=", "<script type=\"module\" src="),
+            "async" to reviewed.replace("<script src=", "<script async src="),
+            "defer" to reviewed.replace("<script src=", "<script defer src="),
+            "event handler" to reviewed.replace("<script src=", "<script onload=\"evil()\" src="),
+            "extra attribute" to reviewed.replace("<script src=", "<script nonce=\"extra\" src="),
+            "second module launcher" to reviewed.replace(
+                "</body>",
+                "<script type=\"module\" src=\"{{DASHBOARD_WEB_ENTRY}}\"></script></body>",
+            ),
+            "uppercase executable script" to reviewed.replace(
+                "</body>",
+                "<SCRIPT>alert('extra')</SCRIPT></body>",
+            ),
+            "comment-wrapped bootstrap" to reviewed.replace(
+                bootstrapTag,
+                "<!--$bootstrapTag-->",
+            ),
+            "template-wrapped bootstrap" to reviewed.replace(
+                bootstrapTag,
+                "<template>$bootstrapTag</template>",
+            ),
+            "noscript-wrapped bootstrap" to reviewed.replace(
+                bootstrapTag,
+                "<noscript>$bootstrapTag</noscript>",
+            ),
+        )
+
+        invalidTemplates.forEach { (label, template) ->
+            withFixture { fixture ->
+                assertFailsWith<IllegalArgumentException>(label) {
+                    fixture.loadWithIndexTemplate(template)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun pinsCanonicalAuthoredIndexBytesAndRejectsAmbiguousResources() {
+        val authoredResource = requireNotNull(
+            WebAssetBundleTest::class.java.classLoader.getResource("web/index.html"),
+        )
+        val authored = authoredResource.openStream().bufferedReader().use { it.readText() }
+
+        withFixture { fixture ->
+            val changed = assertFailsWith<IllegalArgumentException> {
+                fixture.loadWithIndexTemplate("$authored\n")
+            }
+            assertTrue(changed.message.orEmpty().contains("SHA-256"))
+        }
+
+        withFixture { fixture ->
+            val parent = WebAssetBundleTest::class.java.classLoader
+            val ambiguousIndex = object : ClassLoader(parent) {
+                override fun getResources(name: String): Enumeration<URL> =
+                    if (name == "web/index.html") {
+                        Collections.enumeration(listOf(authoredResource, authoredResource))
+                    } else {
+                        super.getResources(name)
+                    }
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                fixture.load(classLoader = ambiguousIndex)
+            }
+            assertTrue(failure.message.orEmpty().contains("resolved 2 times"))
+        }
+    }
+
+    @Test
     fun acceptsOnlyTheReviewedEnvironmentDeadGeneratedLoaders() {
         val alteredLoaders = mapOf(
             "altered Node predicate" to
@@ -120,19 +240,83 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsMemberCallsThatSpoofReviewedBlockGuards() {
+        val spoofedLoaders = mapOf(
+            "Node member call" to
+                """
+                const guard = { if() {} }
+                guard.if(isNodeJs)
+                { const module = await import('node:module') }
+                """.trimIndent(),
+            "Node direct member call" to
+                """
+                const guard = { if() {} }
+                guard.if(typeof process !== 'undefined' && process.release.name === 'node')
+                { const module = await import('node:module') }
+                """.trimIndent(),
+            "Node optional member call" to
+                """
+                const guard = { if() {} }
+                guard?.if(typeof process !== 'undefined' && process.release.name === 'node')
+                { const module = await import('node:module') }
+                """.trimIndent(),
+            "Node private member call" to
+                """
+                class GuardSpoof {
+                    #if(value) { return value }
+                    async load() {
+                        this.#if(isNodeJs)
+                        { const module = await import('node:module') }
+                    }
+                }
+                """.trimIndent(),
+            "Node object method" to
+                """
+                const guardSpoof = {
+                    async if(isNodeJs) {
+                        const module = await import('node:module')
+                    },
+                }
+                """.trimIndent(),
+            "Deno member call" to
+                """
+                const guard = { if() {} }
+                guard.if(isDeno)
+                { const path = await import('https://deno.land/std/path/mod.ts') }
+                """.trimIndent(),
+            "Deno optional member call" to
+                """
+                const guard = { if() {} }
+                guard?.if(isDeno)
+                { const path = await import('https://deno.land/std/path/mod.ts') }
+                """.trimIndent(),
+            "Skiko member call" to
+                """
+                const guard = { if() {} }
+                guard.if(false)
+                { const { createRequire: createRequire } = await import('module') }
+                """.trimIndent(),
+        )
+
+        spoofedLoaders.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
     fun acceptsTheGeneratedNodeOnlyTernaryImportsForKotlinIo() {
         withFixture { fixture ->
-            fixture.entry.writeText(
-                fixture.entry.readText() +
-                    """
-
-                    const kotlinIoNodeImports = [
-                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:buffer') : null),
-                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:os') : null),
-                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:path') : null),
-                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:fs') : null),
-                    ]
-                    """.trimIndent(),
+            fixture.writeImportedModule(
+                "dashboard-web.import-object.mjs",
+                kotlinIoModuleSource(),
             )
 
             fixture.load()
@@ -142,22 +326,114 @@ class WebAssetBundleTest {
     @Test
     fun rejectsMutatedGeneratedNodeOnlyTernaryImportsForKotlinIo() {
         val mutations = mapOf(
-            "predicate" to
+            "predicate" to Pair(
+                "kotlinx.io.node.loadBuffer",
                 "((module) => () => module)(((typeof process !== 'undefined') && " +
                     "(process.release.name === 'worker')) ? await import('node:buffer') : null)",
-            "loader shape" to
+            ),
+            "loader shape" to Pair(
+                "kotlinx.io.node.loadBuffer",
                 "((module) => module)(((typeof process !== 'undefined') && " +
                     "(process.release.name === 'node')) ? await import('node:buffer') : null)",
-            "specifier" to
+            ),
+            "specifier" to Pair(
+                "kotlinx.io.node.loadBuffer",
                 "((module) => () => module)(((typeof process !== 'undefined') && " +
                     "(process.release.name === 'node')) ? await import('node:crypto') : null)",
+            ),
+            "property key" to Pair(
+                "kotlinx.io.node.loadOs",
+                "((module) => () => module)(((typeof process !== 'undefined') && " +
+                    "(process.release.name === 'node')) ? await import('node:buffer') : null)",
+            ),
         )
 
-        mutations.forEach { (label, source) ->
+        mutations.forEach { (label, mutation) ->
             withFixture { fixture ->
-                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+                val (propertyName, expression) = mutation
+                fixture.writeImportedModule(
+                    "dashboard-web.import-object.mjs",
+                    """
+                    const js_code = {
+                        '$propertyName' : $expression,
+                    }
+                    """.trimIndent(),
+                )
 
                 assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun requiresTheExactAtomicKotlinIoLoaderGroupAndFilesystemIdentity() {
+        val lines = GENERATED_KOTLIN_IO_PROPERTY_LINES
+        val invalidSources = mapOf(
+            "subset" to kotlinIoModuleSource(lines.dropLast(1)),
+            "duplicate group" to kotlinIoModuleSource(lines + lines),
+            "reordered" to kotlinIoModuleSource(listOf(lines[1], lines[0]) + lines.drop(2)),
+            "gap" to kotlinIoModuleSource(
+                lines.take(2) + "'safe.deferred': () => null," + lines.drop(2),
+            ),
+            "nested group" to
+                """
+                const js_code = {
+                    'nested': async () => {
+                        const nested = {
+                            ${lines.joinToString("\n")}
+                        }
+                        return nested
+                    },
+                }
+                """.trimIndent(),
+            "extra KIO import" to kotlinIoModuleSource(
+                lines + "'extra': async () => await import('node:buffer'),",
+            ),
+            "local process binding" to
+                "const process = {release: {name: 'node'}}\n${kotlinIoModuleSource()}",
+            "imported process binding" to
+                "import process from './dynamic.mjs'\n${kotlinIoModuleSource()}",
+            "destructured process binding" to
+                "const {process} = globalThis\n${kotlinIoModuleSource()}",
+        )
+
+        withFixture { fixture ->
+            fixture.writeImportedModule("copied-import-object.mjs", kotlinIoModuleSource())
+            assertFailsWith<IllegalArgumentException>("copied filename") { fixture.load() }
+        }
+
+        invalidSources.forEach { (label, source) ->
+            withFixture { fixture ->
+                fixture.writeImportedModule("dashboard-web.import-object.mjs", source)
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+
+        withFixture { fixture ->
+            val resourceName = "test-classpath/dashboard-web.import-object.mjs"
+            val classpathSource = fixture.projectRoot.resolve("classpath-import-object.mjs")
+            classpathSource.writeText(kotlinIoModuleSource())
+            fixture.entry.writeText(
+                fixture.entry.readText() + "\nimport './dashboard-web.import-object.mjs'\n",
+            )
+            val parent = WebAssetBundleTest::class.java.classLoader
+            val classLoader = object : ClassLoader(parent) {
+                override fun getResources(name: String): Enumeration<URL> =
+                    if (name == resourceName) {
+                        Collections.enumeration(listOf(classpathSource.toUri().toURL()))
+                    } else {
+                        super.getResources(name)
+                    }
+            }
+            val runtimeResources = productionWebRuntimeResources() +
+                PinnedClasspathAsset(
+                    publicFileName = "dashboard-web.import-object.mjs",
+                    classpathResourceName = resourceName,
+                    expectedSha256 = sha256ForTest(kotlinIoModuleSource().encodeToByteArray()),
+                )
+
+            assertFailsWith<IllegalArgumentException>("classpath origin") {
+                fixture.load(runtimeResources = runtimeResources, classLoader = classLoader)
             }
         }
     }
@@ -511,6 +787,25 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsNonAsciiLettersInsideJavaScriptIdentifiers() {
+        val identifiers = mapOf(
+            "Latin letter" to "caf\u00E9",
+            "Greek letter" to "value\u03B4",
+            "non-ASCII digit" to "item\u0661",
+        )
+
+        identifiers.forEach { (label, name) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences("const $name = 1")
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("non-ASCII"),
+                "$label produced: ${failure.message}",
+            )
+        }
+    }
+
+    @Test
     fun rejectsUnsupportedRegexesBeforeTokenizingTheirContents() {
         val sources = mapOf(
             "block marker in class" to ";/[/*]x/; import('evil-block'); /*close*/",
@@ -732,6 +1027,286 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsDestructuredLoopAndShiftedEnvironmentPredicateBindings() {
+        val distantPattern = (0..70).joinToString(", ") { "property$it" }
+        val mutatedLoaders = mapOf(
+            "Node comma destructuring declaration" to
+                """
+                {
+                    const other = 1, {isNodeJs} = {isNodeJs: true}
+                    if (isNodeJs) { const module = await import('node:module') }
+                }
+                """.trimIndent(),
+            "Deno comma destructuring declaration" to
+                """
+                {
+                    const other = 1, {isDeno} = {isDeno: true}
+                    if (isDeno) { const path = await import('https://deno.land/std/path/mod.ts') }
+                }
+                """.trimIndent(),
+            "Node rest destructuring declaration" to
+                """
+                {
+                    const {...isNodeJs} = {isNodeJs: true}
+                    if (isNodeJs) { const module = await import('node:module') }
+                }
+                """.trimIndent(),
+            "Deno nested destructuring declaration" to
+                """
+                {
+                    const {environment: {isDeno}} = {environment: {isDeno: true}}
+                    if (isDeno) { const path = await import('https://deno.land/std/path/mod.ts') }
+                }
+                """.trimIndent(),
+            "Node distant destructuring declaration" to
+                """
+                {
+                    const {$distantPattern, isNodeJs} = {isNodeJs: true}
+                    if (isNodeJs) { const module = await import('node:module') }
+                }
+                """.trimIndent(),
+            "Node generator declaration" to
+                """
+                {
+                    function* isNodeJs() {}
+                    if (isNodeJs) { const module = await import('node:module') }
+                }
+                """.trimIndent(),
+            "Node ordinary-for destructuring initializer" to
+                """
+                for (const other = 1, {isNodeJs} = {isNodeJs: true}; isNodeJs;) {
+                    const module = await import('node:module')
+                    break
+                }
+                """.trimIndent(),
+            "Node destructuring assignment" to
+                """
+                ({isNodeJs} = {isNodeJs: true})
+                if (isNodeJs) { const module = await import('node:module') }
+                """.trimIndent(),
+            "Deno array assignment" to
+                """
+                [isDeno] = [true]
+                if (isDeno) { const path = await import('https://deno.land/std/path/mod.ts') }
+                """.trimIndent(),
+            "Node for-of target" to
+                """
+                for (isNodeJs of [true]) {}
+                if (isNodeJs) { const module = await import('node:module') }
+                """.trimIndent(),
+            "Deno for-in target" to
+                """
+                for (isDeno in {truthy: true}) {}
+                if (isDeno) { const path = await import('https://deno.land/std/path/mod.ts') }
+                """.trimIndent(),
+            "Node left-shift assignment" to
+                """
+                isNodeJs <<= 1
+                if (isNodeJs) { const module = await import('node:module') }
+                """.trimIndent(),
+            "Deno unsigned-right-shift assignment" to
+                """
+                isDeno >>>= 1
+                if (isDeno) { const path = await import('https://deno.land/std/path/mod.ts') }
+                """.trimIndent(),
+            "Node right-shift assignment" to
+                """
+                isNodeJs >>= 1
+                if (isNodeJs) { const module = await import('node:module') }
+                """.trimIndent(),
+        )
+
+        mutatedLoaders.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsLegacyNodeTernaryAtEveryScope() {
+        val loaders = mapOf(
+            "module root" to
+                """
+                const persistModule =
+                    (globalThis.module =
+                        (typeof process !== 'undefined') &&
+                        (process.release.name === 'node') ?
+                        await import('node:module') : void 0, () => {})
+                """.trimIndent(),
+            "concise arrow" to
+                """
+                const load = async () =>
+                    globalThis.module =
+                        (typeof process !== 'undefined') &&
+                        (process.release.name === 'node') ?
+                        await import('node:module') : void 0
+                await load()
+                """.trimIndent(),
+        )
+
+        loaders.forEach { (label, source) ->
+            withFixture { fixture ->
+                fixture.writeImportedModule("legacy-node-ternary.mjs", source)
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label Node ternary produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsGlobalProcessMutationInsideRootJsCodeObject() {
+        val seedExpressions = mapOf(
+            "destructured member target" to
+                "({value: globalThis.process} = {value: {release: {name: 'node'}}})",
+            "destructured computed target" to
+                "({value: globalThis['process']} = {value: {release: {name: 'node'}}})",
+            "Object.assign" to
+                "Object.assign(globalThis, {process: {release: {name: 'node'}}})",
+            "Object.defineProperty" to
+                "Object.defineProperty(globalThis, 'process', " +
+                    "{value: {release: {name: 'node'}}})",
+            "concatenated computed target" to
+                "(globalThis['pro' + 'cess'] = {release: {name: 'node'}})",
+            "template computed target" to
+                """(globalThis[`pro${'$'}{'cess'}`] = {release: {name: 'node'}})""",
+            "concatenated defineProperty" to
+                "Object.defineProperty(globalThis, 'pro' + 'cess', " +
+                    "{value: {release: {name: 'node'}}})",
+        )
+
+        seedExpressions.forEach { (label, seedExpression) ->
+            withFixture { fixture ->
+                fixture.writeImportedModule(
+                    "dashboard-web.import-object.mjs",
+                    kotlinIoModuleSource(
+                        listOf("'seed': $seedExpression,") +
+                            GENERATED_KOTLIN_IO_PROPERTY_LINES,
+                    ),
+                )
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsEscapedEnvironmentIdentifiers() {
+        val escapedIdentifiers = mapOf(
+            "process" to
+                """
+                const pr\u006fcess = {release: {name: 'node'}}
+                if (typeof pr\u006fcess !== 'undefined') await import('node:module')
+                """.trimIndent(),
+            "Deno" to
+                """
+                const D\u0065no = {}
+                if (typeof D\u0065no !== 'undefined') {
+                    await import('https://deno.land/std/path/mod.ts')
+                }
+                """.trimIndent(),
+        )
+
+        escapedIdentifiers.forEach { (label, source) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
+            assertTrue(failure.message.orEmpty().contains("escape"), "$label: ${failure.message}")
+        }
+    }
+
+    @Test
+    fun rejectsLocalEnvironmentObjectsInReviewedLoaderShapes() {
+        val mutations: Map<String, (WebBundleFixture) -> Unit> = mapOf(
+            "direct Node block" to { fixture ->
+                fixture.writeImportedModule(
+                    "local-loader.mjs",
+                    """
+                    {
+                        const process = {release: {name: 'node'}}
+                        if (typeof process !== 'undefined' && process.release.name === 'node') {
+                            const module = await import('node:module')
+                        }
+                    }
+                    """.trimIndent(),
+                )
+            },
+            "direct Node function parameter" to { fixture ->
+                fixture.writeImportedModule(
+                    "local-loader.mjs",
+                    """
+                    async function loadNode(process) {
+                        if (typeof process !== 'undefined' && process.release.name === 'node') {
+                            const module = await import('node:module')
+                        }
+                    }
+                    await loadNode({release: {name: 'node'}})
+                    """.trimIndent(),
+                )
+            },
+            "Kotlin IO block" to { fixture ->
+                fixture.writeImportedModule(
+                    "local-loader.mjs",
+                    """
+                    {
+                        const process = {release: {name: 'node'}}
+                        const js_code = {
+                            'kotlinx.io.node.loadBuffer' : ((module)=>()=>module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import('node:buffer') : null),
+                        }
+                    }
+                    """.trimIndent(),
+                )
+            },
+            "Kotlin IO function parameter" to { fixture ->
+                fixture.writeImportedModule(
+                    "local-loader.mjs",
+                    """
+                    async function loadBuffer(process) {
+                        return ((module)=>()=>module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import('node:buffer') : null)
+                    }
+                    await loadBuffer({release: {name: 'node'}})
+                    """.trimIndent(),
+                )
+            },
+            "module Deno binding" to { fixture ->
+                fixture.entry.writeText("const Deno = {}\n" + fixture.entry.readText())
+            },
+            "module process binding" to { fixture ->
+                val loader = fixture.linkerDirectory.resolve("loader.mjs")
+                loader.writeText(
+                    "const process = {release: {name: 'node'}}\n" + loader.readText(),
+                )
+            },
+        )
+
+        mutations.forEach { (label, mutate) ->
+            withFixture { fixture ->
+                mutate(fixture)
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
     fun ignoresImportAndUrlDecoysInsideCommentsStringsAndTemplates() {
         withFixture { fixture ->
             fixture.entry.writeText(
@@ -746,6 +1321,31 @@ class WebAssetBundleTest {
             )
 
             fixture.load()
+        }
+    }
+
+    @Test
+    fun terminatesLineCommentsAtEveryJavaScriptLineTerminator() {
+        val terminators = mapOf(
+            "carriage return" to "\r",
+            "line separator" to "\u2028",
+            "paragraph separator" to "\u2029",
+        )
+
+        terminators.forEach { (label, terminator) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(
+                    fixture.entry.readText() +
+                        "\n// comment decoy$terminator" +
+                        "await import('https://example.test/$label.mjs')\n",
+                )
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().lowercase().contains("unreviewed"),
+                    "$label produced: ${failure.message}",
+                )
+            }
         }
     }
 
@@ -864,6 +1464,32 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsNewUrlBasesThatOnlyStartWithImportMetaUrl() {
+        val invalidUrls = mapOf(
+            "method call" to
+                "new URL('./gate.wasm', import.meta.url.replace('gate.mjs', 'other.mjs'))",
+            "concatenation" to
+                "new URL('./gate.wasm', import.meta.url + '?cache=off')",
+            "extra argument" to
+                "new URL('./gate.wasm', import.meta.url, otherBase)",
+            "parenthesized base" to
+                "new URL('./gate.wasm', (import.meta.url))",
+        )
+
+        invalidUrls.forEach { (label, statement) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$statement\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().lowercase().contains("unreviewed"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
     fun rejectsTraversalMissingReferencesAndNormalizedAliases() {
         val invalidReferences = mapOf(
             "traversal" to "../outside.mjs",
@@ -949,16 +1575,34 @@ class WebAssetBundleTest {
 
     @Test
     fun requiresExplicitMjsEntryBothWasmBinariesAndReviewedResourceExtensions() {
-        withFixture { fixture ->
-            val badEntry = assertFailsWith<IllegalArgumentException> {
-                WebAssetBundle.load(
-                    projectRoot = fixture.projectRoot,
-                    linkerDirectory = fixture.linkerDirectory,
-                    composeResourcesDirectory = fixture.composeResourcesDirectory,
-                    entryFileName = "../gate.mjs",
+        val invalidEntries = mapOf(
+            "traversal" to "../gate.mjs",
+            "slash" to "nested/gate.mjs",
+            "backslash" to "gate\\evil.mjs",
+            "query" to "gate?.mjs",
+            "fragment" to "gate#.mjs",
+            "quote markup" to "gate\" onerror=\"evil.mjs",
+            "non-ASCII" to "gáte.mjs",
+            "cross-origin" to "https://attacker.invalid/gate.mjs",
+        )
+        invalidEntries.forEach { (label, entryName) ->
+            withFixture { fixture ->
+                if (Path.of(entryName).nameCount == 1) {
+                    fixture.linkerDirectory.resolve(entryName).writeText(fixture.entry.readText())
+                }
+                val badEntry = assertFailsWith<IllegalArgumentException>(label) {
+                    WebAssetBundle.load(
+                        projectRoot = fixture.projectRoot,
+                        linkerDirectory = fixture.linkerDirectory,
+                        composeResourcesDirectory = fixture.composeResourcesDirectory,
+                        entryFileName = entryName,
+                    )
+                }
+                assertTrue(
+                    badEntry.message.orEmpty().contains("entry"),
+                    "$label produced: ${badEntry.message}",
                 )
             }
-            assertTrue(badEntry.message.orEmpty().contains("entry"))
         }
 
         withFixture { fixture ->
@@ -1038,6 +1682,51 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun rejectsBootstrapPinByteIdentityAndFilesystemShadowChanges() {
+        withFixture { fixture ->
+            val changedPin = productionWebRuntimeResources().map { runtime ->
+                if (runtime.publicFileName == "browser-bootstrap.js") {
+                    runtime.copy(expectedSha256 = "0".repeat(64))
+                } else {
+                    runtime
+                }
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                fixture.load(runtimeResources = changedPin)
+            }
+            assertTrue(failure.message.orEmpty().contains("SHA-256"))
+        }
+
+        withFixture { fixture ->
+            fixture.linkerDirectory.resolve("browser-bootstrap.js")
+                .writeText("throw new Error('shadowed')")
+
+            val failure = assertFailsWith<IllegalArgumentException> { fixture.load() }
+            assertTrue(failure.message.orEmpty().contains("Duplicate normalized public asset path"))
+        }
+
+        withFixture { fixture ->
+            val tampered = fixture.projectRoot.resolve("tampered-bootstrap.js")
+            tampered.writeText("throw new Error('tampered')")
+            val parent = javaClass.classLoader
+            val tamperedClasspath = object : ClassLoader(parent) {
+                override fun getResources(name: String): Enumeration<URL> =
+                    if (name == "web/browser-bootstrap.js") {
+                        Collections.enumeration(listOf(tampered.toUri().toURL()))
+                    } else {
+                        super.getResources(name)
+                    }
+            }
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                fixture.load(classLoader = tamperedClasspath)
+            }
+            assertTrue(failure.message.orEmpty().contains("SHA-256"))
+        }
+    }
+
+    @Test
     fun snapshotsValidatedBytesAndDoesNotExposeMutableManifestStorage() {
         withFixture { fixture ->
             val original = fixture.entry.readText().encodeToByteArray()
@@ -1092,6 +1781,25 @@ internal const val JODA_SHA256 =
 internal const val GATE_PROOF_SHA256 =
     "7b0f843ebd49d2709bcd8e3d1021db98e68413823647895d8377a6657f5e6960"
 
+private val GENERATED_KOTLIN_IO_PROPERTY_LINES = listOf(
+    "'kotlinx.io.node.loadBuffer' : ((module)=>()=>module)(((typeof process !== 'undefined') && " +
+        "(process.release.name === 'node')) ? await import('node:buffer') : null),",
+    "'kotlinx.io.node.loadOs' : ((module)=>()=>module)(((typeof process !== 'undefined') && " +
+        "(process.release.name === 'node')) ? await import('node:os') : null),",
+    "'kotlinx.io.node.loadPath' : ((module)=>()=>module)(((typeof process !== 'undefined') && " +
+        "(process.release.name === 'node')) ? await import('node:path') : null),",
+    "'kotlinx.io.node.loadFs' : ((module)=>()=>module)(((typeof process !== 'undefined') && " +
+        "(process.release.name === 'node')) ? await import('node:fs') : null),",
+)
+
+private fun kotlinIoModuleSource(
+    lines: List<String> = GENERATED_KOTLIN_IO_PROPERTY_LINES,
+): String = buildString {
+    appendLine("const js_code = {")
+    lines.forEach { line -> appendLine("    $line") }
+    append("}")
+}
+
 internal class WebBundleFixture(
     val projectRoot: Path,
     val linkerDirectory: Path,
@@ -1112,6 +1820,26 @@ internal class WebBundleFixture(
     )
 }
 
+private fun WebBundleFixture.loadWithIndexTemplate(template: String): WebAssetBundle {
+    val index = projectRoot.resolve("test-index.html")
+    index.writeText(template)
+    val parent = WebAssetBundleTest::class.java.classLoader
+    val classLoader = object : ClassLoader(parent) {
+        override fun getResources(name: String): Enumeration<URL> =
+            if (name == "web/index.html") {
+                Collections.enumeration(listOf(index.toUri().toURL()))
+            } else {
+                super.getResources(name)
+            }
+    }
+    return load(classLoader = classLoader)
+}
+
+private fun WebBundleFixture.writeImportedModule(fileName: String, source: String) {
+    linkerDirectory.resolve(fileName).writeText(source)
+    entry.writeText(entry.readText() + "\nimport './$fileName'\n")
+}
+
 internal fun withFixture(block: (WebBundleFixture) -> Unit) {
     val projectRoot = createTempDirectory("gate-assets").toRealPath()
     val linker = projectRoot.resolve("linker").createDirectories().toRealPath()
@@ -1127,7 +1855,7 @@ internal fun withFixture(block: (WebBundleFixture) -> Unit) {
 
         const isNodeJs = (typeof process !== 'undefined') && (process.release.name === 'node');
         const isDeno = !isNodeJs && (typeof Deno !== 'undefined')
-        const isStandaloneJsVM = !isDeno && !isNodeJs
+        const isStandaloneJsVM = !isDeno && !isNodeJs && (typeof d8 !== 'undefined')
         if (isNodeJs) {
           const module = await import(/* webpackIgnore: true */'node:module');
         }
@@ -1145,9 +1873,6 @@ internal fun withFixture(block: (WebBundleFixture) -> Unit) {
         if (typeof process !== 'undefined' && process.release.name === 'node') {
             const module = await import(/* webpackIgnore: true */'node:module');
         }
-        const persistModule =
-            (globalThis.module = (typeof process !== 'undefined') && (process.release.name === 'node') ?
-                await import(/* webpackIgnore: true */'node:module') : void 0, () => {})
         """.trimIndent(),
     )
     linker.resolve("dynamic.mjs").writeText("export const dynamic = true")

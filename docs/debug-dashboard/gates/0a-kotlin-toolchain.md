@@ -909,3 +909,182 @@ Final results:
 | production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 46.761 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
 
 **Gate 0A export namespace alias correction: PASS. No stop condition remains.**
+
+#### 2026-08-04 UTC: generated-loader context correction
+
+A sixth bounded review supersedes the immediately preceding PASS. Reviewed
+Node, Deno, and Skiko block loaders now require a bare `if` control keyword;
+member, optional-member, private-member, and object-method lookalikes cannot
+borrow the same trailing tokens. Named Node and Deno guards are accepted only
+at module scope or directly inside the generated module-level `try` block.
+Their predicate identifiers have a closed role inventory: the canonical
+binding, generated negated conjunction reads, and the single reviewed bare
+guard. Any additional binding, destructuring pattern, loop target, generator,
+or write fails closed without a bounded backward-token search.
+
+The direct Node guard remains module-root-only. Kotlin I/O Node imports must be
+the exact specifier-specific `kotlinx.io.node.load*` property value inside the
+unique module-root `const js_code = { ... }` object. Local `process` parameters
+or bindings around either loader no longer qualify, while the unrelated
+generated `process` parameters inside other `js_code` properties remain valid.
+The canonical named predicates likewise reject additional `process` or `Deno`
+roles that could make an environment-dead branch live.
+
+Line comments now terminate on all ECMAScript line terminators: LF, CR,
+U+2028, and U+2029. The scanner consumes CRLF as one terminator and resumes
+code scanning after every supported form. Identifier scanning remains
+ASCII-only at every code unit, including non-ASCII letters or digits after an
+ASCII prefix. A reviewed two-argument `new URL` asset reference now requires
+the complete second-argument suffix `import.meta.url)`; method calls,
+concatenation, parenthesized alternatives, and extra arguments are rejected.
+
+Node `v24.4.0` parsed the complete adversarial corpus and executed eight live
+member, shadowed-binding, local-environment, and alternate-line-terminator
+probes. Test-only REDs reproduced all five fail-open families before the
+scanner changes. The exact `find` and `rg` closure commands were rerun after a
+fresh web build. The linker output remains exactly the same four files and the
+reviewed edge table is unchanged.
+
+Final results:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
+| focused `WebAssetBundleTest` | PASS; 44/44 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 48/48 |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 13.012 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A generated-loader context correction: PASS. No stop condition remains.**
+
+#### 2026-08-04 UTC: browser ambient-global integrity correction
+
+A seventh bounded review supersedes the immediately preceding PASS. Static
+source review can prove the generated loader predicates and lexical bindings,
+but it cannot prove that unrelated module-root JavaScript never synthesizes an
+ambient `process` or `Deno` property through a computed name or alias. Node
+`v24.4.0` live probes confirmed the boundary: concatenated property assignment,
+`Object.defineProperty`, `Object.assign`, and destructuring assignment each made
+the exact Kotlin IO Node predicate live and caused one `node:buffer` import.
+
+The supported browser path now establishes the missing runtime invariant before
+evaluating any generated module. The authored classic script
+`/assets/browser-bootstrap.js` is a distinct classpath asset pinned to this
+SHA-256:
+
+```text
+983b4c0c576a6c4dd6bdd74209aacc2180271a1ac8b1a1dd39f30cf0b644b55c
+```
+
+Bundle startup rejects changed bytes, a changed pin or classpath identity,
+multiple resolutions, and a filesystem shadow. The bootstrap is excluded from
+module scanning only through its exact pinned origin; every generated module
+remains scanned. The entry configuration is one ASCII-safe `.mjs` basename.
+The authored HTML contains the reviewed import map followed by exactly this
+parser-blocking launcher and no module script:
+
+```html
+<script src="/assets/browser-bootstrap.js" data-dashboard-entry="/assets/dashboard-web.mjs"></script>
+```
+
+Before entry-token substitution, the complete authored `web/index.html` bytes
+are also required to resolve exactly once and match this SHA-256:
+
+```text
+3c995859793d7802f431f523ebbefdb65545309e61eabee5868abb8d1d0d7f55
+```
+
+This makes HTML execution context part of the pinned contract instead of
+attempting to infer it from case-sensitive lexical counts. A review RED ran 52
+tests and failed exactly two: an uppercase executable `<SCRIPT>` was accepted,
+and a one-byte index change was accepted. The same bypass family also includes
+comment-, `template`-, and `noscript`-wrapped bootstrap tags, which preserve the
+old counts while making the launcher inert. Canonical byte validation now
+rejects all of them and ambiguous index resources before substitution; the
+existing import-map, tag-order, and script-count checks remain as defense in
+depth.
+
+The bootstrap captures and validates the current script's entry attribute,
+then installs own `process` and `Deno` data properties whose value is
+`undefined` and whose writable, enumerable, and configurable flags are all
+false. It independently re-reads both descriptors before its only
+`import(entry)` call. Configurable preseeds are replaced; already-safe
+descriptors are accepted. An unsafe non-configurable value or a failed second
+verification throws after zero entry imports. Import rejection is surfaced
+after one call and has no retry.
+
+The Node `vm` harness executes the exact authored bytes. Its seven control-flow
+cases produced:
+
+```text
+PASS safe-empty imports=1 completion=resolved
+PASS configurable-preseeds imports=1 completion=resolved
+PASS already-safe imports=1 completion=resolved
+PASS unsafe-process imports=0 completion=rejected
+PASS unsafe-deno imports=0 completion=rejected
+PASS second-verification-failure imports=0 completion=rejected
+PASS import-rejection imports=1 completion=rejected
+```
+
+Eight additional entry cases reject quotes/markup, queries, fragments,
+traversal, nested paths, backslashes, non-ASCII names, and cross-origin URLs
+with zero imports. HTML tests reject a missing, duplicate, reordered, inline,
+typed, async, deferred, event-bearing, extra-attribute, changed-source, or
+additional module launcher.
+
+The Kotlin IO exception is now bound at resolution time to the exact normalized
+filesystem source `dashboard-web.import-object.mjs`. Inside that source, the
+scanner requires one unique module-root `const js_code = { ... }` and one
+adjacent atomic group of the exact buffer, OS, path, and filesystem properties
+in generated order. Only the four import-token indices in that group are
+authorized. Copied filenames, classpath origins, subsets, duplicates,
+reordering, gaps, nested or second groups, extra KIO imports, wrong
+key/specifier pairs, eager sibling mutation, and local/imported/destructured or
+escaped `process` bindings all fail closed. Unreferenced predecessor assignment
+and Kotlin IO ternary matchers were removed so the remaining review surface
+describes only enforced behavior.
+
+The production Chrome gate uses four fresh browser sessions because preload
+scripts persist and sealed descriptors cannot be cleaned up. A configurable
+fake `process` and `Deno` new-document preseed is proven to run, then is
+replaced before the dashboard launches once. Independent unsafe
+non-configurable `process` and `Deno` sessions observe only the bootstrap asset,
+the expected bootstrap error family, no entry or module request, and no Compose
+mount. The Deno failure additionally proves that `process` was sealed before
+the second descriptor failed. Selenium's new-document registration requires
+the CDP Page domain to be enabled; a browser RED with an absent preload marker
+and an empty console was corrected by sending `Page.enable` before
+`Page.addScriptToEvaluateOnNewDocument`.
+
+The baseline browser session proves both exact descriptors before checking the
+Compose UI. In strict JavaScript, direct, concatenated-computed, template,
+`Object.defineProperty`, destructuring, `Object.assign`, `Reflect.set`, delete,
+and `Reflect.defineProperty` probes fail for both names and leave both
+descriptors unchanged. Bootstrap and entry request counts remain equal for
+every new document, including the explicit history refresh. Network, MIME,
+console, semantics, history, SSE, keyboard, focus, and accessibility checks
+remain clean.
+
+This is deliberately a browser-only compatibility contract. Node, Deno,
+browser polyfills that require ambient `process` or `Deno`, and environments
+with unsafe non-configurable preseeds are unsupported and fail closed.
+
+The final web build and closure inspection returned exactly the same four
+linker artifacts and reviewed edges as the preceding correction:
+
+```text
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.import-object.mjs
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.js-builtins.mjs
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.mjs
+build/tasks/_dashboard-web_linkWasmJs/dashboard-web.wasm
+```
+
+Final results from `debug-dashboard/`:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
+| focused `WebAssetBundleTest` | PASS; 52/52 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 57/57, including all 15 Node bootstrap cases |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 15.449 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+
+**Gate 0A browser ambient-global integrity correction: PASS. No stop condition remains.**

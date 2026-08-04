@@ -16,11 +16,14 @@ any module in the graph.
 
 An authored classic script, `/assets/browser-bootstrap.js`, is served as a
 classpath asset whose bytes are checked against a repository-pinned SHA-256
-before the server starts. The configured entry is restricted before HTML
-rendering to one ASCII-safe `.mjs` basename; its rendered value is therefore the
-strict same-origin path `/assets/<ASCII-safe-basename>.mjs`, with no query,
-fragment, slash, traversal segment, or markup character. The authored HTML
-contains, in this order:
+before the server starts. The complete authored `web/index.html` classpath
+resource must likewise resolve exactly once and match its repository-pinned
+SHA-256 before entry-token substitution; structural HTML checks remain as
+defense in depth. The configured entry is restricted before HTML rendering to
+one ASCII-safe `.mjs` basename; its rendered value is therefore the strict
+same-origin path `/assets/<ASCII-safe-basename>.mjs`, with no query, fragment,
+slash, traversal segment, or markup character. The authored HTML contains, in
+this order:
 
 1. the single reviewed import map;
 2. one parser-blocking classic external bootstrap tag carrying the validated
@@ -66,6 +69,9 @@ other binding forms. Escaped identifier spellings such as `pr\u006fcess` and
 
 - A missing, duplicated, reordered, inline, or module bootstrap tag makes bundle
   startup fail.
+- An ambiguous or byte-changed authored index makes bundle startup fail before
+  token substitution, including case-changed executable tags and bootstrap
+  tags made inert by comments, `template`, or `noscript` wrappers.
 - A bootstrap byte or pinned-hash mismatch makes bundle startup fail.
 - An invalid entry attribute, an unsafe non-configurable `process` or `Deno`, or
   a failure while sealing or verifying either descriptor makes the bootstrap
@@ -76,9 +82,10 @@ other binding forms. Escaped identifier spellings such as `pr\u006fcess` and
 
 ## Verification
 
-Unit tests prove the exact HTML ordering and tag contract (including missing,
-duplicated, reordered, tampered, or module-tag launchers), pinned bootstrap
-bytes, and fail-closed bootstrap control flow. Bootstrap harness cases cover
+Unit tests prove the pinned authored index bytes, exact HTML ordering and tag
+contract (including missing, duplicated, reordered, case-changed, inertly
+wrapped, tampered, or module-tag launchers), pinned bootstrap bytes, and
+fail-closed bootstrap control flow. Bootstrap harness cases cover
 unsafe non-configurable properties independently, configurable preseeds,
 already-safe properties, a second-descriptor verification failure, zero launch
 on every failure, exactly one launch on success, and import rejection without a

@@ -25,6 +25,9 @@ internal data class PinnedClasspathAsset(
     val expectedSha256: String,
 )
 
+private const val KOTLIN_IO_IMPORT_OBJECT_PUBLIC_NAME =
+    "dashboard-web.import-object.mjs"
+
 class WebAssetBundle private constructor(
     val entryAssetPath: String,
     val html: String,
@@ -46,7 +49,13 @@ class WebAssetBundle private constructor(
         private const val RESOURCE_PACKAGE = "mail.sandbox.dashboard.web.generated.resources"
         private const val RESOURCE_PREFIX = "/assets/composeResources/$RESOURCE_PACKAGE/"
         private const val INDEX_RESOURCE = "web/index.html"
+        private const val INDEX_SHA256 =
+            "3c995859793d7802f431f523ebbefdb65545309e61eabee5868abb8d1d0d7f55"
         private const val ENTRY_TOKEN = "{{DASHBOARD_WEB_ENTRY}}"
+        private const val BOOTSTRAP_PUBLIC_NAME = "browser-bootstrap.js"
+        private const val BOOTSTRAP_RESOURCE = "web/browser-bootstrap.js"
+        private const val BOOTSTRAP_SHA256 =
+            "983b4c0c576a6c4dd6bdd74209aacc2180271a1ac8b1a1dd39f30cf0b644b55c"
         private const val GATE_MARKER_ROUTE = "${RESOURCE_PREFIX}files/gate-proof.txt"
         private const val GATE_MARKER_SHA256 =
             "7b0f843ebd49d2709bcd8e3d1021db98e68413823647895d8377a6657f5e6960"
@@ -121,12 +130,20 @@ class WebAssetBundle private constructor(
         fun load(): WebAssetBundle {
             validateEntryName()
             addCodeAsset(entryFileName)
+            addClasspathAsset(
+                requireNotNull(runtimeResources[BOOTSTRAP_PUBLIC_NAME]) {
+                    "Pinned browser bootstrap resource is not configured"
+                },
+            )
 
             while (pendingCode.isNotEmpty()) {
                 val publicName = pendingCode.removeFirst()
                 if (!parsedCode.add(publicName)) continue
                 val asset = manifest.getValue(assetRoute(publicName))
-                ModuleReferenceScanner(asset.bytes.decodeToString()).references().forEach { reference ->
+                ModuleReferenceScanner(
+                    source = asset.bytes.decodeToString(),
+                    publicName = publicName,
+                ).references().forEach { reference ->
                     resolveReference(publicName, reference)
                 }
             }
@@ -139,22 +156,17 @@ class WebAssetBundle private constructor(
         }
 
         private fun validateEntryName() {
-            val parsed = runCatching { Paths.get(entryFileName) }.getOrNull()
             require(
-                entryFileName.isNotBlank() &&
-                    entryFileName.endsWith(".mjs") &&
-                    parsed != null &&
-                    parsed.fileName.toString() == entryFileName &&
-                    parsed.nameCount == 1,
+                Regex("""[A-Za-z0-9][A-Za-z0-9._-]*\.mjs""").matches(entryFileName),
             ) {
-                "The configured entry must be one explicit .mjs basename"
+                "The configured entry must be one ASCII-safe .mjs basename"
             }
         }
 
         private fun resolveReference(fromPublicName: String, reference: ModuleReference) {
             val specifier = reference.specifier
             if (reference.kind == ReferenceKind.DynamicImport &&
-                isReviewedEnvironmentDeadImport(reference, specifier)
+                isReviewedEnvironmentDeadImport(fromPublicName, reference, specifier)
             ) {
                 return
             }
@@ -264,10 +276,18 @@ class WebAssetBundle private constructor(
                 "Pinned classpath resource ${pinned.classpathResourceName} has SHA-256 " +
                     "$actualHash, expected ${pinned.expectedSha256}"
             }
-            val origin = if (pinned.publicFileName == "js-joda.esm.js") {
-                AssetOrigin.ClasspathJoda
-            } else {
-                AssetOrigin.ClasspathSkiko
+            val origin = when (pinned.publicFileName) {
+                "js-joda.esm.js" -> AssetOrigin.ClasspathJoda
+                BOOTSTRAP_PUBLIC_NAME -> {
+                    require(
+                        pinned.classpathResourceName == BOOTSTRAP_RESOURCE &&
+                            pinned.expectedSha256 == BOOTSTRAP_SHA256,
+                    ) {
+                        "Browser bootstrap runtime pin does not match the authored bootstrap"
+                    }
+                    AssetOrigin.ClasspathBootstrap
+                }
+                else -> AssetOrigin.ClasspathSkiko
             }
             addAsset(pinned.publicFileName, bytes, origin)
         }
@@ -278,7 +298,10 @@ class WebAssetBundle private constructor(
             val contentType = mimeType(publicName)
             manifest[route] = WebAsset(bytes, contentType, sha256(bytes))
             origins[route] = origin
-            if (publicName.endsWith(".mjs") || publicName.endsWith(".js")) {
+            if (
+                origin != AssetOrigin.ClasspathBootstrap &&
+                (publicName.endsWith(".mjs") || publicName.endsWith(".js"))
+            ) {
                 pendingCode.addLast(publicName)
             }
         }
@@ -315,6 +338,7 @@ class WebAssetBundle private constructor(
             requireAssetHash("/assets/skiko.mjs", SKIKO_MJS_SHA256)
             requireAssetHash("/assets/skiko.wasm", SKIKO_WASM_SHA256)
             requireAssetHash("/assets/js-joda.esm.js", JODA_SHA256)
+            requireAssetHash("/assets/$BOOTSTRAP_PUBLIC_NAME", BOOTSTRAP_SHA256)
             requireAssetHash(GATE_MARKER_ROUTE, GATE_MARKER_SHA256)
             val applicationWasm = manifest.keys.any { route ->
                 route.endsWith(".wasm") &&
@@ -340,26 +364,33 @@ class WebAssetBundle private constructor(
                 "Authored index resource $INDEX_RESOURCE resolved ${resources.size} times; " +
                     "expected exactly once"
             }
-            val template = resources.single().openStream().bufferedReader().use { it.readText() }
+            val templateBytes = resources.single().openStream().use { it.readBytes() }
+            val actualHash = sha256(templateBytes)
+            require(actualHash == INDEX_SHA256) {
+                "Authored index resource $INDEX_RESOURCE has SHA-256 $actualHash, " +
+                    "expected $INDEX_SHA256"
+            }
+            val template = templateBytes.decodeToString()
             require(template.windowed(ENTRY_TOKEN.length).count { it == ENTRY_TOKEN } == 1) {
                 "Authored index must contain exactly one $ENTRY_TOKEN token"
             }
             val html = template.replace(ENTRY_TOKEN, entryPath)
+            val bootstrapTag =
+                "<script src=\"/assets/$BOOTSTRAP_PUBLIC_NAME\" " +
+                    "data-dashboard-entry=\"$entryPath\"></script>"
             require(
-                Regex("""<script\s+type="module"\s+src="${Regex.escape(entryPath)}"\s*></script>""")
-                    .findAll(html)
-                    .count() == 1,
+                html.windowed(bootstrapTag.length).count { it == bootstrapTag } == 1,
             ) {
-                "Authored index module script does not match the configured entry"
+                "Authored index bootstrap script does not match the configured entry"
             }
-            require(Regex("""<script\s+type="module"""").findAll(html).count() == 1) {
-                "Authored index must contain exactly one module script"
+            require(Regex("""<script\s+type="module"""").findAll(html).count() == 0) {
+                "Authored index may not contain an unconditional module script"
             }
             require(Regex("""<script\s+type="importmap">""").findAll(html).count() == 1) {
                 "Authored index must contain exactly one import map"
             }
             require(Regex("""<script\b""").findAll(html).count() == 2) {
-                "Authored index must contain only its import map and module scripts"
+                "Authored index must contain only its import map and bootstrap scripts"
             }
             val importMapBody = Regex(
                 """<script\s+type="importmap">\s*(.*?)\s*</script>""",
@@ -372,18 +403,20 @@ class WebAssetBundle private constructor(
             ) {
                 "Authored index import map must contain only the reviewed Joda mapping"
             }
+            val importMapEnd = html.indexOf("</script>", html.indexOf("<script type=\"importmap\">"))
+            require(importMapEnd >= 0 && html.indexOf(bootstrapTag) > importMapEnd) {
+                "Authored index bootstrap must follow the reviewed import map"
+            }
             return html
         }
 
         private fun isReviewedEnvironmentDeadImport(
+            fromPublicName: String,
             reference: ModuleReference,
             specifier: String,
         ): Boolean = when (specifier) {
             "node:module" ->
-                reference.reviewedLoaderContext in setOf(
-                    ReviewedLoaderContext.NodeBlock,
-                    ReviewedLoaderContext.NodeTernary,
-                )
+                reference.reviewedLoaderContext == ReviewedLoaderContext.NodeBlock
 
             "https://deno.land/std/path/mod.ts" ->
                 reference.reviewedLoaderContext == ReviewedLoaderContext.DenoBlock
@@ -392,7 +425,9 @@ class WebAssetBundle private constructor(
                 reference.reviewedLoaderContext == ReviewedLoaderContext.SkikoDeadBlock
 
             in KOTLIN_IO_NODE_DYNAMIC_IMPORTS ->
-                reference.reviewedLoaderContext == ReviewedLoaderContext.KotlinIoNodeTernary
+                fromPublicName == KOTLIN_IO_IMPORT_OBJECT_PUBLIC_NAME &&
+                    origins[assetRoute(fromPublicName)] == AssetOrigin.Filesystem &&
+                    reference.reviewedLoaderContext == ReviewedLoaderContext.KotlinIoNodeTernary
 
             else -> false
         }
@@ -417,6 +452,12 @@ class WebAssetBundle private constructor(
 }
 
 internal fun productionWebRuntimeResources(): List<PinnedClasspathAsset> = listOf(
+    PinnedClasspathAsset(
+        publicFileName = "browser-bootstrap.js",
+        classpathResourceName = "web/browser-bootstrap.js",
+        expectedSha256 =
+            "983b4c0c576a6c4dd6bdd74209aacc2180271a1ac8b1a1dd39f30cf0b644b55c",
+    ),
     PinnedClasspathAsset(
         publicFileName = "skiko.mjs",
         classpathResourceName = "skiko.mjs",
@@ -524,6 +565,7 @@ private enum class AssetOrigin {
     Filesystem,
     ClasspathSkiko,
     ClasspathJoda,
+    ClasspathBootstrap,
     ComposeResource,
 }
 
@@ -542,7 +584,6 @@ private data class ModuleReference(
 
 private enum class ReviewedLoaderContext {
     NodeBlock,
-    NodeTernary,
     KotlinIoNodeTernary,
     DenoBlock,
     SkikoDeadBlock,
@@ -554,7 +595,12 @@ private enum class NamedEnvironmentPredicate {
     Deno,
 }
 
-private class ModuleReferenceScanner(private val source: String) {
+private class ModuleReferenceScanner(
+    private val source: String,
+    private val publicName: String?,
+) {
+    constructor(source: String) : this(source, null)
+
     private val tokens = tokenize(source)
 
     fun references(): List<ModuleReference> {
@@ -589,7 +635,7 @@ private class ModuleReferenceScanner(private val source: String) {
             return reference(
                 kind = ReferenceKind.DynamicImport,
                 specifier = value.value,
-                reviewedLoaderContext = reviewedDynamicImportContext(index),
+                reviewedLoaderContext = reviewedDynamicImportContext(index, value.value),
             )
         }
         if (next is JsToken.StringLiteral) {
@@ -650,13 +696,16 @@ private class ModuleReferenceScanner(private val source: String) {
             cursor++
         }
         val separator = commaIndex ?: return null
-        val hasImportMetaUrl =
+        val hasExactImportMetaUrlBase =
             (tokens.getOrNull(separator + 1) as? JsToken.Identifier)?.value == "import" &&
                 (tokens.getOrNull(separator + 2) as? JsToken.Punctuation)?.value == "." &&
                 (tokens.getOrNull(separator + 3) as? JsToken.Identifier)?.value == "meta" &&
                 (tokens.getOrNull(separator + 4) as? JsToken.Punctuation)?.value == "." &&
-                (tokens.getOrNull(separator + 5) as? JsToken.Identifier)?.value == "url"
-        if (!hasImportMetaUrl) return null
+                (tokens.getOrNull(separator + 5) as? JsToken.Identifier)?.value == "url" &&
+                (tokens.getOrNull(separator + 6) as? JsToken.Punctuation)?.value == ")"
+        require(hasExactImportMetaUrlBase) {
+            "Found an unreviewed new URL base loader shape"
+        }
         val firstArgumentTokens = tokens.subList(index + 3, separator)
         require(
             firstArgumentTokens.size == 1 &&
@@ -692,39 +741,46 @@ private class ModuleReferenceScanner(private val source: String) {
         reviewedLoaderContext = reviewedLoaderContext,
     )
 
-    private fun reviewedDynamicImportContext(index: Int): ReviewedLoaderContext? {
+    private fun reviewedDynamicImportContext(
+        index: Int,
+        specifier: String,
+    ): ReviewedLoaderContext? {
         val blockOpen = enclosingBlockOpen(index)
         if (blockOpen != null) {
             val blockPrefix = tokens.subList(blockOpen + 1, index)
             if (blockPrefix.matchesExactly(NODE_BLOCK_BODY_PREFIX)) {
                 if (
                     (
-                        matchesBefore(blockOpen, NODE_NAMED_IF_PREFIX) &&
+                        matchesBareIfBefore(blockOpen, NODE_NAMED_IF_PREFIX) &&
+                            isReviewedNamedGuardScope(blockOpen - NODE_NAMED_IF_PREFIX.size) &&
                             isReviewedNamedPredicateUse(
                                 NamedEnvironmentPredicate.Node,
                                 blockOpen,
                             )
                         ) ||
-                    matchesBefore(blockOpen, NODE_DIRECT_IF_PREFIX)
+                    (
+                        matchesBareIfBefore(blockOpen, NODE_DIRECT_IF_PREFIX) &&
+                            isModuleLevel(blockOpen - NODE_DIRECT_IF_PREFIX.size) &&
+                            hasOnlyReviewedRootProcessOccurrences()
+                        )
                 ) {
                     return ReviewedLoaderContext.NodeBlock
                 }
             }
             if (blockPrefix.matchesExactly(DENO_BLOCK_BODY_PREFIX) &&
-                matchesBefore(blockOpen, DENO_IF_PREFIX) &&
+                matchesBareIfBefore(blockOpen, DENO_IF_PREFIX) &&
+                isReviewedNamedGuardScope(blockOpen - DENO_IF_PREFIX.size) &&
                 isReviewedNamedPredicateUse(NamedEnvironmentPredicate.Deno, blockOpen)
             ) {
                 return ReviewedLoaderContext.DenoBlock
             }
             if (blockPrefix.matchesExactly(SKIKO_DEAD_BLOCK_BODY_PREFIX) &&
-                matchesBefore(blockOpen, SKIKO_DEAD_IF_PREFIX)
+                matchesBareIfBefore(blockOpen, SKIKO_DEAD_IF_PREFIX)
             ) {
                 return ReviewedLoaderContext.SkikoDeadBlock
             }
         }
-        return if (matchesBefore(index, NODE_TERNARY_PREFIX)) {
-            ReviewedLoaderContext.NodeTernary
-        } else if (matchesBefore(index, KOTLIN_IO_NODE_TERNARY_PREFIX)) {
+        return if (isReviewedKotlinIoImport(index, specifier)) {
             ReviewedLoaderContext.KotlinIoNodeTernary
         } else {
             null
@@ -752,14 +808,127 @@ private class ModuleReferenceScanner(private val source: String) {
         useIndex: Int,
     ): Boolean {
         val nodeDeclaration = uniqueCanonicalNodeDeclaration() ?: return false
-        if (!isUnchangedBinding("isNodeJs", nodeDeclaration + 1)) return false
-        if (nodeDeclaration >= useIndex || hasAmbiguousSlashBefore(useIndex)) return false
-        if (predicate == NamedEnvironmentPredicate.Node) return true
-
         val denoDeclaration = uniqueCanonicalDenoDeclaration() ?: return false
-        return denoDeclaration < useIndex &&
-            isUnchangedBinding("isDeno", denoDeclaration + 1)
+        val nodeGuardName = uniqueReviewedNamedGuardNameIndex(
+            NamedEnvironmentPredicate.Node,
+        ) ?: return false
+        val denoGuardName = uniqueReviewedNamedGuardNameIndex(
+            NamedEnvironmentPredicate.Deno,
+        ) ?: return false
+        val expectedGuardName = when (predicate) {
+            NamedEnvironmentPredicate.Node -> nodeGuardName
+            NamedEnvironmentPredicate.Deno -> denoGuardName
+        }
+        val prefixSize = when (predicate) {
+            NamedEnvironmentPredicate.Node -> NODE_NAMED_IF_PREFIX.size
+            NamedEnvironmentPredicate.Deno -> DENO_IF_PREFIX.size
+        }
+        val currentGuardName = useIndex - prefixSize + NAMED_IF_NAME_OFFSET
+        if (currentGuardName != expectedGuardName) return false
+        if (nodeDeclaration >= useIndex || denoDeclaration >= useIndex) return false
+        if (hasAmbiguousSlashBefore(useIndex)) return false
+        if (!hasOnlyReviewedPredicateOccurrences("isNodeJs", nodeDeclaration + 1, nodeGuardName)) {
+            return false
+        }
+        if (!hasOnlyReviewedPredicateOccurrences("isDeno", denoDeclaration + 1, denoGuardName)) {
+            return false
+        }
+        return hasOnlyReviewedNamedEnvironmentGlobals(nodeDeclaration, denoDeclaration)
     }
+
+    private fun uniqueReviewedNamedGuardNameIndex(
+        predicate: NamedEnvironmentPredicate,
+    ): Int? {
+        var match: Int? = null
+        for (index in tokens.indices) {
+            if (!isReviewedNamedGuardName(index, predicate)) continue
+            if (match != null) return null
+            match = index
+        }
+        return match
+    }
+
+    private fun isReviewedNamedGuardName(
+        nameIndex: Int,
+        predicate: NamedEnvironmentPredicate,
+    ): Boolean {
+        val predicateName = when (predicate) {
+            NamedEnvironmentPredicate.Node -> "isNodeJs"
+            NamedEnvironmentPredicate.Deno -> "isDeno"
+        }
+        if ((tokens.getOrNull(nameIndex) as? JsToken.Identifier)?.value != predicateName) {
+            return false
+        }
+        val ifPrefix = when (predicate) {
+            NamedEnvironmentPredicate.Node -> NODE_NAMED_IF_PREFIX
+            NamedEnvironmentPredicate.Deno -> DENO_IF_PREFIX
+        }
+        val bodyPrefix = when (predicate) {
+            NamedEnvironmentPredicate.Node -> NODE_BLOCK_BODY_PREFIX
+            NamedEnvironmentPredicate.Deno -> DENO_BLOCK_BODY_PREFIX
+        }
+        val specifier = when (predicate) {
+            NamedEnvironmentPredicate.Node -> "node:module"
+            NamedEnvironmentPredicate.Deno -> "https://deno.land/std/path/mod.ts"
+        }
+        val ifStart = nameIndex - NAMED_IF_NAME_OFFSET
+        val blockOpen = ifStart + ifPrefix.size
+        if (blockOpen >= tokens.size) return false
+        if (!matchesBareIfBefore(blockOpen, ifPrefix)) return false
+        if (!isReviewedNamedGuardScope(ifStart)) return false
+        if ((tokens.getOrNull(blockOpen) as? JsToken.Punctuation)?.value != "{") return false
+        if (!matchesAt(blockOpen + 1, bodyPrefix)) return false
+        val importIndex = blockOpen + 1 + bodyPrefix.size
+        return (tokens.getOrNull(importIndex) as? JsToken.Identifier)?.value == "import" &&
+            (tokens.getOrNull(importIndex + 1) as? JsToken.Punctuation)?.value == "(" &&
+            (tokens.getOrNull(importIndex + 2) as? JsToken.StringLiteral)?.value == specifier &&
+            (tokens.getOrNull(importIndex + 3) as? JsToken.Punctuation)?.value == ")"
+    }
+
+    private fun hasOnlyReviewedPredicateOccurrences(
+        name: String,
+        canonicalNameIndex: Int,
+        guardNameIndex: Int,
+    ): Boolean = tokens.indices.all { index ->
+        (tokens[index] as? JsToken.Identifier)?.value != name ||
+            index == canonicalNameIndex ||
+            index == guardNameIndex ||
+            isNegatedConjunctionRead(index)
+    }
+
+    private fun isNegatedConjunctionRead(index: Int): Boolean =
+        (tokens.getOrNull(index - 1) as? JsToken.Punctuation)?.value == "!" &&
+            (tokens.getOrNull(index + 1) as? JsToken.Punctuation)?.value == "&" &&
+            (tokens.getOrNull(index + 2) as? JsToken.Punctuation)?.value == "&"
+
+    private fun hasOnlyReviewedNamedEnvironmentGlobals(
+        nodeDeclaration: Int,
+        denoDeclaration: Int,
+    ): Boolean =
+        !hasEnvironmentNameString("process") &&
+            !hasEnvironmentNameString("Deno") &&
+            tokens.indices.all { index ->
+                when ((tokens[index] as? JsToken.Identifier)?.value) {
+                    "process" ->
+                        isIdentifierRoleInMatch(
+                            index,
+                            "process",
+                            nodeDeclaration,
+                            NODE_DECLARATION,
+                        )
+                    "Deno" ->
+                        isIdentifierRoleInMatch(index, "Deno", denoDeclaration, DENO_DECLARATION) ||
+                            isDenoReadFileSync(index)
+                    else -> true
+                }
+            }
+
+    private fun hasEnvironmentNameString(name: String): Boolean =
+        tokens.any { token -> (token as? JsToken.StringLiteral)?.value == name }
+
+    private fun isDenoReadFileSync(index: Int): Boolean =
+        (tokens.getOrNull(index + 1) as? JsToken.Punctuation)?.value == "." &&
+            (tokens.getOrNull(index + 2) as? JsToken.Identifier)?.value == "readFileSync"
 
     private fun uniqueCanonicalNodeDeclaration(): Int? =
         uniqueModuleLevelMatch { start ->
@@ -806,122 +975,189 @@ private class ModuleReferenceScanner(private val source: String) {
         return braceDepth == 0 && templateDepth == 0
     }
 
-    private fun isUnchangedBinding(
-        name: String,
-        canonicalNameIndex: Int,
-    ): Boolean = tokens.indices.none { index ->
-        index != canonicalNameIndex &&
-            (tokens[index] as? JsToken.Identifier)?.value == name &&
-            (
-                isBindingDeclaration(index) ||
-                    isFunctionParameter(index) ||
-                    isAssignmentOrUpdate(index)
-                )
+    private fun isReviewedNamedGuardScope(ifStart: Int): Boolean {
+        if (isModuleLevel(ifStart)) return true
+        val containingBlock = enclosingBlockOpen(ifStart) ?: return false
+        val tryIndex = containingBlock - 1
+        return isModuleLevel(tryIndex) &&
+            (tokens.getOrNull(tryIndex) as? JsToken.Identifier)?.value == "try" &&
+            !isMemberProperty(tryIndex)
     }
 
-    private fun isBindingDeclaration(index: Int): Boolean {
-        val previous = tokens.getOrNull(index - 1)
-        if (previous is JsToken.Identifier &&
-            previous.value in setOf("const", "let", "var", "function", "class", "import")
-        ) {
-            return true
+    private fun isReviewedKotlinIoImport(index: Int, specifier: String): Boolean {
+        if (publicName != KOTLIN_IO_IMPORT_OBJECT_PUBLIC_NAME) return false
+        val importOffset = KOTLIN_IO_IMPORT_OFFSET_BY_SPECIFIER[specifier] ?: return false
+        val jsCodeRange = uniqueRootJsCodeObjectRange() ?: return false
+        val groupStart = uniqueRootKotlinIoGroupStart(jsCodeRange) ?: return false
+        if (index != groupStart + importOffset) return false
+        return hasOnlyReviewedRootProcessOccurrences()
+    }
+
+    private fun uniqueRootKotlinIoGroupStart(jsCodeRange: IntRange): Int? {
+        var result: Int? = null
+        for (start in jsCodeRange) {
+            if (!matchesAt(start, KOTLIN_IO_JS_CODE_GROUP)) continue
+            if (start + KOTLIN_IO_JS_CODE_GROUP.size - 1 > jsCodeRange.last) continue
+            if (enclosingBlockOpen(start) != jsCodeRange.first - 1) continue
+            if (result != null) return null
+            result = start
         }
-        if (previous !is JsToken.Punctuation ||
-            previous.value !in setOf("{", "[", ":", ",")
-        ) {
+        return result
+    }
+
+    private fun hasOnlyReviewedRootProcessOccurrences(): Boolean {
+        if (hasEnvironmentNameString("process")) return false
+        val nodeDeclaration = uniqueCanonicalNodeDeclaration()
+        val jsCodeRange = uniqueRootJsCodeObjectRange()
+        if (jsCodeRange != null && !hasOnlyReviewedRootJsCodeInitializers(jsCodeRange)) {
             return false
         }
-        for (candidateIndex in index - 2 downTo maxOf(0, index - 64)) {
-            when (val candidate = tokens[candidateIndex]) {
-                is JsToken.Identifier ->
-                    if (candidate.value in setOf("const", "let", "var", "import")) return true
-
-                is JsToken.Punctuation ->
-                    if (candidate.value in setOf("=", ";", ")")) return false
-
-                is JsToken.TemplateBoundary -> return false
-                else -> Unit
+        return tokens.indices.all { index ->
+            if ((tokens[index] as? JsToken.Identifier)?.value != "process") {
+                return@all true
             }
+            if (nodeDeclaration != null &&
+                isIdentifierRoleInMatch(index, "process", nodeDeclaration, NODE_DECLARATION)
+            ) {
+                return@all true
+            }
+            if (isIdentifierRoleInAnyMatch(index, "process", NODE_DIRECT_IF_PREFIX)) {
+                return@all true
+            }
+            jsCodeRange != null && isReviewedJsCodeProcessOccurrence(index, jsCodeRange)
         }
-        return false
     }
 
-    private fun isFunctionParameter(index: Int): Boolean {
-        if (matchesAt(index + 1, listOf(punctuation("="), punctuation(">")))) {
-            return true
+    private fun hasOnlyReviewedRootJsCodeInitializers(jsCodeRange: IntRange): Boolean {
+        var cursor = jsCodeRange.first
+        while (cursor <= jsCodeRange.last) {
+            if (tokens.getOrNull(cursor) !is JsToken.StringLiteral) return false
+            if ((tokens.getOrNull(cursor + 1) as? JsToken.Punctuation)?.value != ":") {
+                return false
+            }
+            val reviewedEagerProperty = REVIEWED_EAGER_JS_CODE_PROPERTIES.firstOrNull { expected ->
+                matchesAt(cursor, expected)
+            }
+            if (reviewedEagerProperty != null) {
+                cursor += reviewedEagerProperty.size
+                continue
+            }
+            val valueStart = cursor + 2
+            if (!isDirectStoredArrow(valueStart)) return false
+            val separator = directPropertySeparator(valueStart, jsCodeRange)
+            cursor = if (separator == null) jsCodeRange.last + 1 else separator + 1
         }
-        val open = enclosingParenthesisOpen(index) ?: return false
-        val close = matchingParenthesisClose(open) ?: return false
-        val beforeOpen = tokens.getOrNull(open - 1)
-        val beforeBeforeOpen = tokens.getOrNull(open - 2)
-        if (beforeOpen is JsToken.Identifier &&
-            beforeOpen.value in setOf("function", "catch")
-        ) {
-            return true
-        }
-        if (beforeOpen is JsToken.Identifier &&
-            beforeBeforeOpen is JsToken.Identifier &&
-            beforeBeforeOpen.value == "function"
-        ) {
-            return true
-        }
-        if (matchesAt(close + 1, listOf(punctuation("="), punctuation(">")))) {
-            return true
-        }
-        val followsWithBody =
-            (tokens.getOrNull(close + 1) as? JsToken.Punctuation)?.value == "{"
-        val isControlCondition =
-            beforeOpen is JsToken.Identifier &&
-                beforeOpen.value in setOf("if", "for", "while", "switch", "with")
-        return followsWithBody && beforeOpen is JsToken.Identifier && !isControlCondition
+        return true
     }
 
-    private fun enclosingParenthesisOpen(index: Int): Int? {
-        var depth = 0
-        for (candidateIndex in index - 1 downTo 0) {
-            when (val candidate = tokens[candidateIndex]) {
-                is JsToken.TemplateBoundary -> if (candidate.opening) return null
-                is JsToken.Punctuation -> when (candidate.value) {
-                    ")" -> depth++
-                    "(" -> if (depth == 0) return candidateIndex else depth--
+    private fun isDirectStoredArrow(valueStart: Int): Boolean {
+        if ((tokens.getOrNull(valueStart) as? JsToken.Punctuation)?.value != "(") return false
+        val parametersClose = matchingPunctuationClose(valueStart, "(", ")") ?: return false
+        return (tokens.getOrNull(parametersClose + 1) as? JsToken.Punctuation)?.value == "=" &&
+            (tokens.getOrNull(parametersClose + 2) as? JsToken.Punctuation)?.value == ">"
+    }
+
+    private fun directPropertySeparator(
+        valueStart: Int,
+        jsCodeRange: IntRange,
+    ): Int? {
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        var templates = 0
+        for (index in valueStart..jsCodeRange.last) {
+            when (val token = tokens[index]) {
+                is JsToken.TemplateBoundary -> templates += if (token.opening) 1 else -1
+                is JsToken.Punctuation -> when (token.value) {
+                    "(" -> parentheses++
+                    ")" -> parentheses--
+                    "[" -> brackets++
+                    "]" -> brackets--
+                    "{" -> braces++
+                    "}" -> braces--
+                    "," -> if (
+                        parentheses == 0 && brackets == 0 && braces == 0 && templates == 0
+                    ) {
+                        return index
+                    }
                 }
-
                 else -> Unit
             }
         }
         return null
     }
 
-    private fun matchingParenthesisClose(open: Int): Int? {
+    private fun matchingPunctuationClose(
+        open: Int,
+        opening: String,
+        closing: String,
+    ): Int? {
         var depth = 0
-        for (candidateIndex in open + 1 until tokens.size) {
-            when (val candidate = tokens[candidateIndex]) {
-                is JsToken.TemplateBoundary -> if (!candidate.opening) return null
-                is JsToken.Punctuation -> when (candidate.value) {
-                    "(" -> depth++
-                    ")" -> if (depth == 0) return candidateIndex else depth--
-                }
+        for (index in open + 1 until tokens.size) {
+            val punctuation = tokens[index] as? JsToken.Punctuation ?: continue
+            when (punctuation.value) {
+                opening -> depth++
+                closing -> if (depth == 0) return index else depth--
+            }
+        }
+        return null
+    }
 
+    private fun isReviewedJsCodeProcessOccurrence(
+        index: Int,
+        jsCodeRange: IntRange,
+    ): Boolean = REVIEWED_JS_CODE_PROCESS_PROPERTIES.any { expected ->
+        expected.indices.any { offset ->
+            val start = index - offset
+            expected[offset] == identifier("process") &&
+                start in jsCodeRange &&
+                enclosingBlockOpen(start) == jsCodeRange.first - 1 &&
+                matchesAt(start, expected)
+        }
+    }
+
+    private fun uniqueRootJsCodeObjectRange(): IntRange? {
+        var result: IntRange? = null
+        for (start in tokens.indices) {
+            if (!isModuleLevel(start) || !matchesAt(start, JS_CODE_OBJECT_PREFIX)) continue
+            val open = start + JS_CODE_OBJECT_PREFIX.size - 1
+            val close = matchingBlockClose(open) ?: return null
+            if (result != null) return null
+            result = (open + 1)..<close
+        }
+        return result
+    }
+
+    private fun matchingBlockClose(open: Int): Int? {
+        var depth = 0
+        for (index in open + 1 until tokens.size) {
+            when (val token = tokens[index]) {
+                is JsToken.TemplateBoundary -> if (!token.opening) return null
+                is JsToken.Punctuation -> when (token.value) {
+                    "{" -> depth++
+                    "}" -> if (depth == 0) return index else depth--
+                }
                 else -> Unit
             }
         }
         return null
     }
 
-    private fun isAssignmentOrUpdate(index: Int): Boolean {
-        val next = (tokens.getOrNull(index + 1) as? JsToken.Punctuation)?.value
-        val nextTwo = (tokens.getOrNull(index + 2) as? JsToken.Punctuation)?.value
-        val nextThree = (tokens.getOrNull(index + 3) as? JsToken.Punctuation)?.value
-        if (next == "=" && nextTwo != "=") return true
-        if (next in setOf("+", "-") && nextTwo == next) return true
-        if (next in setOf("+", "-", "*", "/", "%", "&", "|", "^", "?") &&
-            (nextTwo == "=" || nextThree == "=")
-        ) {
-            return true
-        }
-        val previous = (tokens.getOrNull(index - 1) as? JsToken.Punctuation)?.value
-        val previousTwo = (tokens.getOrNull(index - 2) as? JsToken.Punctuation)?.value
-        return previous in setOf("+", "-") && previousTwo == previous
+    private fun isIdentifierRoleInAnyMatch(
+        index: Int,
+        name: String,
+        expected: List<JsTokenShape>,
+    ): Boolean = expected.indices.any { offset ->
+        expected[offset] == identifier(name) && matchesAt(index - offset, expected)
+    }
+
+    private fun isIdentifierRoleInMatch(
+        index: Int,
+        name: String,
+        matchStart: Int,
+        expected: List<JsTokenShape>,
+    ): Boolean = expected.indices.any { offset ->
+        expected[offset] == identifier(name) && index == matchStart + offset
     }
 
     private fun hasAmbiguousSlashBefore(useIndex: Int): Boolean =
@@ -929,12 +1165,27 @@ private class ModuleReferenceScanner(private val source: String) {
             token is JsToken.Punctuation && token.value == "/"
         }
 
+    private fun matchesBareIfBefore(
+        endExclusive: Int,
+        expected: List<JsTokenShape>,
+    ): Boolean {
+        if (!matchesBefore(endExclusive, expected)) return false
+        val ifIndex = endExclusive - expected.size
+        if (isMemberProperty(ifIndex)) return false
+        val previous = tokens.getOrNull(ifIndex - 1) as? JsToken.Identifier
+        return previous == null || previous.value == "else"
+    }
+
+    private fun isMemberProperty(identifierIndex: Int): Boolean =
+        (tokens.getOrNull(identifierIndex - 1) as? JsToken.Punctuation)?.value in
+            setOf(".", "#")
+
     private fun matchesBefore(
         endExclusive: Int,
         expected: List<JsTokenShape>,
     ): Boolean {
         val start = endExclusive - expected.size
-        if (start < 0) return false
+        if (start < 0 || endExclusive > tokens.size) return false
         return tokens.subList(start, endExclusive).matchesExactly(expected)
     }
 
@@ -947,6 +1198,22 @@ private class ModuleReferenceScanner(private val source: String) {
     }
 
     companion object {
+        private const val NAMED_IF_NAME_OFFSET = 2
+
+        private val KOTLIN_IO_PROPERTY_BY_SPECIFIER = mapOf(
+            "node:buffer" to "kotlinx.io.node.loadBuffer",
+            "node:os" to "kotlinx.io.node.loadOs",
+            "node:path" to "kotlinx.io.node.loadPath",
+            "node:fs" to "kotlinx.io.node.loadFs",
+        )
+
+        private val JS_CODE_OBJECT_PREFIX = listOf(
+            identifier("const"),
+            identifier("js_code"),
+            punctuation("="),
+            punctuation("{"),
+        )
+
         private val NODE_DECLARATION = listOf(
             identifier("const"),
             identifier("isNodeJs"),
@@ -1056,75 +1323,139 @@ private class ModuleReferenceScanner(private val source: String) {
             punctuation("="),
             identifier("await"),
         )
-        private val NODE_TERNARY_PREFIX = listOf(
-            identifier("globalThis"),
-            punctuation("."),
-            identifier("module"),
-            punctuation("="),
-            punctuation("("),
-            identifier("typeof"),
-            identifier("process"),
-            punctuation("!"),
-            punctuation("="),
-            punctuation("="),
-            stringLiteral("undefined"),
-            punctuation(")"),
-            punctuation("&"),
-            punctuation("&"),
-            punctuation("("),
-            identifier("process"),
-            punctuation("."),
-            identifier("release"),
-            punctuation("."),
-            identifier("name"),
-            punctuation("="),
-            punctuation("="),
-            punctuation("="),
-            stringLiteral("node"),
-            punctuation(")"),
-            punctuation("?"),
-            identifier("await"),
-        )
-        private val KOTLIN_IO_NODE_TERNARY_PREFIX = listOf(
-            punctuation("("),
-            punctuation("("),
-            identifier("module"),
-            punctuation(")"),
-            punctuation("="),
-            punctuation(">"),
-            punctuation("("),
-            punctuation(")"),
-            punctuation("="),
-            punctuation(">"),
-            identifier("module"),
-            punctuation(")"),
-            punctuation("("),
-            punctuation("("),
-            punctuation("("),
-            identifier("typeof"),
-            identifier("process"),
-            punctuation("!"),
-            punctuation("="),
-            punctuation("="),
-            stringLiteral("undefined"),
-            punctuation(")"),
-            punctuation("&"),
-            punctuation("&"),
-            punctuation("("),
-            identifier("process"),
-            punctuation("."),
-            identifier("release"),
-            punctuation("."),
-            identifier("name"),
-            punctuation("="),
-            punctuation("="),
-            punctuation("="),
-            stringLiteral("node"),
-            punctuation(")"),
-            punctuation(")"),
-            punctuation("?"),
-            identifier("await"),
-        )
+        private val KOTLIN_IO_JS_CODE_PROPERTIES =
+            KOTLIN_IO_PROPERTY_BY_SPECIFIER.map { (specifier, propertyName) ->
+                javascriptShape(
+                    """
+                    '$propertyName' :
+                        ((module) => () => module)(((typeof process !== 'undefined') &&
+                        (process.release.name === 'node')) ?
+                        await import('$specifier') : null),
+                    """.trimIndent(),
+                )
+            }
+        private val KOTLIN_IO_JS_CODE_GROUP = KOTLIN_IO_JS_CODE_PROPERTIES.flatten()
+        private val KOTLIN_IO_IMPORT_OFFSET_BY_SPECIFIER = buildMap {
+            var groupOffset = 0
+            KOTLIN_IO_PROPERTY_BY_SPECIFIER.keys.zip(KOTLIN_IO_JS_CODE_PROPERTIES)
+                .forEach { (specifier, propertyShape) ->
+                    val importOffset = propertyShape.indexOf(identifier("import"))
+                    require(importOffset >= 0) {
+                        "Reviewed Kotlin IO property does not contain its import token"
+                    }
+                    put(specifier, groupOffset + importOffset)
+                    groupOffset += propertyShape.size
+                }
+        }
+        private val REVIEWED_JS_CODE_PROCESS_PROPERTIES = listOf(
+            javascriptShape(
+                """
+                'kotlinx.coroutines.tryGetProcess' :
+                    () => (typeof(process) !== 'undefined' &&
+                    typeof(process.nextTick) === 'function') ? process : null,
+                """.trimIndent(),
+            ),
+            javascriptShape(
+                """
+                'kotlinx.coroutines.createScheduleMessagePoster' :
+                    (process) => () => Promise.resolve(0).then(process),
+                """.trimIndent(),
+            ),
+            javascriptShape(
+                """
+                'kotlinx.coroutines.subscribeToWindowMessages' : (window, process) => {
+                    const handler = (event) => {
+                        if (event.source == window && event.data == 'dispatchCoroutine') {
+                            event.stopPropagation();
+                            process();
+                        }
+                    }
+                    window.addEventListener('message', handler, true);
+                },
+                """.trimIndent(),
+            ),
+            javascriptShape(
+                """
+                'io.ktor.util.hasNodeApi' : () =>
+                    (typeof process !== 'undefined' &&
+                        process.versions != null &&
+                        process.versions.node != null) ||
+                    (typeof window !== 'undefined' &&
+                        typeof window.process !== 'undefined' &&
+                        window.process.versions != null &&
+                        window.process.versions.node != null),
+                """.trimIndent(),
+            ),
+            javascriptShape(
+                """
+                'io.ktor.util.logging.getKtorLogLevel' :
+                    () => process ? process.env.KTOR_LOG_LEVEL : null,
+                """.trimIndent(),
+            ),
+        ) + KOTLIN_IO_JS_CODE_PROPERTIES
+        private val REVIEWED_EAGER_JS_CODE_PROPERTIES = listOf(
+            javascriptShape(
+                """
+                'kotlin.wasm.internal.jsThrow' :
+                    wasmTag === wasmJsTag ? (e) => { throw e; } : () => {},
+                """.trimIndent(),
+            ),
+            javascriptShape(
+                """
+                'kotlin.wasm.internal.externrefHashCode' :
+                    (() => {
+                        const dataView = new DataView(new ArrayBuffer(8));
+                        function numberHashCode(obj) {
+                            if ((obj | 0) === obj) {
+                                return obj | 0;
+                            } else {
+                                dataView.setFloat64(0, obj, true);
+                                return (dataView.getInt32(0, true) * 31 | 0) +
+                                    dataView.getInt32(4, true) | 0;
+                            }
+                        }
+
+                        const hashCodes = new WeakMap();
+                        function getObjectHashCode(obj) {
+                            const res = hashCodes.get(obj);
+                            if (res === undefined) {
+                                const POW_2_32 = 4294967296;
+                                const hash = (Math.random() * POW_2_32) | 0;
+                                hashCodes.set(obj, hash);
+                                return hash;
+                            }
+                            return res;
+                        }
+
+                        function getStringHashCode(str) {
+                            var hash = 0;
+                            for (var i = 0; i < str.length; i++) {
+                                var code = str.charCodeAt(i);
+                                hash = (hash * 31 + code) | 0;
+                            }
+                            return hash;
+                        }
+
+                        return (obj) => {
+                            if (obj == null) {
+                                return 0;
+                            }
+                            switch (typeof obj) {
+                                case "object":
+                                case "function":
+                                    return getObjectHashCode(obj);
+                                case "number":
+                                    return numberHashCode(obj);
+                                case "boolean":
+                                    return obj ? 1231 : 1237;
+                                default:
+                                    return getStringHashCode(String(obj));
+                            }
+                        }
+                    })(),
+                """.trimIndent(),
+            ),
+        ) + KOTLIN_IO_JS_CODE_PROPERTIES
         private val SKIKO_DIRECTORY_URL_PREFIX = listOf(
             identifier("scriptDirectory"),
             punctuation("="),
@@ -1150,7 +1481,7 @@ private sealed interface JsToken {
 
     data class TemplateLiteral(override val start: Int) : JsToken
 
-    data class NumericLiteral(override val start: Int) : JsToken
+    data class NumericLiteral(val value: String, override val start: Int) : JsToken
 
     data class Punctuation(val value: String, override val start: Int) : JsToken
 
@@ -1168,6 +1499,8 @@ private sealed interface JsTokenShape {
     data class StringLiteral(override val value: String) : JsTokenShape
 
     data class Punctuation(override val value: String) : JsTokenShape
+
+    data class NumericLiteral(override val value: String) : JsTokenShape
 }
 
 private fun identifier(value: String): JsTokenShape = JsTokenShape.Identifier(value)
@@ -1175,6 +1508,19 @@ private fun identifier(value: String): JsTokenShape = JsTokenShape.Identifier(va
 private fun stringLiteral(value: String): JsTokenShape = JsTokenShape.StringLiteral(value)
 
 private fun punctuation(value: String): JsTokenShape = JsTokenShape.Punctuation(value)
+
+private fun javascriptShape(source: String): List<JsTokenShape> = tokenize(source).map { token ->
+    when (token) {
+        is JsToken.Identifier -> JsTokenShape.Identifier(token.value)
+        is JsToken.StringLiteral -> JsTokenShape.StringLiteral(token.value)
+        is JsToken.NumericLiteral -> JsTokenShape.NumericLiteral(token.value)
+        is JsToken.Punctuation -> JsTokenShape.Punctuation(token.value)
+        is JsToken.RegexLiteral,
+        is JsToken.TemplateLiteral,
+        is JsToken.TemplateBoundary,
+        -> error("Reviewed JavaScript shapes may only contain literal code tokens")
+    }
+}
 
 private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean =
     size == expected.size && indices.all { index ->
@@ -1189,7 +1535,8 @@ private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean 
 
             is JsToken.TemplateLiteral -> false
 
-            is JsToken.NumericLiteral -> false
+            is JsToken.NumericLiteral ->
+                expected[index] == JsTokenShape.NumericLiteral(token.value)
 
             is JsToken.Punctuation ->
                 expected[index] == JsTokenShape.Punctuation(token.value)
@@ -1280,7 +1627,13 @@ private class JsTokenizer(private val source: String) {
 
     private fun scanLineComment() {
         index += 2
-        while (index < source.length && source[index] != '\n') index++
+        while (index < source.length && source[index] !in JAVASCRIPT_LINE_TERMINATORS) index++
+        if (index >= source.length) return
+        if (source[index] == '\r' && source.getOrNull(index + 1) == '\n') {
+            index += 2
+        } else {
+            index++
+        }
     }
 
     private fun requireCommentOpenerIsNotEscaped() {
@@ -1574,6 +1927,7 @@ private class JsTokenizer(private val source: String) {
         val start = index
         index++
         while (index < source.length &&
+            source[index].code <= ASCII_MAX_CODE_POINT &&
             (source[index].isLetterOrDigit() || source[index] == '_' || source[index] == '$')
         ) {
             index++
@@ -1599,7 +1953,7 @@ private class JsTokenizer(private val source: String) {
             }
         }
         if (source.getOrNull(index) == 'n') index++
-        tokens += JsToken.NumericLiteral(start)
+        tokens += JsToken.NumericLiteral(source.substring(start, index), start)
     }
 
     private companion object {
