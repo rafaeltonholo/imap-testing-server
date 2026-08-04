@@ -7,6 +7,16 @@ dependencies:
 
 settings:
   kotlin:
-    version: 2.3.21
+    version: 2.4.10
     serialization:
       format: json
+      version: 1.11.0
+  jvm:
+    test:
+      junitPlatformVersion: 6.1.2
+
+test-dependencies@jvm:
+  - bom: org.junit:junit-bom:6.1.2
+  - org.junit.jupiter:junit-jupiter-api
+  - org.junit.jupiter:junit-jupiter-engine: runtime-only
+  - org.junit.platform:junit-platform-launcher: runtime-only

@@ -2,14 +2,17 @@ product: jvm/app
 
 settings:
   kotlin:
-    version: 2.3.21
+    version: 2.4.10
     serialization:
       format: json
+      version: 1.11.0
   ktor:
     enabled: true
-    version: 3.4.3
+    version: 3.5.2
   jvm:
     mainClass: mail.sandbox.dashboard.server.ApplicationKt
+    test:
+      junitPlatformVersion: 6.1.2
 
 dependencies:
   - ../dashboard-contract
@@ -19,10 +22,14 @@ dependencies:
   - $ktor.client.core
   - $ktor.client.cio
   - $kotlin.serialization.json
-  - org.jetbrains.skiko:skiko-js-wasm-runtime:0.9.37.4
+  - org.jetbrains.skiko:skiko-js-wasm-runtime:0.144.6
   - org.webjars.npm:js-joda__core:3.2.0
-  - ch.qos.logback:logback-classic:1.5.18
+  - ch.qos.logback:logback-classic:1.6.1
 
 test-dependencies:
   - $ktor.server.testHost
   - org.seleniumhq.selenium:selenium-java:4.46.0
+  - bom: org.junit:junit-bom:6.1.2
+  - org.junit.jupiter:junit-jupiter-api
+  - org.junit.jupiter:junit-jupiter-engine: runtime-only
+  - org.junit.platform:junit-platform-launcher: runtime-only
