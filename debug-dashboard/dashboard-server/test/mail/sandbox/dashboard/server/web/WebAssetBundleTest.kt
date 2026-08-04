@@ -231,7 +231,30 @@ class WebAssetBundleTest {
             "else property" to "obj.else",
             "do property" to "obj.do",
             "optional return property" to "obj?.return",
-            "bare contextual of identifier" to "of",
+        )
+
+        expressions.forEach { (label, expression) ->
+            val importSpecifier = "evil-${label.replace(" ", "-")}"
+            val source = "$expression / import('$importSpecifier') / 2"
+            val references = scanModuleReferences(source)
+
+            assertEquals(1, references.size, label)
+            assertTrue(references.single().toString().contains(importSpecifier), label)
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun discoversAndRejectsDynamicImportsAfterDivisionSafeClosingParentheses() {
+        val expressions = mapOf(
+            "grouped expression" to "(value)",
+            "ordinary call" to "compute(value)",
+            "keyword-named member call" to "obj.if(true)",
+            "optional keyword-named member call" to "obj?.while(true)",
         )
 
         expressions.forEach { (label, expression) ->
@@ -302,9 +325,71 @@ class WebAssetBundleTest {
                 scanModuleReferences(source)
             }
             assertTrue(
-                failure.message.orEmpty().contains("escaped slash"),
+                failure.message.orEmpty().let { message ->
+                    message.contains("Unreviewed slash context") || message.contains("escaped slash")
+                },
                 "$label produced: ${failure.message}",
             )
+        }
+    }
+
+    @Test
+    fun rejectsUnsupportedRegexesBeforeTokenizingTheirContents() {
+        val sources = mapOf(
+            "block marker in class" to ";/[/*]x/; import('evil-block'); /*close*/",
+            "line marker in class" to ";/[//]/; import('evil-line')",
+            "quote in class" to ";/[']/; import('evil-single'); // '",
+            "plain unsupported regex" to ";/plain/; import('evil-plain')",
+        )
+
+        sources.forEach { (label, source) ->
+            val failure = assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
+            assertTrue(
+                failure.message.orEmpty().contains("Unreviewed slash context"),
+                "$label produced: ${failure.message}",
+            )
+        }
+    }
+
+    @Test
+    fun rejectsRegexesAfterAmbiguousKeywordContexts() {
+        val sources = mapOf(
+            "return" to "function f() { return /plain/ }",
+            "await" to "await /plain/",
+            "yield" to "function* f() { yield /plain/ }",
+            "of" to "for (x of /plain/) {}",
+            "return import-shaped regex" to "return / import('evil-return') / 2",
+            "await import-shaped regex" to "await / import('evil-await') / 2",
+            "bare of import-shaped regex" to "of / import('evil') / 2",
+            "of import-shaped regex" to "for (x of / import('evil-of') / 2) {}",
+            "in" to "x in /plain/",
+            "instanceof" to "x instanceof /plain/",
+            "default" to "export default /plain/",
+            "extends" to "class X extends /plain/ {}",
+        )
+
+        sources.forEach { (label, source) ->
+            assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsRegexesAfterControlHeadersAndBlocks() {
+        val sources = mapOf(
+            "control header" to
+                "if (true) /[/*]x/.test('x'); import('evil-header'); /*close*/",
+            "statement block" to
+                "if (false) {} /[/*]x/.test('x'); import('evil-block'); /*close*/",
+        )
+
+        sources.forEach { (label, source) ->
+            assertFailsWith<IllegalArgumentException>(label) {
+                scanModuleReferences(source)
+            }
         }
     }
 

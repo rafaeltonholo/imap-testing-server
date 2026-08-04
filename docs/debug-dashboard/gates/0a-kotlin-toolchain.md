@@ -778,22 +778,33 @@ Final correction verification:
 
 #### 2026-08-04 UTC: expression-context hardening
 
-A second adversarial review supersedes the lexer description above. Keyword
-text and a broad punctuation set are no longer used to guess whether `/`
-opens a regex. The reviewed production closure contains exactly seven regex
-literals (five in Skiko, one in `dashboard-web.mjs`, and one in JS-Joda), and
-every one begins after either `(` or `=`. Those are now the only two accepted
-regex-prefix contexts. New generated regex shapes therefore require explicit
-review instead of extending a fragile expression heuristic.
+A second adversarial review supersedes both the lexer description and the PASS
+statement above. Slash handling is now an explicit fail-closed classification
+boundary. Raw comments are recognized first (with escaped opener lookalikes
+rejected); a regex is accepted only after `(` or `=`, the only prefixes used by
+the seven regex literals in the reviewed production closure; and division is
+accepted only after a proven expression-ending token. Every other slash
+context throws before the scanner can mis-tokenize regex contents as comments,
+strings, or executable code.
 
-Node `v24.4.0` module parsing confirmed the regression probes are valid
-JavaScript. The focused scanner tests require discovery and loader rejection
-after postfix updates; dot, optional-chain, and private keyword-named members;
-bare contextual `of`; and completed plain or substituted template literals.
-Completed templates now emit an opaque expression-ending token. Unsupported
-regex shapes containing an escaped slash immediately before a raw `/*` or
-`//` comment opener fail closed, preventing either comment form from hiding a
-later executable import. The real Skiko basename regex and the complete
+The expression-ending set is intentionally narrow: ordinary identifiers and
+keyword-named member properties, opaque string/regex/template/numeric
+literals, `]`, reviewed postfix `++`/`--`, and `)` whose matching `(` does not
+open a bare `if`, `for`, `while`, `switch`, `with`, or `catch` header. Closing
+`}` is never accepted as proof of division. Grouped expressions, ordinary
+calls, optional member calls, and keyword-named member calls remain supported.
+Completed templates and numeric literals now emit opaque tokens so their
+contents cannot influence slash classification.
+
+The focused regressions cover executable imports after postfix updates; dot,
+optional-chain, and private keyword-named members; grouped/call expressions;
+and completed plain or substituted templates. Bare `return`, `await`, `of`,
+and the other ambiguous keyword contexts fail closed, including the exact
+import-shaped probes. Parser-valid regex probes after an `if` header and a
+statement block also fail closed. Regex character classes containing `/*`,
+`//`, or quotes, plus escaped-slash comment decoys, are rejected before their
+contents can hide a later import. Node `v24.4.0` module parsing was used for
+the parser-valid bypass probes. The real Skiko basename regex and complete
 production bundle remain accepted.
 
 The exact `find` and `rg` closure commands and four-file/edge results in the
@@ -802,8 +813,8 @@ preceding correction were rerun unchanged after this hardening. Final results:
 | Command | Result |
 | --- | --- |
 | `./kotlin build --module dashboard-web` | PASS; exact reviewed four-file closure |
-| focused `WebAssetBundleTest` | PASS; 26/26 |
-| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 30/30 |
-| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 12.749 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
+| focused `WebAssetBundleTest` | PASS; 30/30 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 34/34 |
+| production `KotlinToolchainBrowserGateTest` | PASS; 1/1 in 12.436 s, Chrome `150.0.7871.187`, ChromeDriver `150.0.7871.124` |
 
 **Gate 0A latest-stack expression-context correction: PASS. No stop condition remains.**

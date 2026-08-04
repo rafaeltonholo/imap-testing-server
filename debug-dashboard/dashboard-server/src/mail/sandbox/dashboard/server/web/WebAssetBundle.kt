@@ -1150,6 +1150,8 @@ private sealed interface JsToken {
 
     data class TemplateLiteral(override val start: Int) : JsToken
 
+    data class NumericLiteral(override val start: Int) : JsToken
+
     data class Punctuation(val value: String, override val start: Int) : JsToken
 
     data class TemplateBoundary(
@@ -1186,6 +1188,8 @@ private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean 
             is JsToken.RegexLiteral -> false
 
             is JsToken.TemplateLiteral -> false
+
+            is JsToken.NumericLiteral -> false
 
             is JsToken.Punctuation ->
                 expected[index] == JsTokenShape.Punctuation(token.value)
@@ -1226,6 +1230,12 @@ private class JsTokenizer(private val source: String) {
                         "Unreviewed slash syntax inside JavaScript template substitution",
                     )
 
+                character == '/' -> {
+                    require(canEmitDivisionOperator()) { "Unreviewed slash context" }
+                    tokens += JsToken.Punctuation(character.toString(), index)
+                    index++
+                }
+
                 character == '\'' || character == '"' -> scanString()
                 character == '`' -> scanTemplate()
                 character == '{' -> {
@@ -1248,6 +1258,8 @@ private class JsTokenizer(private val source: String) {
 
                 character.isLetter() || character == '_' || character == '$' ->
                     scanIdentifier()
+
+                character.isDigit() -> scanNumericLiteral()
 
                 else -> {
                     tokens += JsToken.Punctuation(character.toString(), index)
@@ -1280,6 +1292,69 @@ private class JsTokenizer(private val source: String) {
     private fun canStartRegexLiteral(): Boolean {
         val previous = tokens.lastOrNull() as? JsToken.Punctuation ?: return false
         return previous.value in REVIEWED_REGEX_PREFIXES
+    }
+
+    private fun canEmitDivisionOperator(): Boolean {
+        val previousIndex = tokens.lastIndex
+        val previous = tokens.getOrNull(previousIndex) ?: return false
+        if (tokenEndsExpression(previous, previousIndex)) return true
+        val operator = previous as? JsToken.Punctuation ?: return false
+        val repeated = tokens.getOrNull(previousIndex - 1) as? JsToken.Punctuation ?: return false
+        val operandIndex = previousIndex - 2
+        val operand = tokens.getOrNull(operandIndex) ?: return false
+        return operator.value in setOf("+", "-") &&
+            operator.value == repeated.value &&
+            tokenEndsExpression(operand, operandIndex)
+    }
+
+    private fun tokenEndsExpression(token: JsToken, tokenIndex: Int): Boolean = when (token) {
+        is JsToken.Identifier ->
+            isMemberProperty(tokenIndex) || token.value !in AMBIGUOUS_SLASH_IDENTIFIERS
+
+        is JsToken.StringLiteral,
+        is JsToken.RegexLiteral,
+        is JsToken.TemplateLiteral,
+        is JsToken.NumericLiteral,
+        -> true
+
+        is JsToken.Punctuation -> when (token.value) {
+            "]" -> true
+            ")" -> closesDivisionSafeParenthesizedExpression(tokenIndex)
+            else -> false
+        }
+        is JsToken.TemplateBoundary -> false
+    }
+
+    private fun closesDivisionSafeParenthesizedExpression(closeIndex: Int): Boolean {
+        var nestedParentheses = 0
+        for (candidateIndex in closeIndex - 1 downTo 0) {
+            val punctuation = tokens[candidateIndex] as? JsToken.Punctuation ?: continue
+            when (punctuation.value) {
+                ")" -> nestedParentheses++
+                "(" -> if (nestedParentheses > 0) {
+                    nestedParentheses--
+                } else {
+                    return !isControlHeaderOpeningParenthesis(candidateIndex)
+                }
+            }
+        }
+        return false
+    }
+
+    private fun isControlHeaderOpeningParenthesis(openIndex: Int): Boolean {
+        val precedingIndex = openIndex - 1
+        val preceding = tokens.getOrNull(precedingIndex) as? JsToken.Identifier ?: return false
+        if (isMemberProperty(precedingIndex)) return false
+        if (preceding.value in CONTROL_HEADER_KEYWORDS) return true
+        return preceding.value == "await" &&
+            (tokens.getOrNull(precedingIndex - 1) as? JsToken.Identifier)?.value == "for"
+    }
+
+    private fun isMemberProperty(identifierIndex: Int): Boolean {
+        val preceding = tokens.getOrNull(identifierIndex - 1) as? JsToken.Punctuation
+        val beforePreceding = tokens.getOrNull(identifierIndex - 2) as? JsToken.Punctuation
+        return preceding?.value == "." ||
+            preceding?.value == "#" && beforePreceding?.value == "."
     }
 
     private fun scanRegexLiteral() {
@@ -1384,7 +1459,36 @@ private class JsTokenizer(private val source: String) {
         tokens += JsToken.Identifier(source.substring(start, index), start)
     }
 
+    private fun scanNumericLiteral() {
+        val start = index
+        if (source[index] == '0' && source.getOrNull(index + 1)?.lowercaseChar() in setOf('x', 'b', 'o')) {
+            index += 2
+            while (source.getOrNull(index)?.let { it.isLetterOrDigit() || it == '_' } == true) index++
+        } else {
+            while (source.getOrNull(index)?.let { it.isDigit() || it == '_' } == true) index++
+            if (source.getOrNull(index) == '.') {
+                index++
+                while (source.getOrNull(index)?.let { it.isDigit() || it == '_' } == true) index++
+            }
+            if (source.getOrNull(index)?.lowercaseChar() == 'e') {
+                index++
+                if (source.getOrNull(index) in setOf('+', '-')) index++
+                while (source.getOrNull(index)?.let { it.isDigit() || it == '_' } == true) index++
+            }
+        }
+        if (source.getOrNull(index) == 'n') index++
+        tokens += JsToken.NumericLiteral(start)
+    }
+
     private companion object {
         val REVIEWED_REGEX_PREFIXES = setOf("(", "=")
+        val CONTROL_HEADER_KEYWORDS = setOf("if", "for", "while", "switch", "with", "catch")
+        val AMBIGUOUS_SLASH_IDENTIFIERS = setOf(
+            "await", "break", "case", "catch", "class", "const", "continue", "debugger",
+            "default", "delete", "do", "else", "export", "extends", "finally", "for",
+            "function", "if", "import", "in", "instanceof", "let", "new", "of", "return",
+            "static", "super", "switch", "throw", "try", "typeof", "var", "void", "while",
+            "with", "yield",
+        )
     }
 }
