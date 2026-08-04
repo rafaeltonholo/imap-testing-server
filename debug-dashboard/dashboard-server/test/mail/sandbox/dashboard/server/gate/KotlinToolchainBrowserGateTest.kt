@@ -2,6 +2,7 @@ package mail.sandbox.dashboard.server.gate
 
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import java.lang.reflect.Proxy
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import mail.sandbox.dashboard.server.module
@@ -21,6 +23,7 @@ import org.openqa.selenium.By
 import org.openqa.selenium.Keys
 import org.openqa.selenium.OutputType
 import org.openqa.selenium.SearchContext
+import org.openqa.selenium.NoSuchShadowRootException
 import org.openqa.selenium.TimeoutException
 import org.openqa.selenium.WebDriver
 import org.openqa.selenium.WebElement
@@ -57,6 +60,101 @@ class BrowserGateCleanupTest {
 
         assertEquals("shutdown failed", failure.message)
         assertEquals(listOf("quit", "stop", "restore"), calls)
+    }
+}
+
+class BrowserHostResolverTest {
+    @Test
+    fun resolvesTheCompose111NestedShadowHostShape() {
+        val nestedShadow = searchContext()
+        val shadowContainer = webElement(
+            style = "position: relative;",
+            shadow = nestedShadow,
+        )
+        val interopContainer = webElement(
+            style = "position: absolute; top: 0px; left: 0px;",
+        )
+        val positioningContainer = webElement(
+            directChildren = listOf(shadowContainer, interopContainer),
+            style = "position: relative;",
+        )
+        val dashboardRoot = webElement(directChildren = listOf(positioningContainer))
+
+        assertSame(shadowContainer, resolveDashboardShadowHost(dashboardRoot))
+        assertSame(nestedShadow, resolveDashboardHost(dashboardRoot))
+    }
+
+    @Test
+    fun rejectsAnUnsupportedLightDomHostShape() {
+        val dashboardRoot = webElement(
+            directChildren = listOf(
+                webElement(
+                    directChildren = listOf(
+                        webElement(style = "position: relative;"),
+                        webElement(style = "position: absolute; top: 0px; left: 0px;"),
+                    ),
+                    style = "position: relative;",
+                ),
+            ),
+        )
+
+        assertFailsWith<NoSuchShadowRootException> {
+            resolveDashboardHost(dashboardRoot)
+        }
+    }
+
+    @Test
+    fun rejectsLightDomHostWithUnexpectedContainerCardinality() {
+        val dashboardRoot = webElement(
+            directChildren = listOf(
+                webElement(style = "position: relative;"),
+                webElement(style = "position: relative;"),
+            ),
+        )
+
+        val failure = assertFailsWith<NoSuchShadowRootException> {
+            resolveDashboardHost(dashboardRoot)
+        }
+
+        assertTrue(
+            failure.message.orEmpty().startsWith(
+                "Dashboard host is not the reviewed Compose 1.11.1 nested Shadow DOM shape: " +
+                    "root direct div count=2",
+            ),
+        )
+    }
+
+    @Test
+    fun rejectsReorderedAndWronglyStyledComposeContainers() {
+        val nestedShadow = searchContext()
+        val reordered = dashboardRootWith(
+            firstLayer = webElement(style = "position: absolute; top: 0px; left: 0px;"),
+            secondLayer = webElement(style = "position: relative;", shadow = nestedShadow),
+        )
+        val wronglyStyled = dashboardRootWith(
+            firstLayer = webElement(style = "display: contents;", shadow = nestedShadow),
+            secondLayer = webElement(style = "position: absolute; top: 0px; left: 0px;"),
+        )
+
+        listOf(reordered, wronglyStyled).forEach { dashboardRoot ->
+            assertFailsWith<NoSuchShadowRootException> {
+                resolveDashboardHost(dashboardRoot)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsTheHistoricalRootShadowHostTopology() {
+        assertFailsWith<NoSuchShadowRootException> {
+            resolveDashboardHost(webElement(shadow = searchContext()))
+        }
+    }
+
+    @Test
+    fun treatsAnEmptyDashboardRootAsNotReadyForTheBrowserWait() {
+        assertFailsWith<NoSuchShadowRootException> {
+            resolveDashboardHost(webElement())
+        }
     }
 }
 
@@ -149,11 +247,18 @@ class KotlinToolchainBrowserGateTest {
 
             focusIncrementProofWithTab(driver)
             waitForSemanticText(wait, "Keyboard focus: increment proof")
+            val dashboardRoot = driver.findElement(By.id("dashboard-root"))
+            val shadowHost = resolveDashboardShadowHost(dashboardRoot)
             val activeElement = driver.switchTo().activeElement()
-            assertEquals("main", activeElement.tagName.lowercase())
-            assertEquals("dashboard-root", activeElement.getDomAttribute("id"))
-            assertEquals("solid", activeElement.getCssValue("outline-style"))
-            assertEquals("3px", activeElement.getCssValue("outline-width"))
+            assertEquals(shadowHost, activeElement)
+            assertEquals("div", activeElement.tagName.lowercase())
+            val deepActiveElement = shadowHost.shadowRoot.findElement(By.cssSelector("canvas:focus"))
+            assertEquals("canvas", deepActiveElement.tagName.lowercase())
+            assertTrue(deepActiveElement.isDisplayed)
+            assertEquals("main", dashboardRoot.tagName.lowercase())
+            assertEquals("dashboard-root", dashboardRoot.getDomAttribute("id"))
+            assertEquals("solid", dashboardRoot.getCssValue("outline-style"))
+            assertEquals("3px", dashboardRoot.getCssValue("outline-width"))
 
             Actions(driver).sendKeys(Keys.ENTER).perform()
             waitForSemanticText(wait, "Activation count: 1")
@@ -231,7 +336,7 @@ class KotlinToolchainBrowserGateTest {
         dashboardShadow(driver).findElements(By.cssSelector("#cmp_a11y_root *"))
 
     private fun dashboardShadow(driver: WebDriver): SearchContext =
-        driver.findElement(By.id("dashboard-root")).shadowRoot
+        resolveDashboardHost(driver.findElement(By.id("dashboard-root")))
 
     private fun clickComposeControl(
         driver: ChromeDriver,
@@ -316,6 +421,39 @@ class KotlinToolchainBrowserGateTest {
     }
 }
 
+internal fun resolveDashboardHost(root: WebElement): SearchContext =
+    resolveDashboardShadowHost(root).shadowRoot
+
+internal fun resolveDashboardShadowHost(root: WebElement): WebElement {
+    val rootContainers = root.findElements(By.cssSelector(":scope > div"))
+    if (rootContainers.isEmpty()) {
+        throw NoSuchShadowRootException("Dashboard root is not ready: root direct div count=0")
+    }
+    val positioningContainer = rootContainers.singleOrNull()
+    val composeLayers = positioningContainer?.findElements(By.cssSelector(":scope > div"))
+    val shadowContainer = composeLayers?.getOrNull(0)
+    val interopContainer = composeLayers?.getOrNull(1)
+    return if (
+        positioningContainer != null &&
+        positioningContainer.tagName.equals("div", ignoreCase = true) &&
+        positioningContainer.getDomAttribute("style") == "position: relative;" &&
+        composeLayers?.size == 2 &&
+        shadowContainer != null &&
+        shadowContainer.tagName.equals("div", ignoreCase = true) &&
+        shadowContainer.getDomAttribute("style") == "position: relative;" &&
+        interopContainer != null &&
+        interopContainer.tagName.equals("div", ignoreCase = true) &&
+        interopContainer.getDomAttribute("style") == "position: absolute; top: 0px; left: 0px;"
+    ) {
+        shadowContainer
+    } else {
+        throw NoSuchShadowRootException(
+            "Dashboard host is not the reviewed Compose 1.11.1 nested Shadow DOM shape: " +
+                "root direct div count=${rootContainers.size}",
+        )
+    }
+}
+
 private fun finalizeBrowserGate(
     quitDriver: () -> Unit,
     stopServer: () -> Unit,
@@ -328,6 +466,50 @@ private fun finalizeBrowserGate(
         restoreWorkingDirectory()
     }
 }
+
+private fun searchContext(): SearchContext = Proxy.newProxyInstance(
+    SearchContext::class.java.classLoader,
+    arrayOf(SearchContext::class.java),
+) { _, method, _ ->
+    error("Unexpected SearchContext invocation: ${method.name}")
+} as SearchContext
+
+private fun webElement(
+    shadow: SearchContext? = null,
+    directChildren: List<WebElement> = emptyList(),
+    style: String? = null,
+): WebElement = Proxy.newProxyInstance(
+    WebElement::class.java.classLoader,
+    arrayOf(WebElement::class.java),
+) { proxy, method, arguments ->
+    when (method.name) {
+        "getShadowRoot" -> shadow ?: throw NoSuchShadowRootException("no test shadow root")
+        "findElements" -> {
+            val selector = arguments?.singleOrNull()?.toString()
+            check(selector == "By.cssSelector: :scope > div") { "Unexpected selector: $selector" }
+            directChildren
+        }
+
+        "getTagName" -> "div"
+        "getDomAttribute" -> if (arguments?.singleOrNull() == "style") style else null
+        "equals" -> proxy === arguments?.singleOrNull()
+        "hashCode" -> System.identityHashCode(proxy)
+        "toString" -> "test WebElement"
+        else -> error("Unexpected WebElement invocation: ${method.name}")
+    }
+} as WebElement
+
+private fun dashboardRootWith(
+    firstLayer: WebElement,
+    secondLayer: WebElement,
+): WebElement = webElement(
+    directChildren = listOf(
+        webElement(
+            directChildren = listOf(firstLayer, secondLayer),
+            style = "position: relative;",
+        ),
+    ),
+)
 
 private data class ResponseObservation(
     val url: String,

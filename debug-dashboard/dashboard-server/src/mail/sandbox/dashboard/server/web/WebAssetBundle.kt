@@ -51,9 +51,9 @@ class WebAssetBundle private constructor(
         private const val GATE_MARKER_SHA256 =
             "7b0f843ebd49d2709bcd8e3d1021db98e68413823647895d8377a6657f5e6960"
         private const val SKIKO_MJS_SHA256 =
-            "5dc3302763d61014d4a3277727f6e1af041741ae1f0efcc2acc21f2924cad99e"
+            "7fa5652ceb6343affed0360d2a8e5e35dbce1dff6192b2268c7519861af2dff4"
         private const val SKIKO_WASM_SHA256 =
-            "69afd1fba0567fc79515d97bac5c0670cfeb180284823f986199637f154a9bbe"
+            "46caff5f783599bd1c5d3e5e87959d7cb5102c515aac671c9280664368e71dab"
         private const val JODA_SHA256 =
             "a716a37f4c3bb47f8795688e1cd6451130a08d825d8a6df664ef72b349ec445b"
 
@@ -391,17 +391,27 @@ class WebAssetBundle private constructor(
             "module" ->
                 reference.reviewedLoaderContext == ReviewedLoaderContext.SkikoDeadBlock
 
+            in KOTLIN_IO_NODE_DYNAMIC_IMPORTS ->
+                reference.reviewedLoaderContext == ReviewedLoaderContext.KotlinIoNodeTernary
+
             else -> false
         }
 
         private fun assetRoute(publicName: String): String = "/assets/$publicName"
 
         companion object {
+            private val KOTLIN_IO_NODE_DYNAMIC_IMPORTS = setOf(
+                "node:buffer",
+                "node:os",
+                "node:path",
+                "node:fs",
+            )
+
             private val REVIEWED_DEAD_DYNAMIC_IMPORTS = setOf(
                 "node:module",
                 "https://deno.land/std/path/mod.ts",
                 "module",
-            )
+            ) + KOTLIN_IO_NODE_DYNAMIC_IMPORTS
         }
     }
 }
@@ -411,13 +421,13 @@ internal fun productionWebRuntimeResources(): List<PinnedClasspathAsset> = listO
         publicFileName = "skiko.mjs",
         classpathResourceName = "skiko.mjs",
         expectedSha256 =
-            "5dc3302763d61014d4a3277727f6e1af041741ae1f0efcc2acc21f2924cad99e",
+            "7fa5652ceb6343affed0360d2a8e5e35dbce1dff6192b2268c7519861af2dff4",
     ),
     PinnedClasspathAsset(
         publicFileName = "skiko.wasm",
         classpathResourceName = "skiko.wasm",
         expectedSha256 =
-            "69afd1fba0567fc79515d97bac5c0670cfeb180284823f986199637f154a9bbe",
+            "46caff5f783599bd1c5d3e5e87959d7cb5102c515aac671c9280664368e71dab",
     ),
     PinnedClasspathAsset(
         publicFileName = "js-joda.esm.js",
@@ -533,6 +543,7 @@ private data class ModuleReference(
 private enum class ReviewedLoaderContext {
     NodeBlock,
     NodeTernary,
+    KotlinIoNodeTernary,
     DenoBlock,
     SkikoDeadBlock,
     SkikoDirectoryUrl,
@@ -713,6 +724,8 @@ private class ModuleReferenceScanner(private val source: String) {
         }
         return if (matchesBefore(index, NODE_TERNARY_PREFIX)) {
             ReviewedLoaderContext.NodeTernary
+        } else if (matchesBefore(index, KOTLIN_IO_NODE_TERNARY_PREFIX)) {
+            ReviewedLoaderContext.KotlinIoNodeTernary
         } else {
             null
         }
@@ -1039,8 +1052,6 @@ private class ModuleReferenceScanner(private val source: String) {
             identifier("const"),
             punctuation("{"),
             identifier("createRequire"),
-            punctuation(":"),
-            identifier("createRequire"),
             punctuation("}"),
             punctuation("="),
             identifier("await"),
@@ -1074,6 +1085,46 @@ private class ModuleReferenceScanner(private val source: String) {
             punctuation("?"),
             identifier("await"),
         )
+        private val KOTLIN_IO_NODE_TERNARY_PREFIX = listOf(
+            punctuation("("),
+            punctuation("("),
+            identifier("module"),
+            punctuation(")"),
+            punctuation("="),
+            punctuation(">"),
+            punctuation("("),
+            punctuation(")"),
+            punctuation("="),
+            punctuation(">"),
+            identifier("module"),
+            punctuation(")"),
+            punctuation("("),
+            punctuation("("),
+            punctuation("("),
+            identifier("typeof"),
+            identifier("process"),
+            punctuation("!"),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("undefined"),
+            punctuation(")"),
+            punctuation("&"),
+            punctuation("&"),
+            punctuation("("),
+            identifier("process"),
+            punctuation("."),
+            identifier("release"),
+            punctuation("."),
+            identifier("name"),
+            punctuation("="),
+            punctuation("="),
+            punctuation("="),
+            stringLiteral("node"),
+            punctuation(")"),
+            punctuation(")"),
+            punctuation("?"),
+            identifier("await"),
+        )
         private val SKIKO_DIRECTORY_URL_PREFIX = listOf(
             identifier("scriptDirectory"),
             punctuation("="),
@@ -1094,6 +1145,8 @@ private sealed interface JsToken {
     data class Identifier(val value: String, override val start: Int) : JsToken
 
     data class StringLiteral(val value: String, override val start: Int) : JsToken
+
+    data class RegexLiteral(override val start: Int) : JsToken
 
     data class Punctuation(val value: String, override val start: Int) : JsToken
 
@@ -1128,6 +1181,8 @@ private fun List<JsToken>.matchesExactly(expected: List<JsTokenShape>): Boolean 
             is JsToken.StringLiteral ->
                 expected[index] == JsTokenShape.StringLiteral(token.value)
 
+            is JsToken.RegexLiteral -> false
+
             is JsToken.Punctuation ->
                 expected[index] == JsTokenShape.Punctuation(token.value)
 
@@ -1154,6 +1209,7 @@ private class JsTokenizer(private val source: String) {
                 character.isWhitespace() -> index++
                 character == '/' && source.getOrNull(index + 1) == '/' -> scanLineComment()
                 character == '/' && source.getOrNull(index + 1) == '*' -> scanBlockComment()
+                character == '/' && canStartRegexLiteral() -> scanRegexLiteral()
                 character == '/' && inTemplateSubstitution ->
                     throw IllegalArgumentException(
                         "Unreviewed slash syntax inside JavaScript template substitution",
@@ -1202,6 +1258,49 @@ private class JsTokenizer(private val source: String) {
         val end = source.indexOf("*/", index + 2)
         require(end >= 0) { "Unterminated JavaScript block comment" }
         index = end + 2
+    }
+
+    private fun canStartRegexLiteral(): Boolean = when (val previous = tokens.lastOrNull()) {
+        null -> true
+        is JsToken.Punctuation -> previous.value in REGEX_EXPRESSION_PREFIXES
+        is JsToken.Identifier -> previous.value in REGEX_EXPRESSION_KEYWORDS
+        else -> false
+    }
+
+    private fun scanRegexLiteral() {
+        val start = index++
+        var inCharacterClass = false
+        while (index < source.length) {
+            when (source[index]) {
+                '\\' -> {
+                    require(index + 1 < source.length) { "Unterminated JavaScript regex escape" }
+                    index += 2
+                }
+
+                '[' -> {
+                    inCharacterClass = true
+                    index++
+                }
+
+                ']' -> {
+                    inCharacterClass = false
+                    index++
+                }
+
+                '/' -> if (!inCharacterClass) {
+                    index++
+                    while (index < source.length && source[index].isLetter()) index++
+                    tokens += JsToken.RegexLiteral(start)
+                    return
+                } else {
+                    index++
+                }
+
+                '\n', '\r' -> throw IllegalArgumentException("Unterminated JavaScript regex literal")
+                else -> index++
+            }
+        }
+        throw IllegalArgumentException("Unterminated JavaScript regex literal")
     }
 
     private fun scanString() {
@@ -1266,5 +1365,14 @@ private class JsTokenizer(private val source: String) {
             index++
         }
         tokens += JsToken.Identifier(source.substring(start, index), start)
+    }
+
+    private companion object {
+        val REGEX_EXPRESSION_PREFIXES = setOf(
+            "(", "[", "{", "=", ":", ",", ";", "!", "?", "&", "|", "+", "-", "*", "/", "%", "~", "^", "<", ">",
+        )
+        val REGEX_EXPRESSION_KEYWORDS = setOf(
+            "return", "throw", "case", "delete", "void", "typeof", "new", "in", "of", "yield", "await", "else", "do",
+        )
     }
 }

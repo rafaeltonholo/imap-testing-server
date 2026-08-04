@@ -120,6 +120,109 @@ class WebAssetBundleTest {
     }
 
     @Test
+    fun acceptsTheGeneratedNodeOnlyTernaryImportsForKotlinIo() {
+        withFixture { fixture ->
+            fixture.entry.writeText(
+                fixture.entry.readText() +
+                    """
+
+                    const kotlinIoNodeImports = [
+                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:buffer') : null),
+                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:os') : null),
+                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:path') : null),
+                        ((module) => () => module)(((typeof process !== 'undefined') && (process.release.name === 'node')) ? await import(/* webpackIgnore: true */'node:fs') : null),
+                    ]
+                    """.trimIndent(),
+            )
+
+            fixture.load()
+        }
+    }
+
+    @Test
+    fun rejectsMutatedGeneratedNodeOnlyTernaryImportsForKotlinIo() {
+        val mutations = mapOf(
+            "predicate" to
+                "((module) => () => module)(((typeof process !== 'undefined') && " +
+                    "(process.release.name === 'worker')) ? await import('node:buffer') : null)",
+            "loader shape" to
+                "((module) => module)(((typeof process !== 'undefined') && " +
+                    "(process.release.name === 'node')) ? await import('node:buffer') : null)",
+            "specifier" to
+                "((module) => () => module)(((typeof process !== 'undefined') && " +
+                    "(process.release.name === 'node')) ? await import('node:crypto') : null)",
+        )
+
+        mutations.forEach { (label, source) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+            }
+        }
+    }
+
+    @Test
+    fun scansTheGeneratedSkikoBasenameRegexAsCode() {
+        assertEquals(
+            emptyList<Any>(),
+            scanModuleReferences("const basename = path => path.match(/([^\\/]+|\\/)\\/*$/)[1]"),
+        )
+    }
+
+    @Test
+    fun findsExecutableImportsAfterTheGeneratedSkikoBasenameRegex() {
+        val references = scanModuleReferences(
+            "const basename = path => path.match(/([^\\/]+|\\/)\\/*$/)[1]; " +
+                "await import('https://example.test/runtime.mjs')",
+        )
+
+        assertEquals(1, references.size)
+        assertTrue(references.single().toString().contains("https://example.test/runtime.mjs"))
+    }
+
+    @Test
+    fun acceptsTheGeneratedSkikoDeadLoaderDestructure() {
+        withFixture { fixture ->
+            fixture.entry.writeText(
+                fixture.entry.readText() +
+                    """
+
+                    if (false) {
+                        const { createRequire } = await import('module')
+                    }
+                    """.trimIndent(),
+            )
+
+            fixture.load()
+        }
+    }
+
+    @Test
+    fun rejectsMutatedGeneratedSkikoDeadLoaderShapes() {
+        val mutations = mapOf(
+            "predicate" to
+                "if (true) { const { createRequire } = await import('module') }",
+            "binding" to
+                "if (false) { const { createRequire: createRequire } = await import('module') }",
+            "specifier" to
+                "if (false) { const { createRequire } = await import('node:module') }",
+        )
+
+        mutations.forEach { (label, source) ->
+            withFixture { fixture ->
+                fixture.entry.writeText(fixture.entry.readText() + "\n$source\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(label) { fixture.load() }
+                assertTrue(
+                    failure.message.orEmpty().contains("Unreviewed dynamic import"),
+                    "$label produced: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
     fun rejectsChangedGeneratedEnvironmentPredicateBindings() {
         val canonicalNode =
             "const isNodeJs = (typeof process !== 'undefined') && " +
@@ -578,9 +681,9 @@ class WebAssetBundleTest {
 internal const val GENERATED_RESOURCE_PACKAGE =
     "mail.sandbox.dashboard.web.generated.resources"
 internal const val SKIKO_MJS_SHA256 =
-    "5dc3302763d61014d4a3277727f6e1af041741ae1f0efcc2acc21f2924cad99e"
+    "7fa5652ceb6343affed0360d2a8e5e35dbce1dff6192b2268c7519861af2dff4"
 internal const val SKIKO_WASM_SHA256 =
-    "69afd1fba0567fc79515d97bac5c0670cfeb180284823f986199637f154a9bbe"
+    "46caff5f783599bd1c5d3e5e87959d7cb5102c515aac671c9280664368e71dab"
 internal const val JODA_SHA256 =
     "a716a37f4c3bb47f8795688e1cd6451130a08d825d8a6df664ef72b349ec445b"
 internal const val GATE_PROOF_SHA256 =
@@ -685,3 +788,12 @@ private fun sha256ForTest(bytes: ByteArray): String =
     java.security.MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
+
+private fun scanModuleReferences(source: String): List<*> {
+    val scannerClass = Class.forName("mail.sandbox.dashboard.server.web.ModuleReferenceScanner")
+    val constructor = scannerClass.getDeclaredConstructor(String::class.java)
+    constructor.isAccessible = true
+    val references = scannerClass.getDeclaredMethod("references")
+    references.isAccessible = true
+    return references.invoke(constructor.newInstance(source)) as List<*>
+}

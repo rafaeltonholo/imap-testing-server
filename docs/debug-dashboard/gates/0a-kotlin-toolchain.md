@@ -628,3 +628,89 @@ only the two explicitly pinned Maven runtime artifacts. No Gradle, npm, Node
 build tooling, generated Node tooling, checked-in or handwritten JavaScript,
 React, or TypeScript is present. Gate 0B may proceed in a later task; no Gate
 0B work is included here.
+
+## 2026-08-04 UTC: latest-stack reproof
+
+This is an appended reproof, not a rewrite of the historical evidence above.
+In particular, the earlier Kotlin `2.3.21`, Compose `1.10.3`, Material 3
+`1.10.0-alpha05`, Ktor `3.4.3`, and Skiko `0.9.37.4` entries remain historical
+Gate 0A evidence. They are not the dependency set proved by this entry.
+
+The current wrapper reports Kotlin Toolchain `0.11.1`; its `dashboard-web`
+settings resolve Kotlin `2.4.10`, Compose `1.11.1`, Ktor `3.5.2`, and the
+managed Skiko runtime `0.144.6`. The server test configuration resolves JUnit
+`6.1.2` and coroutines `1.11.0`. Material 3 is explicitly coordinated as
+`org.jetbrains.compose.material3:material3*:1.11.0-alpha07`, because the
+Toolchain catalog's default Material 3 coordinate lags the current Compose
+runtime. No standalone Skiko `0.150.1` dependency was added; the managed
+`0.144.6` runtime is the reviewed artifact. JS-Joda remains `3.2.0`.
+
+The upstream releases checked for this reproof were Kotlin
+[2.4.10](https://github.com/JetBrains/kotlin/releases/tag/v2.4.10) and Compose
+Multiplatform
+[1.11.1](https://github.com/JetBrains/compose-multiplatform/releases/tag/v1.11.1).
+The latter's published library table identifies Material 3
+`1.11.0-alpha07` for the Compose `1.11.1` release.
+
+The two updated managed runtime bytes are pinned in both the startup
+validation constants and the classpath-resource manifest:
+
+| Served file | SHA-256 |
+| --- | --- |
+| `skiko.mjs` | `7fa5652ceb6343affed0360d2a8e5e35dbce1dff6192b2268c7519861af2dff4` |
+| `skiko.wasm` | `46caff5f783599bd1c5d3e5e87959d7cb5102c515aac671c9280664368e71dab` |
+| `js-joda.esm.js` (unchanged) | `a716a37f4c3bb47f8795688e1cd6451130a08d825d8a6df664ef72b349ec445b` |
+
+The new `skiko.mjs` uses a JavaScript regular-expression literal containing
+an escaped slash-star sequence. The module-reference scanner now tokenizes
+regex literals as code rather than mistaking that sequence for a block
+comment; focused negative tests still reject executable imports after it. The
+new generated Kotlin I/O Node-only ternaries are accepted only for their exact
+predicate, loader shape, and four reviewed specifiers (`node:buffer`,
+`node:os`, `node:path`, and `node:fs`). The exact shorthand Skiko dead loader
+is likewise accepted only under `if (false)`.
+
+Compose `1.11.1` moved the dashboard ShadowRoot below its two light-DOM
+wrappers. The browser gate now accepts only the observed topology:
+
+```text
+#dashboard-root > div[position:relative] >
+  div[position:relative].shadowRoot
+  div[position:absolute; top:0; left:0]
+```
+
+It does not fall back to the historical root-level ShadowRoot. The strict
+focused suite rejects reordered, additional, missing, wrongly styled, and
+shadowless containers; an empty root is retried only while the app is mounting.
+The contract is consistent with the upstream Compose change in
+[PR #2710](https://github.com/JetBrains/compose-multiplatform-core/pull/2710/files).
+After Tab, the gate requires the nested shadow-host `div` as document active
+element, its focused `canvas` as the deep active element, and the original
+`main#dashboard-root` to retain the solid 3 px `:focus-within` outline. The
+semantic focus text and Enter activation assertions remain unchanged.
+
+Final commands were run from `debug-dashboard/`:
+
+| Command | Result |
+| --- | --- |
+| `./kotlin build --module dashboard-web` | PASS; Wasm linked |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.WebAssetBundleTest'` | PASS; 21/21 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.web.*'` | PASS; 25/25 |
+| `./kotlin test --include-module dashboard-server --include-classes 'mail.sandbox.dashboard.server.gate.BrowserHostResolverTest'` | PASS; 6/6 |
+| production browser command below | PASS; 1/1 |
+
+```bash
+DASHBOARD_WEB_ASSETS="$PWD/build/tasks/_dashboard-web_linkWasmJs" \
+  DASHBOARD_WEB_RESOURCES="$PWD/build/artifacts/PreparedComposeResourcesDirArtifact/dashboard-webcommon" \
+  DASHBOARD_WEB_ENTRY="dashboard-web.mjs" \
+  ./kotlin test --include-module dashboard-server \
+  --include-classes 'mail.sandbox.dashboard.server.gate.KotlinToolchainBrowserGateTest'
+```
+
+The passing browser result reported Google Chrome `150.0.7871.187` and
+ChromeDriver `150.0.7871.124`
+(`9261fd0a595ac4964ea84e6bd4a025c1173a2ffa-refs/branch-heads/7871@{#3359}`).
+It passed the unchanged canvas, semantics, history, HTTP/SSE transport,
+console/network, keyboard, and accessibility assertions.
+
+**Gate 0A latest-stack reproof: PASS. No stop condition remains.**
