@@ -15,6 +15,6 @@ fun main() {
         "Missing dashboard-root mount target"
     }
     ComposeViewport(mountTarget) {
-        GateApp()
+        DashboardApp()
     }
 }

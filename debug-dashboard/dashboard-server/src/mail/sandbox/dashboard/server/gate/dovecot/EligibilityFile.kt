@@ -26,11 +26,13 @@ import kotlin.concurrent.withLock
 
 private enum class EligibilityPathPurpose {
     Production,
+    DashboardProvider,
     Task5Proof,
     ;
 
     fun runtimeRoot(dashboardRoot: Path): Path = when (this) {
         Production -> dashboardRoot.resolve(".runtime")
+        DashboardProvider -> dashboardRoot.resolve(".runtime/local-providers")
         Task5Proof -> dashboardRoot.resolve(".runtime/task5-proof")
     }
 }
@@ -83,6 +85,14 @@ internal class EligibilityPaths private constructor(
 
     companion object {
         fun production(): EligibilityPaths {
+            return fromWorkingDirectory(EligibilityPathPurpose.Production)
+        }
+
+        fun dashboardProvider(): EligibilityPaths {
+            return fromWorkingDirectory(EligibilityPathPurpose.DashboardProvider)
+        }
+
+        private fun fromWorkingDirectory(purpose: EligibilityPathPurpose): EligibilityPaths {
             val workingDirectory = Path.of(System.getProperty("user.dir"))
                 .toAbsolutePath()
                 .normalize()
@@ -101,7 +111,7 @@ internal class EligibilityPaths private constructor(
                     "Run the eligibility command from the canonical repository or dashboard layout",
                 )
             }
-            return create(repositoryRoot, EligibilityPathPurpose.Production)
+            return create(repositoryRoot, purpose)
         }
 
         fun testing(repositoryRoot: Path): EligibilityPaths =

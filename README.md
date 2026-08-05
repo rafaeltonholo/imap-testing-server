@@ -34,6 +34,65 @@ clients, automation, and development workflows.
 
 ## Getting Started
 
+### Mail Flight Recorder dashboard
+
+The dashboard is a disposable, loopback-only developer tool for reproducing client/provider
+issues against isolated Dovecot and Stalwart stores. Start the complete dashboard stack from
+the repository root:
+
+```sh
+./debug-dashboard/start-local.sh
+```
+
+Open <http://127.0.0.1:50734>. The launcher uses only the Kotlin Toolchain wrapper for the
+Kotlin/Wasm UI and Ktor server. It starts a dedicated Compose project and does not reuse the
+normal sandbox provider data.
+
+Account protocol choices are a client test profile: they drive dashboard actions and setup
+guidance, but are not an authorization boundary. Provider-internal mailbox access may remain
+enabled so the dashboard can inspect and mutate the account during diagnostics.
+
+Stalwart accounts use their ordinary disposable account password on purpose. The create and
+change-password workflows must exercise the same credential an email client uses, so this
+loopback-only tool does not add an AppPassword isolation layer.
+
+The dedicated Stalwart fixture enables an unbuffered debug tracer on standard output so the
+dashboard can correlate account activity and inspect server-wide logs. This setting applies
+only to the dashboard fixture; the normal Stalwart configuration and data are not changed.
+
+The dashboard dependency baseline was refreshed on 2026-08-04. Direct dependencies use the
+latest coherent stable Kotlin Toolchain set: Kotlin 2.4.10, Kotlin Toolchain 0.11.1, Compose
+Multiplatform 1.11.1, Ktor 3.5.2, kotlinx.serialization 1.11.0, JUnit 6.1.2, Logback 1.6.1,
+and Selenium 4.46.0. Three versions intentionally do not use a numerically newer artifact:
+
+- Compose 1.11.1 manages Material3 1.11.0-alpha07 and Skiko 0.144.6. Their newer standalone
+  artifacts belong to a different prerelease/runtime line and would create an unsupported
+  mixed Compose stack.
+- `js-joda` 3.2.0 is the newest Maven WebJar available to this Kotlin Toolchain-only build.
+  Upstream npm is newer, but adding an npm asset pipeline would violate the selected build
+  model.
+- Selenium 4.46.0 is current but publishes generated CDP bindings only through Chrome 150.
+  Local Chrome 151 therefore emits Selenium's compatibility warning until upstream publishes
+  matching bindings; the dashboard gate otherwise uses standard WebDriver behavior.
+
+| Dashboard provider endpoint | Address |
+| --------------------------- | ------- |
+| Dovecot IMAP / IMAPS | `127.0.0.1:21143` / `127.0.0.1:21993` |
+| Dovecot POP3 / POP3S | `127.0.0.1:21110` / `127.0.0.1:21995` |
+| Postfix SMTP / SMTPS / submission | `127.0.0.1:21025` / `127.0.0.1:21465` / `127.0.0.1:21587` |
+| Stalwart JMAP / SMTP | `127.0.0.1:18443` / `127.0.0.1:18587` |
+| OAuth mock | `127.0.0.1:28080` |
+
+Stop the isolated providers with:
+
+```sh
+./debug-dashboard/stop-local.sh
+```
+
+Use `./debug-dashboard/stop-local.sh --reset-stalwart` when a fresh dedicated Stalwart store
+is required. Dovecot account deletion removes access but intentionally retains that address's
+Maildir so recreating the same disposable address can reattach the reproduction data.
+
 ### 1. First-Time Setup
 
 Generate SSL certificates (required once after cloning):

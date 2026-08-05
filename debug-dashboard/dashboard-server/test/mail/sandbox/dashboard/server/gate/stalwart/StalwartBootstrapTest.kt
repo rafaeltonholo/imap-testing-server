@@ -434,11 +434,12 @@ class StalwartBootstrapTest {
                 "update:MtaStageAuth:singleton",
                 "create:Domain",
                 "update:SystemSettings:singleton",
+                "create:Tracer",
                 "create:Account",
                 "create:Account",
                 "create:Account",
             ),
-            recovery.operations.take(8).map { it.label },
+            recovery.operations.take(9).map { it.label },
         )
         assertEquals(
             listOf(
@@ -447,13 +448,38 @@ class StalwartBootstrapTest {
                 "get:MtaStageAuth:singleton",
                 "get:Domain:domain-id",
                 "get:SystemSettings:singleton",
+                "get:Tracer:stdout-tracer-id",
                 "get:Account:management-id",
                 "get:Account:first-user-id",
                 "get:Account:second-user-id",
             ),
             recovery.operations.filter { it.label.startsWith("get:") }
-                .take(8)
+                .take(9)
                 .map { it.label },
+        )
+        val stdoutTracer = recovery.operations.single {
+            it.creationId == "dashboard-stdout"
+        }
+        assertEquals("Tracer", stdoutTracer.objectType)
+        assertEquals(null, stdoutTracer.accountId)
+        assertEquals(
+            buildJsonObject {
+                put("@type", "Stdout")
+                put("ansi", false)
+                put("buffered", false)
+                put("enable", true)
+                put("events", buildJsonObject {})
+                put("eventsPolicy", "exclude")
+                put("level", "debug")
+                put("lossy", false)
+                put("multiline", false)
+            },
+            stdoutTracer.value,
+        )
+        assertFalse(
+            GateBootstrap.managementPermissions.any { permission ->
+                permission.startsWith("sysTracer")
+            },
         )
         val smtpListener = recovery.operations.single {
             it.creationId == "smtp-listener"
@@ -747,6 +773,8 @@ class StalwartBootstrapTest {
                     creationId == "smtp-listener" ->
                     "smtp-listener-id" to emptyMap()
                 objectType == "Domain" -> "domain-id" to emptyMap()
+                objectType == "Tracer" && creationId == "dashboard-stdout" ->
+                    "stdout-tracer-id" to emptyMap()
                 objectType == "Account" && creationId == "management" ->
                     "management-id" to emptyMap()
                 objectType == "Account" && creationId == "first-user" ->
@@ -793,6 +821,11 @@ class StalwartBootstrapTest {
                 "SystemSettings" -> getResponse(
                     objectType,
                     systemSettingsObject(requireNotNull(ids).single()),
+                )
+
+                "Tracer" -> getResponse(
+                    objectType,
+                    stdoutTracerObject(requireNotNull(ids).single()),
                 )
 
                 "ApiKey" -> {
@@ -940,6 +973,19 @@ class StalwartBootstrapTest {
             put("id", id)
             put("defaultHostname", "stalwart.local.test")
             put("defaultDomainId", "domain-id")
+        }
+
+        private fun stdoutTracerObject(id: String): JsonObject = buildJsonObject {
+            put("id", id)
+            put("@type", "Stdout")
+            put("ansi", false)
+            put("buffered", false)
+            put("enable", true)
+            put("events", buildJsonObject {})
+            put("eventsPolicy", "exclude")
+            put("level", "debug")
+            put("lossy", false)
+            put("multiline", false)
         }
 
         private fun managementAccountObject(

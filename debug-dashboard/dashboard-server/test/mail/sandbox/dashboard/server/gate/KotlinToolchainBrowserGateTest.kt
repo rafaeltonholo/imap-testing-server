@@ -20,12 +20,11 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import mail.sandbox.dashboard.server.module
 import org.openqa.selenium.By
+import org.openqa.selenium.Dimension
 import org.openqa.selenium.JavascriptExecutor
-import org.openqa.selenium.Keys
 import org.openqa.selenium.OutputType
 import org.openqa.selenium.SearchContext
 import org.openqa.selenium.NoSuchShadowRootException
-import org.openqa.selenium.TimeoutException
 import org.openqa.selenium.WebDriver
 import org.openqa.selenium.WebElement
 import org.openqa.selenium.chrome.ChromeDriver
@@ -33,8 +32,6 @@ import org.openqa.selenium.chrome.ChromeOptions
 import org.openqa.selenium.devtools.HasDevTools
 import org.openqa.selenium.devtools.DevTools
 import org.openqa.selenium.devtools.v150.accessibility.Accessibility
-import org.openqa.selenium.devtools.v150.accessibility.model.AXNode
-import org.openqa.selenium.devtools.v150.accessibility.model.AXPropertyName
 import org.openqa.selenium.devtools.v150.log.Log
 import org.openqa.selenium.devtools.v150.log.model.LogEntry
 import org.openqa.selenium.devtools.v150.network.Network
@@ -165,15 +162,18 @@ class KotlinToolchainBrowserGateTest {
     @Test
     fun productionBundlePassesTheBrowserHistoryTransportAndSemanticsGate() {
         val originalWorkingDirectory = System.getProperty("user.dir")
-        val projectRoot = Path.of(originalWorkingDirectory).toRealPath().let { testWorkingDirectory ->
+        val dashboardRoot = Path.of(originalWorkingDirectory).toRealPath().let { testWorkingDirectory ->
             if (testWorkingDirectory.fileName.toString() == "dashboard-server") {
                 testWorkingDirectory.parent
             } else {
                 testWorkingDirectory
             }
         }
-        requiredProductionEnvironment(projectRoot)
-        System.setProperty("user.dir", projectRoot.toString())
+        val repositoryRoot = requireNotNull(dashboardRoot.parent) {
+            "Dashboard project must live directly under the mail-sandbox repository"
+        }
+        requiredProductionEnvironment(dashboardRoot)
+        System.setProperty("user.dir", repositoryRoot.toString())
         val server = try {
             embeddedServer(
                 factory = Netty,
@@ -213,12 +213,14 @@ class KotlinToolchainBrowserGateTest {
                     .firstOrNull { it.isDisplayed && it.size.width > 0 && it.size.height > 0 }
             }
             assertNotNull(canvas, "Compose did not expose a visible non-empty canvas")
-            waitForSemanticText(wait, "Mail Flight Recorder")
+            val productHeading = waitForSemanticText(wait, "Mail Flight Recorder")
+            assertEquals("heading", productHeading.ariaRole)
             waitForSemanticText(wait, "GATE_RESOURCE: toolchain-compose-resource-ok")
             waitForSemanticText(wait, "API message: ready")
             waitForSemanticText(wait, "SSE sequence: 4")
             waitForSemanticText(wait, "SSE sync: resyncing")
             waitForSemanticText(wait, "Reconnect status: disconnected")
+            verifyDashboardWorkspaceAtDesktop(driver, wait)
 
             wait.until {
                 observations.sseMessages.count { it.eventName != "resync" } >= 4 &&
@@ -232,18 +234,6 @@ class KotlinToolchainBrowserGateTest {
                 listOf("message", "message", "message", "message", "resync"),
                 firstCycle.map { it.eventName },
             )
-
-            val heading = waitForAxNode(
-                devTools = devTools,
-                wait = wait,
-                accessibleName = "Mail Flight Recorder",
-                expectedRole = "heading",
-            )
-            assertEquals("heading", heading.role.flatMap { it.value }.orElse(null))
-
-            clickComposeControl(driver, wait, "Gate details")
-            wait.until { URI(driver.currentUrl).path == "/gate/details" }
-            waitForSemanticText(wait, "Selected route: /gate/details")
 
             val launchesBeforeRefresh = observations.requestCount("/assets/dashboard-web.mjs")
             assertEquals(1, launchesBeforeRefresh)
@@ -260,45 +250,10 @@ class KotlinToolchainBrowserGateTest {
                 launchesBeforeRefresh + 1,
                 observations.requestCount("/assets/browser-bootstrap.js"),
             )
-            wait.until { URI(driver.currentUrl).path == "/gate/details" }
-            waitForSemanticText(wait, "Selected route: /gate/details")
-            waitForSemanticText(wait, "GATE_RESOURCE: toolchain-compose-resource-ok")
-
-            driver.navigate().back()
             wait.until { URI(driver.currentUrl).path == "/" }
             waitForSemanticText(wait, "Selected route: /")
-
-            focusIncrementProofWithTab(driver)
-            waitForSemanticText(wait, "Keyboard focus: increment proof")
-            val dashboardRoot = driver.findElement(By.id("dashboard-root"))
-            val shadowHost = resolveDashboardShadowHost(dashboardRoot)
-            val activeElement = driver.switchTo().activeElement()
-            assertEquals(shadowHost, activeElement)
-            assertEquals("div", activeElement.tagName.lowercase())
-            val deepActiveElement = shadowHost.shadowRoot.findElement(By.cssSelector("canvas:focus"))
-            assertEquals("canvas", deepActiveElement.tagName.lowercase())
-            assertTrue(deepActiveElement.isDisplayed)
-            assertEquals("main", dashboardRoot.tagName.lowercase())
-            assertEquals("dashboard-root", dashboardRoot.getDomAttribute("id"))
-            assertEquals("solid", dashboardRoot.getCssValue("outline-style"))
-            assertEquals("3px", dashboardRoot.getCssValue("outline-width"))
-
-            Actions(driver).sendKeys(Keys.ENTER).perform()
-            waitForSemanticText(wait, "Activation count: 1")
-
-            val incrementNode = waitForAxNode(
-                devTools = devTools,
-                wait = wait,
-                accessibleName = "Increment proof",
-                expectedRole = "button",
-            )
-            assertFalse(incrementNode.ignored, "Increment proof is ignored by the AX tree")
-            val disabled = incrementNode.properties.orElse(emptyList())
-                .firstOrNull { it.name == AXPropertyName.DISABLED }
-                ?.value
-                ?.value
-                ?.orElse(false) == true
-            assertFalse(disabled, "Increment proof is disabled in the AX tree")
+            waitForSemanticText(wait, "GATE_RESOURCE: toolchain-compose-resource-ok")
+            verifyDashboardWorkspaceAtNarrowWidth(driver, wait)
 
             observations.assertClean(baseUrl)
             assertEquals(
@@ -349,6 +304,52 @@ class KotlinToolchainBrowserGateTest {
             assertEquals(1, observations.requestCount("/assets/dashboard-web.mjs"))
             assertEquals(1, observations.requestCount("/assets/browser-bootstrap.js"))
             observations.assertSuccessful(baseUrl)
+        }
+    }
+
+    private fun verifyDashboardWorkspaceAtDesktop(
+        driver: ChromeDriver,
+        wait: WebDriverWait,
+    ) {
+        listOf(
+            "Account channels",
+            "Folders",
+            "Message reader + operations",
+            "Trace lens",
+        ).forEach { expected -> waitForSemanticText(wait, expected) }
+        waitForSemanticTextStartingWith(wait, "Messages")
+
+        clickComposeControl(driver, wait, "Add account")
+        listOf(
+            "Create account channel",
+            "Dovecot",
+            "Stalwart",
+            "Client protocol profile",
+        ).forEach { expected -> waitForSemanticText(wait, expected) }
+        clickComposeControl(driver, wait, "Cancel")
+        waitForSemanticTextToDisappear(wait, "Create account channel")
+    }
+
+    private fun verifyDashboardWorkspaceAtNarrowWidth(
+        driver: ChromeDriver,
+        wait: WebDriverWait,
+    ) {
+        driver.manage().window().size = Dimension(760, 1_000)
+        val canvas = wait.until { current ->
+            dashboardShadow(current).findElements(By.cssSelector("canvas"))
+                .firstOrNull { it.size.width in 700..760 && it.size.height > 0 }
+        }
+        assertNotNull(canvas, "Compose did not resize its canvas for the narrow viewport")
+        val viewport = (driver as JavascriptExecutor).executeScript(
+            "return [window.innerWidth, document.documentElement.scrollWidth]",
+        ) as List<*>
+        val innerWidth = (viewport[0] as Number).toInt()
+        val documentWidth = (viewport[1] as Number).toInt()
+        assertTrue(documentWidth <= innerWidth, "Narrow layout overflows horizontally: $viewport")
+        driver.manage().window().size = Dimension(1_440, 1_200)
+        wait.until { current ->
+            dashboardShadow(current).findElements(By.cssSelector("canvas"))
+                .any { it.size.width >= 1_040 && it.size.height > 0 }
         }
     }
 
@@ -566,10 +567,41 @@ class KotlinToolchainBrowserGateTest {
 
     private fun waitForSemanticText(wait: WebDriverWait, expected: String): WebElement =
         wait.until { driver ->
-            semanticElements(driver).firstOrNull { element ->
-                element.getDomProperty("innerText")?.trim() == expected ||
-                    element.accessibleName == expected
-            }
+            runCatching {
+                semanticElements(driver).firstOrNull { element ->
+                    runCatching {
+                        element.getDomProperty("innerText")?.trim() == expected ||
+                            element.accessibleName.orEmpty().trim() == expected
+                    }.getOrDefault(false)
+                }
+            }.getOrNull()
+        }
+
+    private fun waitForSemanticTextToDisappear(wait: WebDriverWait, expected: String) {
+        wait.until { driver ->
+            runCatching {
+                semanticElements(driver).none { element ->
+                    runCatching {
+                        element.isDisplayed && (
+                            element.getDomProperty("innerText")?.trim() == expected ||
+                                element.accessibleName.orEmpty().trim() == expected
+                            )
+                    }.getOrDefault(false)
+                }
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun waitForSemanticTextStartingWith(wait: WebDriverWait, prefix: String): WebElement =
+        wait.until { driver ->
+            runCatching {
+                semanticElements(driver).firstOrNull { element ->
+                    runCatching {
+                        element.getDomProperty("innerText")?.trim()?.startsWith(prefix) == true ||
+                            element.accessibleName.orEmpty().trim().startsWith(prefix)
+                    }.getOrDefault(false)
+                }
+            }.getOrNull()
         }
 
     private fun semanticElements(driver: WebDriver): List<WebElement> =
@@ -584,7 +616,14 @@ class KotlinToolchainBrowserGateTest {
         accessibleName: String,
     ) {
         val control = wait.until { current ->
-            semanticElements(current).firstOrNull { it.accessibleName == accessibleName }
+            runCatching {
+                semanticElements(current).firstOrNull {
+                    runCatching {
+                        it.getDomProperty("innerText")?.trim() == accessibleName ||
+                            it.accessibleName.orEmpty().trim() == accessibleName
+                    }.getOrDefault(false)
+                }
+            }.getOrNull()
         }
         val rect = control.rect
         assertTrue(rect.width > 0 && rect.height > 0, "$accessibleName has no hit-test bounds")
@@ -592,41 +631,6 @@ class KotlinToolchainBrowserGateTest {
             .moveToLocation(rect.x + rect.width / 2, rect.y + rect.height / 2)
             .click()
             .perform()
-    }
-
-    private fun focusIncrementProofWithTab(driver: ChromeDriver) {
-        repeat(8) {
-            Actions(driver).sendKeys(Keys.TAB).perform()
-            val focused = try {
-                WebDriverWait(driver, Duration.ofMillis(700)).until { current ->
-                    semanticElements(current).any { element ->
-                        element.getDomProperty("innerText")?.trim() ==
-                            "Keyboard focus: increment proof"
-                    }
-                }
-            } catch (_: TimeoutException) {
-                false
-            }
-            if (focused) return
-        }
-        throw AssertionError("Tab did not reach Increment proof within the gate controls")
-    }
-
-    private fun waitForAxNode(
-        devTools: org.openqa.selenium.devtools.DevTools,
-        wait: WebDriverWait,
-        accessibleName: String,
-        expectedRole: String,
-    ): AXNode = wait.until {
-        devTools.send(
-            Accessibility.getFullAXTree(Optional.empty(), Optional.empty()),
-        ).firstOrNull { candidate ->
-            val name = candidate.name.flatMap { it.value }
-                .map { it.toString() }
-                .orElse(null)
-            val role = candidate.role.flatMap { it.value }.orElse(null)
-            name == accessibleName && role == expectedRole
-        }
     }
 
     private fun reportVersions(driver: ChromeDriver) {
@@ -909,6 +913,7 @@ private class BrowserObservations {
         path == "/" || path == "/gate/details" -> "text/html"
         path == "/api/v1/gate/probe" -> "application/json"
         path == "/api/v1/gate/events" -> "text/event-stream"
+        path.startsWith("/api/v1/") -> "application/json"
         path.endsWith(".mjs") || path.endsWith(".js") -> "text/javascript"
         path.endsWith(".wasm") -> "application/wasm"
         path.endsWith(".txt") -> "text/plain"

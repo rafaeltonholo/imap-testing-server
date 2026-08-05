@@ -295,6 +295,18 @@ internal object GateBootstrap {
             objectId = "singleton",
         )
 
+        val stdoutTracerId = requireCreated(
+            response = recovery.registryCreate(
+                objectType = "Tracer",
+                creationId = "dashboard-stdout",
+                value = stdoutTracer(),
+            ),
+            creationId = "dashboard-stdout",
+        ).id
+        require(stdoutTracerId.isNotBlank()) {
+            "Dashboard stdout Tracer ID is absent"
+        }
+
         val managementId = requireCreated(
             response = recovery.registryCreate(
                 objectType = "Account",
@@ -384,6 +396,15 @@ internal object GateBootstrap {
                 ),
             ),
             expectedDomainId = domainId,
+        )
+        validateStdoutTracer(
+            value = requireSingleGet(
+                recovery.registryGet(
+                    objectType = "Tracer",
+                    ids = listOf(stdoutTracerId),
+                ),
+            ),
+            expectedId = stdoutTracerId,
         )
         validateCreatedUserAccount(
             value = requireSingleGet(
@@ -721,6 +742,18 @@ internal object GateBootstrap {
         )
     }
 
+    private fun stdoutTracer(): JsonObject = buildJsonObject {
+        put("@type", "Stdout")
+        put("ansi", false)
+        put("buffered", false)
+        put("enable", true)
+        put("events", buildJsonObject {})
+        put("eventsPolicy", "exclude")
+        put("level", "debug")
+        put("lossy", false)
+        put("multiline", false)
+    }
+
     private fun localDomain(): JsonObject = buildJsonObject {
         put("name", DOMAIN)
         put("aliases", buildJsonObject {})
@@ -890,6 +923,50 @@ internal object GateBootstrap {
             "Fetched SystemSettings Domain ID did not match"
         }
         requireNoImpersonate(value, "SystemSettings")
+    }
+
+    private fun validateStdoutTracer(
+        value: JsonObject,
+        expectedId: String,
+    ) {
+        requireObjectId(value, expectedId, "Tracer")
+        requireString(value, "@type", "Stdout", "Tracer type")
+        requireBoolean(value, "ansi", false, "Tracer ANSI output")
+        requireBoolean(value, "buffered", false, "Tracer buffering")
+        requireBoolean(value, "enable", true, "Tracer enabled state")
+        val events = value["events"] as? JsonObject
+        require(events != null && events.isEmpty()) {
+            "Fetched Tracer event filter was not empty"
+        }
+        requireString(value, "eventsPolicy", "exclude", "Tracer event policy")
+        requireString(value, "level", "debug", "Tracer level")
+        requireBoolean(value, "lossy", false, "Tracer lossy state")
+        requireBoolean(value, "multiline", false, "Tracer multiline output")
+        requireNoImpersonate(value, "Tracer")
+    }
+
+    private fun requireString(
+        value: JsonObject,
+        key: String,
+        expected: String,
+        label: String,
+    ) {
+        val primitive = value[key] as? JsonPrimitive
+        require(primitive != null && primitive.isString && primitive.content == expected) {
+            "Fetched $label did not match"
+        }
+    }
+
+    private fun requireBoolean(
+        value: JsonObject,
+        key: String,
+        expected: Boolean,
+        label: String,
+    ) {
+        val primitive = value[key] as? JsonPrimitive
+        require(primitive != null && !primitive.isString && primitive.boolean == expected) {
+            "Fetched $label did not match"
+        }
     }
 
     private fun validateCreatedUserAccount(

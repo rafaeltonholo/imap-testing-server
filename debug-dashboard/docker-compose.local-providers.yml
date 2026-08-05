@@ -1,0 +1,25 @@
+services:
+  dovecot:
+    ports: !override
+      - "127.0.0.1:21143:31143"
+      - "127.0.0.1:21993:31993"
+      - "127.0.0.1:21110:31110"
+      - "127.0.0.1:21995:31995"
+    volumes: !override
+      - ./config:/etc/dovecot/conf.d:ro
+      - ./debug-dashboard/.runtime/local-providers/dovecot:/etc/dovecot/runtime:ro
+      - ./ssl:/etc/dovecot/ssl:ro
+      - ./debug-dashboard/.runtime/local-providers/vmail:/srv/vmail
+      - ./debug-dashboard/.runtime/local-providers/logs:/var/log/dovecot
+
+  postfix:
+    ports: !override
+      - "127.0.0.1:21025:25"
+      - "127.0.0.1:21465:465"
+      - "127.0.0.1:21587:587"
+
+  oauth2-mock:
+    ports: !override
+      - "127.0.0.1:28080:8080"
+    volumes: !override
+      - ./debug-dashboard/.runtime/local-providers/dovecot:/etc/dovecot/runtime:ro

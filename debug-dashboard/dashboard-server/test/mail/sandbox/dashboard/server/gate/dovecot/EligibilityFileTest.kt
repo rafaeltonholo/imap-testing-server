@@ -811,7 +811,11 @@ class EligibilityFileTest {
             mapOf(
                 "PATH" to "/fixed/bin",
                 "DOCKER_HOST" to "unix:///var/run/docker.sock",
-                "COMPOSE_FILE" to "docker-compose.yml",
+                "COMPOSE_FILE" to (
+                    "docker-compose.yml:" +
+                        "debug-dashboard/docker-compose.local-providers.yml"
+                    ),
+                "COMPOSE_PROJECT_NAME" to "mail-sandbox-dashboard",
                 "COMPOSE_DISABLE_ENV_FILE" to "1",
             ),
             environment,
