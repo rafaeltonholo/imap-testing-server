@@ -38,6 +38,33 @@ class DovecotTask5ProofLifecycleTest {
         "debug-dashboard/dashboard-server/testResources/" +
             "dovecot-gate0c/network-isolation-check.py",
     )
+    private val operatorConfigTestSource = repositoryRoot.resolve(
+        "debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/" +
+            "server/gate/dovecot/DovecotOperatorConfigTest.kt",
+    )
+
+    @Test
+    fun operatorConfigAuditConsumesOnlyLifecycleOwnedEvidence() {
+        val source = Files.readString(operatorConfigTestSource)
+
+        listOf(
+            "runBoundedProcess(",
+            "ProcessBuilder(command)",
+            "command = listOf(\"docker\"",
+            "COMPOSE_TIMEOUT",
+        ).forEach { forbidden ->
+            assertFalse(forbidden in source, forbidden)
+        }
+        listOf(
+            "base-compose.json",
+            "proof-compose.json",
+            "ordinary-doveconf.txt",
+            "operator-doveconf.txt",
+            "TASK5_DOVECOT_EVIDENCE_ROOT",
+        ).forEach { evidenceContract ->
+            assertTrue(evidenceContract in source, evidenceContract)
+        }
+    }
 
     @Test
     fun lifecycleScriptHasValidBashSyntaxAndFailClosedStaticContract() {
@@ -221,9 +248,10 @@ class DovecotTask5ProofLifecycleTest {
                 profileSource,
         )
 
-        val configTest = source.indexOf(
+        val staticConfigTest = source.indexOf(
             "--include-classes " +
-                "mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest",
+                "mail.sandbox.dashboard.server.gate.dovecot." +
+                "DovecotOperatorConfigTest",
         )
         val credentialStoreTest = source.indexOf(
             "--include-classes " +
@@ -232,13 +260,26 @@ class DovecotTask5ProofLifecycleTest {
         )
         val baseComposeConfig = source.indexOf(
             "COMPOSE_DISABLE_ENV_FILE=1 " +
-                "docker compose --file docker-compose.yml config --quiet",
+                "docker compose --file docker-compose.yml \\\n" +
+                "  config --quiet oauth2-mock dovecot postfix",
         )
         val proofComposeConfig = source.indexOf(
-            "COMPOSE_DISABLE_ENV_FILE=1 task5_compose config --quiet",
+            "COMPOSE_DISABLE_ENV_FILE=1 task5_compose \\\n" +
+                "  config --quiet oauth2-mock dovecot postfix " +
+                "dovecot-operator",
         )
-        assertTrue(configTest >= 0)
-        assertTrue(credentialStoreTest > configTest)
+        listOf(
+            "DovecotAuthenticationResponseClassifierTest",
+            "DovecotIsolationMailboxContractTest",
+        ).forEach { className ->
+            assertTrue(
+                "--include-classes " +
+                    "mail.sandbox.dashboard.server.gate.dovecot.$className" in source,
+                className,
+            )
+        }
+        assertTrue(staticConfigTest >= 0)
+        assertTrue(credentialStoreTest > staticConfigTest)
         assertTrue(baseComposeConfig > credentialStoreTest)
         assertTrue(proofComposeConfig > baseComposeConfig)
 
@@ -258,6 +299,33 @@ class DovecotTask5ProofLifecycleTest {
 
         val proofRootCreation = source.lastIndexOf(
             "\ntask5_create_owned_proof_root\n",
+        )
+        listOf(
+            "readonly TASK5_PROVIDER_EVIDENCE_ROOT=\"\$TASK5_PROOF_ROOT/provider-evidence\"",
+            "readonly TASK5_BASE_COMPOSE_EVIDENCE=\"\$TASK5_PROVIDER_EVIDENCE_ROOT/base-compose.json\"",
+            "readonly TASK5_PROOF_COMPOSE_EVIDENCE=\"\$TASK5_PROVIDER_EVIDENCE_ROOT/proof-compose.json\"",
+            "readonly TASK5_ORDINARY_DOVECONF_EVIDENCE=\"\$TASK5_PROVIDER_EVIDENCE_ROOT/ordinary-doveconf.txt\"",
+            "readonly TASK5_OPERATOR_DOVECONF_EVIDENCE=\"\$TASK5_PROVIDER_EVIDENCE_ROOT/operator-doveconf.txt\"",
+            "mkdir \\\n      \"\$TASK5_PROOF_ROOT/dovecot\" \\\n      \"\$TASK5_PROVIDER_EVIDENCE_ROOT\" \\\n      \"\$TASK5_PROOF_ROOT/ssl\"",
+            "task5_require_mode \"\$TASK5_PROVIDER_EVIDENCE_ROOT\" 700",
+        ).forEach { contract ->
+            assertTrue(contract in source, contract)
+        }
+        val baseComposeEvidence = source.indexOf(
+            "task5_capture_provider_evidence \\\n" +
+                "  \"base service-scoped Compose model\" \\\n" +
+                "  \"\$TASK5_BASE_COMPOSE_EVIDENCE\" \\\n" +
+                "  /usr/bin/env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME \\\n" +
+                "    docker compose --file docker-compose.yml \\\n" +
+                "      --profile dovecot-operator config --format json \\\n" +
+                "      oauth2-mock dovecot postfix dovecot-operator",
+        )
+        val proofComposeEvidence = source.indexOf(
+            "task5_capture_provider_evidence \\\n" +
+                "  \"proof service-scoped Compose model\" \\\n" +
+                "  \"\$TASK5_PROOF_COMPOSE_EVIDENCE\" \\\n" +
+                "  task5_compose_with_lock config --format json \\\n" +
+                "    oauth2-mock dovecot postfix dovecot-operator",
         )
         val certificateRequest = source.indexOf(
             "openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \\\n" +
@@ -280,12 +348,44 @@ class DovecotTask5ProofLifecycleTest {
         )
         val proofPreflight = source.indexOf("-- task5-proof preflight")
         assertTrue(proofRootCreation > previousBoundary)
-        assertTrue(certificateRequest > proofRootCreation)
+        assertTrue(baseComposeEvidence > proofRootCreation)
+        assertTrue(proofComposeEvidence > baseComposeEvidence)
+        assertTrue(certificateRequest > proofComposeEvidence)
         assertTrue(certificateRegularFileValidation > certificateRequest)
         assertTrue(certificateKeyModeValidation > certificateRegularFileValidation)
         assertTrue(certificateVerification > certificateKeyModeValidation)
         assertTrue(proofPreflight > proofRootCreation)
         assertTrue(proofPreflight > certificateVerification)
+
+        val evidenceFunctionStart = source.indexOf(
+            "task5_capture_provider_evidence() {",
+        )
+        val evidenceFunctionEnd = source.indexOf(
+            "\ntask5_record_cleanup_failure() {",
+            startIndex = evidenceFunctionStart,
+        )
+        assertTrue(evidenceFunctionStart >= 0)
+        assertTrue(evidenceFunctionEnd > evidenceFunctionStart)
+        val evidenceFunction = source.substring(
+            evidenceFunctionStart,
+            evidenceFunctionEnd,
+        )
+        listOf(
+            "\$TASK5_BASE_COMPOSE_EVIDENCE",
+            "\$TASK5_PROOF_COMPOSE_EVIDENCE",
+            "\$TASK5_ORDINARY_DOVECONF_EVIDENCE",
+            "\$TASK5_OPERATOR_DOVECONF_EVIDENCE",
+            "task5_directory_is_exact_physical \"\$TASK5_PROVIDER_EVIDENCE_ROOT\"",
+            "task5_path_mode \"\$TASK5_PROVIDER_EVIDENCE_ROOT\"",
+            "set -o noclobber",
+            "\"\$@\" > \"\$path\"",
+            "[[ ! -f \"\$path\" ]]",
+            "[[ -L \"\$path\" ]]",
+            "task5_require_mode \"\$path\" 600",
+            "size < 1 || size > 1048576",
+        ).forEach { contract ->
+            assertTrue(contract in evidenceFunction, contract)
+        }
 
         val proofPortLoop = assertNotNull(
             Regex("""for TASK5_PROOF_PORT in ([0-9 ]+); do""")
@@ -324,6 +424,247 @@ class DovecotTask5ProofLifecycleTest {
         assertTrue(isolationTest > startupTest)
         assertTrue(rotationTest > isolationTest)
         assertTrue(completion > rotationTest)
+    }
+
+    @Test
+    fun lifecycleProvesExactDisposableProviderVersionsAndRuntimeConfigs() {
+        val source = Files.readString(lifecycleScript)
+        val normalizedSource = source
+            .replace(Regex("""\\\r?\n"""), " ")
+            .replace(Regex("""\s+"""), " ")
+        val packageFormat = "'-f=${'$'}{Package}=${'$'}{Version}\\n'"
+        val expectedChecks = listOf(
+            "task5_require_exact_output \"dovecot --version\" " +
+                "\"2.4.4 (8b687aa65c)\" task5_compose_with_lock exec -T " +
+                "dovecot dovecot --version",
+            "task5_require_exact_output \"python --version\" \"Python 3.14.6\" " +
+                "task5_compose_with_lock exec -T oauth2-mock python --version",
+            "task5_require_exact_output \"postconf mail_version\" \"3.10.12\" " +
+                "task5_compose_with_lock exec -T postfix postconf -h mail_version",
+            "task5_require_exact_output \"postconf compatibility_level\" \"3.6\" " +
+                "task5_compose_with_lock exec -T postfix postconf -h " +
+                "compatibility_level",
+            "task5_require_exact_output \"dpkg-query postfix\" " +
+                "\"postfix=3.10.12-0+deb13u2\" task5_compose_with_lock " +
+                "exec -T postfix dpkg-query -W $packageFormat postfix",
+            "task5_require_exact_output \"dpkg-query libsasl2-2\" " +
+                "\"libsasl2-2=2.1.28+dfsg1-9\" task5_compose_with_lock " +
+                "exec -T postfix dpkg-query -W $packageFormat libsasl2-2",
+            "task5_require_exact_output \"dpkg-query libsasl2-modules\" " +
+                "\"libsasl2-modules=2.1.28+dfsg1-9\" task5_compose_with_lock " +
+                "exec -T postfix dpkg-query -W $packageFormat libsasl2-modules",
+            "task5_require_exact_output \"dpkg-query sasl2-bin\" " +
+                "\"sasl2-bin=2.1.28+dfsg1-9\" task5_compose_with_lock " +
+                "exec -T postfix dpkg-query -W $packageFormat sasl2-bin",
+            "task5_require_exact_output \"dpkg-query netcat-openbsd\" " +
+                "\"netcat-openbsd=1.229-1\" task5_compose_with_lock " +
+                "exec -T postfix dpkg-query -W $packageFormat netcat-openbsd",
+            "task5_capture_provider_evidence \"ordinary doveconf -n\" " +
+                "\"\$TASK5_ORDINARY_DOVECONF_EVIDENCE\" " +
+                "task5_compose_with_lock exec -T dovecot " +
+                "/dovecot/bin/doveconf -n",
+            "task5_capture_provider_evidence \"operator doveconf -n\" " +
+                "\"\$TASK5_OPERATOR_DOVECONF_EVIDENCE\" " +
+                "task5_compose_with_lock exec -T dovecot-operator " +
+                "/dovecot/bin/doveconf -n",
+            "task5_require_success \"operator healthcheck\" " +
+                "task5_compose_with_lock exec -T dovecot-operator " +
+                "/usr/local/bin/operator-healthcheck",
+        )
+
+        expectedChecks.forEach { expected ->
+            assertTrue(expected in normalizedSource, "missing live proof: $expected")
+        }
+
+        val operatorStart = normalizedSource.indexOf(
+            "up --detach --build --force-recreate --no-deps --wait " +
+                "dovecot-operator",
+        )
+        val versionProof = normalizedSource.lastIndexOf(
+            "task5_require_exact_output \"dovecot --version\"",
+        )
+        val ordinaryConfigEvidence = normalizedSource.indexOf(
+            "task5_capture_provider_evidence \"ordinary doveconf -n\"",
+        )
+        val operatorConfigEvidence = normalizedSource.indexOf(
+            "task5_capture_provider_evidence \"operator doveconf -n\"",
+        )
+        val ownedEvidenceAudit = normalizedSource.indexOf(
+            "DovecotOperatorOwnedEvidenceLiveTest",
+        )
+        val ownedEvidenceEnvironment = normalizedSource.indexOf(
+            "TASK5_DOVECOT_EVIDENCE_ROOT=\"\$TASK5_PROVIDER_EVIDENCE_ROOT\"",
+        )
+        val healthcheck = normalizedSource.indexOf(
+            "task5_require_success \"operator healthcheck\"",
+        )
+        val startupLive = normalizedSource.indexOf(
+            "DovecotOperatorStartupLiveTest",
+        )
+        assertTrue(operatorStart >= 0)
+        assertTrue(versionProof > operatorStart)
+        assertTrue(ordinaryConfigEvidence > versionProof)
+        assertTrue(operatorConfigEvidence > ordinaryConfigEvidence)
+        assertTrue(ownedEvidenceEnvironment > operatorConfigEvidence)
+        assertTrue(ownedEvidenceAudit > operatorConfigEvidence)
+        assertTrue(ownedEvidenceAudit > ownedEvidenceEnvironment)
+        assertTrue(healthcheck > ownedEvidenceAudit)
+        assertTrue(startupLive > healthcheck)
+    }
+
+    @Test
+    fun lifecycleRejectsMismatchedProviderVersionAndRunsCheckedCleanup() {
+        withFixture { fixture ->
+            val result = fixture.run("provider-version-mismatch")
+
+            assertTrue(result.exitCode != 0, result.output)
+            assertTrue(
+                "Task 5 proof: dovecot --version returned an unexpected value" in
+                    result.output,
+                result.output,
+            )
+            assertFalse(
+                result.commands.any {
+                    "DovecotOperatorStartupLiveTest" in it
+                },
+                "live operations must not run after a version mismatch",
+            )
+            assertCleanupInventoriesAndBaselineAfterDown(result.commands)
+            assertFalse(Files.exists(fixture.proofRoot))
+            assertFalse(
+                Files.exists(
+                    fixture.lifecycleLock,
+                    LinkOption.NOFOLLOW_LINKS,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun lifecycleDockerInventoryIsExactAndOrdinaryBaselineIsAllowlisted() {
+        val source = Files.readString(lifecycleScript)
+        val logicalSource = source.replace(Regex("""\\\r?\n"""), " ")
+        val normalizedSource = logicalSource.replace(Regex("""\s+"""), " ")
+        val violations = buildList {
+            listOf(
+                "all-container name inventory" to Regex(
+                    """^\s*docker\s+ps\s+--all\s+--format\s+['\"]?\{\{\.Names}}['\"]?\s*$""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+                "all-network name inventory" to Regex(
+                    """^\s*docker\s+network\s+ls\s+--format\s+['\"]?\{\{\.Name}}['\"]?\s*$""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+                "all-volume name inventory" to Regex(
+                    """^\s*docker\s+volume\s+ls\s+--format\s+['\"]?\{\{\.Name}}['\"]?\s*$""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+                "unfiltered running-container baseline" to Regex(
+                    """^\s*if\s+docker\s+ps\s+--quiet\s*>""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+                "unscoped base Compose config" to Regex(
+                    """^\s*COMPOSE_DISABLE_ENV_FILE=1\s+docker\s+compose\b[^\n]*config\s+--quiet\s*$""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+                "unscoped proof Compose config" to Regex(
+                    """^\s*COMPOSE_DISABLE_ENV_FILE=1\s+task5_compose\s+config\s+--quiet\s*$""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
+                ),
+            ).forEach { (description, forbidden) ->
+                if (forbidden.containsMatchIn(logicalSource)) {
+                    add("broad Docker access: $description")
+                }
+            }
+            if (
+                "TASK5_BASELINE_PROJECT_FILTER=\"label=com.docker.compose.project=" +
+                "dovecot-docker\"" !in source
+            ) {
+                add("missing exact ordinary-project baseline filter")
+            }
+            val serviceAllowlist = Regex(
+                """TASK5_BASELINE_SERVICES=\(\s*dovecot\s+postfix\s+oauth2-mock\s*\)""",
+            ).find(source)
+            if (serviceAllowlist == null) {
+                add("missing exact dovecot/postfix/oauth2-mock baseline allowlist")
+            }
+            if (
+                "--filter \"\$TASK5_BASELINE_PROJECT_FILTER\"" !in source ||
+                "--filter \"label=com.docker.compose.service=" !in source
+            ) {
+                add("baseline IDs are not selected by project plus service labels")
+            }
+            if ("task5_capture_allowlisted_baseline_ids" !in source) {
+                add("baseline and postflight do not share an allowlisted ID capture")
+            }
+            if (
+                "docker compose --file docker-compose.yml config --quiet " +
+                "oauth2-mock dovecot postfix" !in normalizedSource
+            ) {
+                add("base Compose config can resolve a non-allowlisted service")
+            }
+            if (
+                "task5_compose config --quiet oauth2-mock dovecot postfix " +
+                "dovecot-operator" !in normalizedSource
+            ) {
+                add("proof Compose config can resolve a non-proof service")
+            }
+            if (
+                "docker compose --file docker-compose.yml --profile " +
+                "dovecot-operator config --format json oauth2-mock dovecot " +
+                "postfix dovecot-operator" !in normalizedSource
+            ) {
+                add("base Compose evidence can resolve a non-allowlisted service")
+            }
+            if (
+                "task5_compose_with_lock config --format json oauth2-mock " +
+                "dovecot postfix dovecot-operator" !in normalizedSource
+            ) {
+                add("proof Compose evidence can resolve a non-proof service")
+            }
+        }
+
+        assertEquals(
+            emptyList(),
+            violations,
+            violations.joinToString(separator = "\n"),
+        )
+    }
+
+    @Test
+    fun strictFakeDockerRejectsAnyNonAllowlistedInventoryOrInspectPath() {
+        withFixture { fixture ->
+            val result = fixture.run(scenario = "success")
+
+            assertEquals(0, result.exitCode, result.output)
+            assertFalse(
+                result.commands.any { it.startsWith("forbidden-docker-access ") },
+                result.commands.joinToString("\n"),
+            )
+        }
+    }
+
+    @Test
+    fun strictFakeDockerRejectsMultiTargetInspectAndUnscopedDown() {
+        withFixture { fixture ->
+            val allowedId = "1".repeat(64)
+            val arbitraryId = "f".repeat(64)
+            val inspect = fixture.runFakeDocker(
+                listOf(
+                    "inspect",
+                    "--format",
+                    HEALTH_INSPECT_FORMAT,
+                    arbitraryId,
+                    allowedId,
+                ),
+            )
+            val unscopedDown = fixture.runFakeDocker(
+                listOf("compose", "down", "--volumes", "--remove-orphans"),
+            )
+
+            assertEquals(88, inspect.exitCode, inspect.output)
+            assertEquals(88, unscopedDown.exitCode, unscopedDown.output)
+        }
     }
 
     @Test
@@ -447,6 +788,39 @@ class DovecotTask5ProofLifecycleTest {
                     result.commands.any { it.startsWith("lsof ") },
                     "Port checks must not run until the complete baseline is ready",
                 )
+            }
+        }
+    }
+
+    @Test
+    fun postflightBaselineDivergenceRetainsEvidenceAndLifecycleLock() {
+        listOf(
+            "postflight-id-changes" to
+                "allowlisted ordinary-service container inventory changed",
+            "postflight-state-changes" to
+                "an allowlisted pre-existing container changed",
+            "postflight-list-fails" to
+                "could not recapture allowlisted ordinary-service containers",
+            "postflight-inspect-fails" to
+                "could not inspect an allowlisted baseline container",
+        ).forEach { (scenario, expectedFailure) ->
+            withFixture { fixture ->
+                val result = fixture.run(scenario)
+
+                assertTrue(result.exitCode != 0, "$scenario: ${result.output}")
+                assertTrue(expectedFailure in result.output, result.output)
+                assertFalse("baseline-match" in result.output, result.output)
+                assertTrue("baseline evidence retained at " in result.output)
+                assertTrue(fixture.hasBaselineDirectory())
+                assertTrue(
+                    Files.isDirectory(
+                        fixture.lifecycleLock,
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+                    "$scenario must retain the lifecycle lock with evidence",
+                )
+                assertCleanupInventoriesAndBaselineAfterDown(result.commands)
+                assertFalse(Files.exists(fixture.proofRoot))
             }
         }
     }
@@ -640,6 +1014,12 @@ class DovecotTask5ProofLifecycleTest {
                 proofEnvironments.joinToString("\n"),
             )
             assertTrue(result.commands.any { it == "proof-modes 700 700 700 600 600" })
+            assertTrue(
+                result.commands.any {
+                    it == "provider-evidence-contract 700 600 600 600 600"
+                },
+                result.commands.joinToString("\n"),
+            )
             assertFalse(Files.exists(fixture.proofRoot))
             assertFalse(
                 Files.exists(
@@ -681,6 +1061,28 @@ class DovecotTask5ProofLifecycleTest {
                 "$composePrefix --profile dovecot-operator up --detach " +
                     "--build --force-recreate --no-deps --wait " +
                     "dovecot-operator"
+            val baseComposeEvidence =
+                "docker compose --file docker-compose.yml " +
+                    "--profile dovecot-operator config --format json " +
+                    "oauth2-mock dovecot postfix dovecot-operator"
+            val proofComposeEvidence =
+                "$composePrefix config --format json " +
+                    "oauth2-mock dovecot postfix dovecot-operator"
+            val operatorStatus =
+                "$composePrefix --profile dovecot-operator ps " +
+                    "oauth2-mock dovecot postfix dovecot-operator"
+            val dovecotVersion =
+                "$composePrefix exec -T dovecot dovecot --version"
+            val ordinaryConfigEvidence =
+                "$composePrefix exec -T dovecot /dovecot/bin/doveconf -n"
+            val operatorConfigEvidence =
+                "$composePrefix exec -T dovecot-operator " +
+                    "/dovecot/bin/doveconf -n"
+            val ownedEvidence =
+                liveClassCommand("DovecotOperatorOwnedEvidenceLiveTest")
+            val operatorHealthcheck =
+                "$composePrefix exec -T dovecot-operator " +
+                    "/usr/local/bin/operator-healthcheck"
             val eligibilityPreflight =
                 "kotlin run --module dashboard-server --main-class " +
                     "$DOVECOT_GATE_PACKAGE.EligibilityFileCli -- " +
@@ -711,14 +1113,32 @@ class DovecotTask5ProofLifecycleTest {
                 "docker ps --all --quiet --filter " +
                     "label=com.docker.compose.project=" +
                     "mail-sandbox-task5-proof",
-                "docker ps --quiet",
+                "docker ps --all --quiet --filter " +
+                    "name=^/mail-sandbox-task5-proof-dovecot-1$",
+                "docker network ls --quiet --filter " +
+                    "name=^mail-sandbox-task5-proof_operator-ingress$",
+                "docker volume ls --quiet --filter " +
+                    "name=^mail-sandbox-task5-proof_task5-proof-logs$",
+                "docker ps --all --quiet --no-trunc --filter " +
+                    "label=com.docker.compose.project=dovecot-docker " +
+                    "--filter label=com.docker.compose.service=dovecot",
+                "docker ps --all --quiet --no-trunc --filter " +
+                    "label=com.docker.compose.project=dovecot-docker " +
+                    "--filter label=com.docker.compose.service=postfix",
+                "docker ps --all --quiet --no-trunc --filter " +
+                    "label=com.docker.compose.project=dovecot-docker " +
+                    "--filter label=com.docker.compose.service=oauth2-mock",
                 "lsof -nP -iTCP:2993 -sTCP:LISTEN",
                 nonLiveKotlin,
                 "python3 -m unittest " +
                     "debug-dashboard/dashboard-server/testResources/" +
                     "dovecot-gate0c/test_network_isolation_check.py",
-                "docker compose --file docker-compose.yml config --quiet",
-                "$composePrefix config --quiet",
+                "docker compose --file docker-compose.yml config --quiet " +
+                    "oauth2-mock dovecot postfix",
+                "$composePrefix config --quiet oauth2-mock dovecot postfix " +
+                    "dovecot-operator",
+                baseComposeEvidence,
+                proofComposeEvidence,
                 certificateRequest,
                 certificateVerification,
                 ordinaryStart,
@@ -726,6 +1146,13 @@ class DovecotTask5ProofLifecycleTest {
                 bootstrapEligibility,
                 bootstrapCredential,
                 operatorStart,
+                operatorStatus,
+                dovecotVersion,
+                ordinaryConfigEvidence,
+                operatorConfigEvidence,
+                ownedEvidence,
+                "provider-evidence-contract 700 600 600 600 600",
+                operatorHealthcheck,
                 exec,
                 execModeTranscript("preflight"),
                 startup,
@@ -1988,6 +2415,52 @@ class DovecotTask5ProofLifecycleTest {
             timeout = timeout,
         )
 
+        fun runFakeDocker(arguments: List<String>): ProcessResult {
+            Files.deleteIfExists(commandLog)
+            val outputFile = Files.createTempFile(
+                temporaryDirectory,
+                "fake-docker-output-",
+                ".log",
+            )
+            val builder = ProcessBuilder(
+                listOf(fakeBin.resolve("docker").toString()) + arguments,
+            )
+                .directory(repositoryRoot.toFile())
+                .redirectErrorStream(true)
+                .redirectOutput(outputFile.toFile())
+            builder.environment()["DOCKER_HOST"] =
+                "unix:///var/run/docker.sock"
+            builder.environment()["PATH"] =
+                "$fakeBin:${requireNotNull(System.getenv("PATH"))}"
+            builder.environment()["TASK5_FAKE_SCENARIO"] = "success"
+            builder.environment()["TASK5_FAKE_LOG"] = commandLog.toString()
+            builder.environment()["TASK5_FAKE_STATE"] = stateDirectory.toString()
+            builder.environment()["TASK5_FAKE_REPOSITORY"] = repositoryRoot.toString()
+            builder.environment()["TASK5_FAKE_GLOBAL_LOCK"] = lifecycleLock.toString()
+
+            val process = try {
+                builder.start()
+            } catch (failure: Throwable) {
+                Files.deleteIfExists(outputFile)
+                throw failure
+            }
+            try {
+                val completed = process.waitFor(
+                    PROCESS_TIMEOUT.toMillis(),
+                    TimeUnit.MILLISECONDS,
+                )
+                if (!completed) process.destroyForcibly()
+                assertTrue(completed, "fake Docker invocation timed out")
+                return ProcessResult(
+                    exitCode = process.exitValue(),
+                    output = Files.readString(outputFile),
+                )
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+                Files.deleteIfExists(outputFile)
+            }
+        }
+
         fun runSignalledAfterGlobalLockMkdir(signal: String): LifecycleResult =
             runPausedAndSignalled(
                 scenario = "signal-after-global-lock-mkdir",
@@ -2536,7 +3009,7 @@ class DovecotTask5ProofLifecycleTest {
     }
 
     companion object {
-        private val PROCESS_TIMEOUT = Duration.ofSeconds(10)
+        private val PROCESS_TIMEOUT = Duration.ofSeconds(15)
         private val CHILD_ENV_GUARD_PROCESS_TIMEOUT = Duration.ofSeconds(20)
         private val PROCESS_TERMINATION_TIMEOUT = Duration.ofSeconds(1)
         private const val PRODUCTION_LIFECYCLE_LOCK =
@@ -2576,10 +3049,16 @@ class DovecotTask5ProofLifecycleTest {
             "proof-env 1 task5-proof mail-sandbox-task5-proof " +
                 "docker-compose.yml:debug-dashboard/dashboard-server/" +
                 "testResources/dovecot-gate0c/compose.task5-proof.yml 1"
+        private const val HEALTH_INSPECT_FORMAT =
+            "{{.Id}} {{.State.StartedAt}} {{.State.Status}} " +
+                "{{with (index .State \"Health\")}}{{.Status}}" +
+                "{{else}}none{{end}} {{.RestartCount}}"
         private const val DOVECOT_GATE_PACKAGE =
             "mail.sandbox.dashboard.server.gate.dovecot"
         private val TASK7_NON_LIVE_CLASSES = listOf(
             "DovecotOperatorConfigTest",
+            "DovecotAuthenticationResponseClassifierTest",
+            "DovecotIsolationMailboxContractTest",
             "DovecotOperatorCredentialStoreTest",
             "DovecotOperatorProcessTransportTest",
             "DovecotOperatorApplicationLeaseRegistryTest",
@@ -2668,80 +3147,183 @@ class DovecotTask5ProofLifecycleTest {
             |[ "§{DOCKER_HOST:-unset}" = "unix:///var/run/docker.sock" ] ||
             |  exit 63
             |printf '%s\n' "docker §*" >> "§TASK5_FAKE_LOG"
+            |baseline_dovecot_id=1111111111111111111111111111111111111111111111111111111111111111
+            |baseline_postfix_id=2222222222222222222222222222222222222222222222222222222222222222
+            |baseline_oauth2_id=3333333333333333333333333333333333333333333333333333333333333333
+            |health_inspect_format='{{.Id}} {{.State.StartedAt}} {{.State.Status}} {{with (index .State "Health")}}{{.Status}}{{else}}none{{end}} {{.RestartCount}}'
             |case "§*" in
             |  "ps --all --quiet --filter label=com.docker.compose.project=mail-sandbox-task5-proof")
             |    if [ "§TASK5_FAKE_SCENARIO" = labeled-resource-collision ]; then
             |      printf '%s\n' labeled-proof-container
             |    fi
             |    ;;
+            |  "volume ls --quiet --filter label=com.docker.compose.project=mail-sandbox-task5-proof")
+            |    ;;
             |  "network ls --quiet --filter label=com.docker.compose.project=mail-sandbox-task5-proof")
             |    if [ "§TASK5_FAKE_SCENARIO" = initial-network-query-fails ]; then
             |      exit 11
             |    fi
             |    ;;
-            |  "ps --all --format {{.Names}}")
+            |  "ps --all --quiet --filter name=^/mail-sandbox-task5-proof-dovecot-1§"|\
+            |  "ps --all --quiet --filter name=^/mail-sandbox-task5-proof-dovecot-operator-1§"|\
+            |  "ps --all --quiet --filter name=^/mail-sandbox-task5-proof-postfix-1§"|\
+            |  "ps --all --quiet --filter name=^/mail-sandbox-task5-proof-oauth2-mock-1§")
             |    if [ "§TASK5_FAKE_SCENARIO" = full-container-query-fails ]; then
             |      exit 14
             |    fi
-            |    printf '%s\n' mail-sandbox-task5-proof-dovecot-10
-            |    case "§{TASK5_FAKE_COLLISION_NAME:-}" in
-            |      mail-sandbox-task5-proof-*-1)
-            |        printf '%s\n' "§TASK5_FAKE_COLLISION_NAME"
-            |        printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |    case "§*" in
+            |      *"§{TASK5_FAKE_COLLISION_NAME:-}§")
+            |        if [ -n "§{TASK5_FAKE_COLLISION_NAME:-}" ]; then
+            |          printf '%s\n' fixed-name-container-id
+            |          printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |        fi
             |        ;;
             |    esac
             |    ;;
-            |  "network ls --format {{.Name}}")
+            |  "network ls --quiet --filter name=^mail-sandbox-task5-proof_default§"|\
+            |  "network ls --quiet --filter name=^mail-sandbox-task5-proof_operator-ingress§")
             |    if [ "§TASK5_FAKE_SCENARIO" = full-network-query-fails ]; then
             |      exit 15
             |    fi
-            |    printf '%s\n' mail-sandbox-task5-proof_default-extra
-            |    case "§{TASK5_FAKE_COLLISION_NAME:-}" in
-            |      mail-sandbox-task5-proof_default|mail-sandbox-task5-proof_operator-ingress)
-            |        printf '%s\n' "§TASK5_FAKE_COLLISION_NAME"
-            |        printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |    case "§*" in
+            |      *"§{TASK5_FAKE_COLLISION_NAME:-}§")
+            |        if [ -n "§{TASK5_FAKE_COLLISION_NAME:-}" ]; then
+            |          printf '%s\n' fixed-name-network-id
+            |          printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |        fi
             |        ;;
             |    esac
             |    if [ "§TASK5_FAKE_SCENARIO" = cleanup-exact-network-remains ] &&
-            |      [ -f "§TASK5_FAKE_STATE/down-seen" ]; then
-            |      printf '%s\n' mail-sandbox-task5-proof_operator-ingress
+            |      [ -f "§TASK5_FAKE_STATE/down-seen" ] &&
+            |      [ "§*" = "network ls --quiet --filter name=^mail-sandbox-task5-proof_operator-ingress§" ]; then
+            |      printf '%s\n' fixed-name-network-id
             |      printf '%s\n' "fake-name-output mail-sandbox-task5-proof_operator-ingress" >> "§TASK5_FAKE_LOG"
             |    fi
             |    ;;
-            |  "volume ls --format {{.Name}}")
+            |  "volume ls --quiet --filter name=^mail-sandbox-task5-proof_task5-proof-vmail§"|\
+            |  "volume ls --quiet --filter name=^mail-sandbox-task5-proof_task5-proof-logs§")
             |    if [ "§TASK5_FAKE_SCENARIO" = full-volume-query-fails ]; then
             |      exit 16
             |    fi
-            |    printf '%s\n' mail-sandbox-task5-proof_task5-proof-logs-extra
-            |    case "§{TASK5_FAKE_COLLISION_NAME:-}" in
-            |      mail-sandbox-task5-proof_task5-proof-vmail|mail-sandbox-task5-proof_task5-proof-logs)
-            |        printf '%s\n' "§TASK5_FAKE_COLLISION_NAME"
-            |        printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |    case "§*" in
+            |      *"§{TASK5_FAKE_COLLISION_NAME:-}§")
+            |        if [ -n "§{TASK5_FAKE_COLLISION_NAME:-}" ]; then
+            |          printf '%s\n' fixed-name-volume-id
+            |          printf '%s\n' "fake-name-output §TASK5_FAKE_COLLISION_NAME" >> "§TASK5_FAKE_LOG"
+            |        fi
             |        ;;
             |    esac
             |    if [ "§TASK5_FAKE_SCENARIO" = cleanup-exact-volume-remains ] &&
-            |      [ -f "§TASK5_FAKE_STATE/down-seen" ]; then
-            |      printf '%s\n' mail-sandbox-task5-proof_task5-proof-logs
+            |      [ -f "§TASK5_FAKE_STATE/down-seen" ] &&
+            |      [ "§*" = "volume ls --quiet --filter name=^mail-sandbox-task5-proof_task5-proof-logs§" ]; then
+            |      printf '%s\n' fixed-name-volume-id
             |      printf '%s\n' "fake-name-output mail-sandbox-task5-proof_task5-proof-logs" >> "§TASK5_FAKE_LOG"
             |    fi
             |    ;;
-            |  "ps --quiet")
+            |  "ps --all --quiet --no-trunc --filter label=com.docker.compose.project=dovecot-docker --filter label=com.docker.compose.service=dovecot")
+            |    if [ -f "§TASK5_FAKE_STATE/down-seen" ]; then
+            |      if [ "§TASK5_FAKE_SCENARIO" = postflight-list-fails ]; then
+            |        exit 17
+            |      fi
+            |      if [ "§TASK5_FAKE_SCENARIO" = postflight-id-changes ]; then
+            |        printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            |        exit 0
+            |      fi
+            |    fi
+            |    printf '%s\n' "§baseline_dovecot_id"
+            |    ;;
+            |  "ps --all --quiet --no-trunc --filter label=com.docker.compose.project=dovecot-docker --filter label=com.docker.compose.service=postfix")
             |    if [ "§TASK5_FAKE_SCENARIO" = baseline-ps-fails ]; then
             |      exit 12
             |    fi
-            |    printf '%s\n' baseline-a baseline-b
+            |    printf '%s\n' "§baseline_postfix_id"
+            |    ;;
+            |  "ps --all --quiet --no-trunc --filter label=com.docker.compose.project=dovecot-docker --filter label=com.docker.compose.service=oauth2-mock")
+            |    printf '%s\n' "§baseline_oauth2_id"
             |    ;;
             |  inspect*)
-            |    for last_argument do :; done
+            |    if [ "§#" -ne 4 ] ||
+            |      [ "§1" != inspect ] ||
+            |      [ "§2" != --format ] ||
+            |      [ "§3" != "§health_inspect_format" ]; then
+            |      printf '%s\n' "forbidden-docker-access §*" >> "§TASK5_FAKE_LOG"
+            |      exit 88
+            |    fi
+            |    last_argument=§4
+            |    case "§last_argument" in
+            |      "§baseline_dovecot_id"|"§baseline_postfix_id"|"§baseline_oauth2_id") ;;
+            |      *)
+            |        printf '%s\n' "forbidden-docker-access §*" >> "§TASK5_FAKE_LOG"
+            |        exit 88
+            |        ;;
+            |    esac
             |    if [ "§TASK5_FAKE_SCENARIO" = baseline-inspect-fails ] &&
-            |      [ "§last_argument" = baseline-b ]; then
+            |      [ "§last_argument" = "§baseline_postfix_id" ]; then
             |      exit 13
             |    fi
-            |    printf '%s\n' "§last_argument-full 2026-07-29T00:00:00Z running none 0"
+            |    if [ -f "§TASK5_FAKE_STATE/down-seen" ]; then
+            |      if [ "§TASK5_FAKE_SCENARIO" = postflight-inspect-fails ] &&
+            |        [ "§last_argument" = "§baseline_dovecot_id" ]; then
+            |        exit 18
+            |      fi
+            |      if [ "§TASK5_FAKE_SCENARIO" = postflight-state-changes ] &&
+            |        [ "§last_argument" = "§baseline_dovecot_id" ]; then
+            |        printf '%s\n' "§last_argument 2026-07-29T00:00:01Z exited none 1"
+            |        exit 0
+            |      fi
+            |    fi
+            |    printf '%s\n' "§last_argument 2026-07-29T00:00:00Z running none 0"
             |    ;;
-            |  *" DovecotOperatorStartupLiveTest")
+            |  "compose --file docker-compose.yml config --quiet oauth2-mock dovecot postfix"|\
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml config --quiet oauth2-mock dovecot postfix dovecot-operator"|\
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml up --detach --build --force-recreate --wait oauth2-mock dovecot postfix"|\
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml --profile dovecot-operator up --detach --build --force-recreate --no-deps --wait dovecot-operator"|\
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml --profile dovecot-operator ps oauth2-mock dovecot postfix dovecot-operator")
             |    ;;
-            |  *" down --volumes --remove-orphans")
+            |  "compose --file docker-compose.yml --profile dovecot-operator config --format json oauth2-mock dovecot postfix dovecot-operator"|\
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml config --format json oauth2-mock dovecot postfix dovecot-operator")
+            |    printf '%s\n' '{}'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T dovecot dovecot --version")
+            |    if [ "§TASK5_FAKE_SCENARIO" = provider-version-mismatch ]; then
+            |      printf '%s\n' '2.4.3 (wrong)'
+            |    else
+            |      printf '%s\n' '2.4.4 (8b687aa65c)'
+            |    fi
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T oauth2-mock python --version")
+            |    printf '%s\n' 'Python 3.14.6'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix postconf -h mail_version")
+            |    printf '%s\n' '3.10.12'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix postconf -h compatibility_level")
+            |    printf '%s\n' '3.6'
+            |    ;;
+            |  'compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix dpkg-query -W -f=§{Package}=§{Version}\n postfix')
+            |    printf '%s\n' 'postfix=3.10.12-0+deb13u2'
+            |    ;;
+            |  'compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix dpkg-query -W -f=§{Package}=§{Version}\n libsasl2-2')
+            |    printf '%s\n' 'libsasl2-2=2.1.28+dfsg1-9'
+            |    ;;
+            |  'compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix dpkg-query -W -f=§{Package}=§{Version}\n libsasl2-modules')
+            |    printf '%s\n' 'libsasl2-modules=2.1.28+dfsg1-9'
+            |    ;;
+            |  'compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix dpkg-query -W -f=§{Package}=§{Version}\n sasl2-bin')
+            |    printf '%s\n' 'sasl2-bin=2.1.28+dfsg1-9'
+            |    ;;
+            |  'compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T postfix dpkg-query -W -f=§{Package}=§{Version}\n netcat-openbsd')
+            |    printf '%s\n' 'netcat-openbsd=1.229-1'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T dovecot /dovecot/bin/doveconf -n")
+            |    printf '%s\n' 'dovecot_config_version = 2.4.4'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T dovecot-operator /dovecot/bin/doveconf -n")
+            |    printf '%s\n' 'dovecot_config_version = 2.4.4'
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml exec -T dovecot-operator /usr/local/bin/operator-healthcheck")
+            |    ;;
+            |  "compose --project-name mail-sandbox-task5-proof --file docker-compose.yml --file debug-dashboard/dashboard-server/testResources/dovecot-gate0c/compose.task5-proof.yml down --volumes --remove-orphans")
             |    if [ "§TASK5_FAKE_SCENARIO" = signal-during-cleanup-down ] ||
             |      [ "§TASK5_FAKE_SCENARIO" = signal-during-successful-cleanup-down ]; then
             |      /usr/bin/python3 -c '
@@ -2763,6 +3345,10 @@ class DovecotTask5ProofLifecycleTest {
             |      [ "§TASK5_FAKE_SCENARIO" = main-and-down-fail ]; then
             |      exit 42
             |    fi
+            |    ;;
+            |  *)
+            |    printf '%s\n' "forbidden-docker-access §*" >> "§TASK5_FAKE_LOG"
+            |    exit 88
             |    ;;
             |esac
             |exit 0
@@ -2976,6 +3562,28 @@ class DovecotTask5ProofLifecycleTest {
             |    ;;
             |esac
             |case "§*" in
+            |  "test --include-module dashboard-server --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorOwnedEvidenceLiveTest")
+            |    root="§TASK5_FAKE_REPOSITORY/debug-dashboard/.runtime/task5-proof/provider-evidence"
+            |    [ "§{TASK5_DOVECOT_EVIDENCE_ROOT:-unset}" = "§root" ]
+            |    [ -d "§root" ]
+            |    [ ! -L "§root" ]
+            |    [ "§(stat -f '%Lp' "§root")" = 700 ]
+            |    for evidence in \
+            |      base-compose.json \
+            |      proof-compose.json \
+            |      ordinary-doveconf.txt \
+            |      operator-doveconf.txt
+            |    do
+            |      [ -f "§root/§evidence" ]
+            |      [ ! -L "§root/§evidence" ]
+            |      [ "§(stat -f '%Lp' "§root/§evidence")" = 600 ]
+            |      [ "§(stat -f '%z' "§root/§evidence")" -ge 1 ]
+            |      [ "§(stat -f '%z' "§root/§evidence")" -le 1048576 ]
+            |    done
+            |    printf '%s\n' \
+            |      'provider-evidence-contract 700 600 600 600 600' \
+            |      >> "§TASK5_FAKE_LOG"
+            |    ;;
             |  "test --include-module dashboard-server --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorExecTransportLiveTest")
             |    exec_proof_mode="§{TASK5_OPERATOR_EXEC_PROOF_MODE:-full}"
             |    case "§exec_proof_mode" in

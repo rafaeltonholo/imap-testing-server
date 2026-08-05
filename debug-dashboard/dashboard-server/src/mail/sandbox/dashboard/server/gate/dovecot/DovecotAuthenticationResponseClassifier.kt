@@ -43,6 +43,8 @@ internal object DovecotAuthenticationResponseClassifier {
 
     fun classifyPop3(line: ByteArray): DovecotAuthenticationResponse =
         when {
+            line.contentEquals(POP3_OK) ->
+                DovecotAuthenticationResponse.Success
             line.hasExactResponse(
                 offset = 0,
                 status = POP3_OK,

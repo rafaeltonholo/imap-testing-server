@@ -58,6 +58,12 @@ class DovecotAuthenticationResponseClassifierTest {
     fun pop3RequiresTheExactPermanentAuthenticationFailureCode() {
         val cases = mapOf(
             "+OK authenticated" to DovecotAuthenticationResponse.Success,
+            "+OK" to DovecotAuthenticationResponse.Success,
+            "+OK " to DovecotAuthenticationResponse.Indeterminate,
+            "+OKAY" to DovecotAuthenticationResponse.Indeterminate,
+            "+OK\t" to DovecotAuthenticationResponse.Indeterminate,
+            "+OK \u0000" to DovecotAuthenticationResponse.Indeterminate,
+            "+OK \u007f" to DovecotAuthenticationResponse.Indeterminate,
             "-ERR [AUTH] Authentication failed." to
                 DovecotAuthenticationResponse.PermanentFailure,
             "-ERR [SYS/TEMP] Authentication service unavailable." to

@@ -20,6 +20,62 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 
+internal const val TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS = 1_000
+internal const val TASK6_AUTHENTICATION_READ_TIMEOUT_MILLIS = 20_000
+
+internal interface Task6ProtocolReadDeadline {
+    fun beforeRead()
+
+    fun afterRead()
+}
+
+internal class Task6AuthenticationReadDeadline(
+    timeoutMillis: Int,
+    private val nanoTime: () -> Long,
+    private val applyReadTimeoutMillis: (Int) -> Unit,
+) : Task6ProtocolReadDeadline {
+    private val timeoutNanos: Long
+    private val startedAtNanos: Long
+
+    init {
+        require(timeoutMillis > 0) {
+            "Authentication response deadline must be positive"
+        }
+        timeoutNanos = Math.multiplyExact(
+            timeoutMillis.toLong(),
+            NANOS_PER_MILLISECOND,
+        )
+        startedAtNanos = nanoTime()
+    }
+
+    override fun beforeRead() {
+        val remainingNanos = remainingNanosOrThrow()
+        val remainingMillis = (
+            (remainingNanos - 1L) / NANOS_PER_MILLISECOND + 1L
+            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        applyReadTimeoutMillis(remainingMillis)
+    }
+
+    override fun afterRead() {
+        remainingNanosOrThrow()
+    }
+
+    private fun remainingNanosOrThrow(): Long {
+        val elapsedNanos = nanoTime() - startedAtNanos
+        val remainingNanos = timeoutNanos - elapsedNanos
+        if (remainingNanos <= 0L) {
+            throw SocketTimeoutException(
+                "Authentication response deadline expired",
+            )
+        }
+        return remainingNanos
+    }
+
+    private companion object {
+        const val NANOS_PER_MILLISECOND = 1_000_000L
+    }
+}
+
 internal fun requireDovecotOperatorTargetRejected(
     target: String,
     activeMasterId: DovecotOperatorId,
@@ -127,15 +183,25 @@ internal class DovecotIsolationProtocolProof private constructor(
         val socket = sslContext.socketFactory.createSocket() as SSLSocket
         try {
             configureTls(socket)
-            socket.connect(loopbackEndpoint(port), SOCKET_TIMEOUT_MILLIS)
+            socket.connect(
+                loopbackEndpoint(port),
+                TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS,
+            )
             socket.startHandshake()
-            readBoundedLine(socket.inputStream).useBytes { greeting ->
+            readBoundedLine(
+                socket.inputStream,
+                setupReadDeadline(socket),
+            ).useBytes { greeting ->
                 require(greeting.startsWithAscii("+OK")) {
                     "POP3 greeting was invalid"
                 }
             }
+            val readDeadline = authenticationReadDeadline(socket)
             writeAsciiLine(socket.outputStream, "USER ", usernameBytes)
-            val userResponse = readBoundedLine(socket.inputStream).useBytes(
+            val userResponse = readBoundedLine(
+                socket.inputStream,
+                readDeadline,
+            ).useBytes(
                 DovecotAuthenticationResponseClassifier::classifyPop3,
             )
             when (userResponse) {
@@ -148,7 +214,7 @@ internal class DovecotIsolationProtocolProof private constructor(
             credential.withSecretBytes { secret ->
                 writeAsciiLine(socket.outputStream, "PASS ", secret)
             }
-            readBoundedLine(socket.inputStream).useBytes { response ->
+            readBoundedLine(socket.inputStream, readDeadline).useBytes { response ->
                 check(
                     DovecotAuthenticationResponseClassifier.classifyPop3(
                         response,
@@ -171,25 +237,38 @@ internal class DovecotIsolationProtocolProof private constructor(
         val usernameBytes = username.toByteArray(StandardCharsets.US_ASCII)
         try {
             Socket().use { socket ->
-                socket.soTimeout = SOCKET_TIMEOUT_MILLIS
-                socket.connect(loopbackEndpoint(port), SOCKET_TIMEOUT_MILLIS)
-                readBoundedLine(socket.inputStream).useBytes {
+                socket.soTimeout =
+                    TASK6_AUTHENTICATION_READ_TIMEOUT_MILLIS
+                socket.connect(
+                    loopbackEndpoint(port),
+                    TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS,
+                )
+                val setupReadDeadline = setupReadDeadline(socket)
+                readBoundedLine(socket.inputStream, setupReadDeadline).useBytes {
                     require(it.startsWithAscii("220")) {
                         "SMTP greeting was invalid"
                     }
                 }
                 socket.outputStream.write(SMTP_EHLO)
                 socket.outputStream.flush()
-                readSmtpReply(socket.inputStream, "250")
+                readSmtpReply(socket.inputStream, "250", setupReadDeadline)
+                val readDeadline = authenticationReadDeadline(socket)
                 socket.outputStream.write(SMTP_AUTH_LOGIN)
                 socket.outputStream.flush()
-                requireSmtpCode(socket.inputStream, "334")
+                requireSmtpCode(socket.inputStream, "334", readDeadline)
                 writeBase64Line(socket.outputStream, usernameBytes)
-                requireSmtpCode(socket.inputStream, "334")
+                if (
+                    !requireSmtpPasswordOrEarlyRejection(
+                        socket.inputStream,
+                        readDeadline,
+                    )
+                ) {
+                    return
+                }
                 credential.withSecretBytes { secret ->
                     writeBase64Line(socket.outputStream, secret)
                 }
-                readBoundedLine(socket.inputStream).useBytes { response ->
+                readBoundedLine(socket.inputStream, readDeadline).useBytes { response ->
                     check(response.isTerminalSmtpReply("535")) {
                         "SMTP SASL accepted the operator master credential"
                     }
@@ -273,26 +352,25 @@ internal class DovecotIsolationProtocolProof private constructor(
             configureTls(socket)
             socket.connect(
                 loopbackEndpoint(requireOrdinaryImapsPort()),
-                SOCKET_TIMEOUT_MILLIS,
+                TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS,
             )
             socket.startHandshake()
-            readBoundedLine(socket.inputStream).useBytes { greeting ->
+            readBoundedLine(
+                socket.inputStream,
+                setupReadDeadline(socket),
+            ).useBytes { greeting ->
                 require(greeting.startsWithAscii("* OK")) {
                     "IMAP greeting was invalid"
                 }
             }
-            socket.outputStream.write(IMAP_AUTH_LOGIN)
-            socket.outputStream.flush()
-            requireContinuation(socket.inputStream, USERNAME_CHALLENGE)
-            writeBase64Line(socket.outputStream, usernameBytes)
-            requireContinuation(socket.inputStream, PASSWORD_CHALLENGE)
-            writeBase64Line(socket.outputStream, password)
-            readBoundedLine(socket.inputStream).useBytes { completion ->
-                DovecotAuthenticationResponseClassifier.classifyImap(
-                    line = completion,
-                    tag = IMAP_AUTH_TAG,
-                )
-            }
+            val readDeadline = authenticationReadDeadline(socket)
+            ordinaryImapLoginExchange(
+                input = socket.inputStream,
+                output = socket.outputStream,
+                username = usernameBytes,
+                password = password,
+                readDeadline = readDeadline,
+            )
         } finally {
             usernameBytes.fill(0)
             runCatching(socket::close)
@@ -302,32 +380,92 @@ internal class DovecotIsolationProtocolProof private constructor(
     private fun oauthClient(port: Int): DovecotBoundedHttpProofClient =
         DovecotBoundedHttpProofClient(
             port = port,
-            timeoutMillis = SOCKET_TIMEOUT_MILLIS,
+            timeoutMillis = TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS,
             maximumResponseBytes = MAX_HTTP_RESPONSE_BYTES,
         )
+
+    internal fun ordinaryImapLoginExchange(
+        input: InputStream,
+        output: OutputStream,
+        username: ByteArray,
+        password: ByteArray,
+        readDeadline: Task6ProtocolReadDeadline,
+    ): DovecotAuthenticationResponse {
+        output.write(IMAP_AUTH_LOGIN)
+        output.flush()
+        requireContinuation(input, USERNAME_CHALLENGE, readDeadline)
+        writeBase64Line(output, username)
+
+        val earlyResult = readBoundedLine(input, readDeadline).useBytes { response ->
+            if (response.contentEquals(PASSWORD_CHALLENGE)) {
+                null
+            } else {
+                DovecotAuthenticationResponseClassifier.classifyImap(
+                    line = response,
+                    tag = IMAP_AUTH_TAG,
+                ).also { result ->
+                    check(
+                        result ==
+                            DovecotAuthenticationResponse.PermanentFailure,
+                    ) {
+                        "Ordinary IMAP early rejection was not permanent"
+                    }
+                }
+            }
+        }
+        if (earlyResult != null) return earlyResult
+
+        writeBase64Line(output, password)
+        return readBoundedLine(input, readDeadline).useBytes { completion ->
+            DovecotAuthenticationResponseClassifier.classifyImap(
+                line = completion,
+                tag = IMAP_AUTH_TAG,
+            )
+        }
+    }
 
     private fun requireContinuation(
         input: InputStream,
         expected: ByteArray,
+        readDeadline: Task6ProtocolReadDeadline,
     ) {
-        readBoundedLine(input).useBytes {
+        readBoundedLine(input, readDeadline).useBytes {
             require(it.contentEquals(expected)) {
                 "SASL LOGIN challenge was invalid"
             }
         }
     }
 
-    private fun requireSmtpCode(input: InputStream, code: String) {
-        readBoundedLine(input).useBytes {
-            require(it.startsWithAscii(code)) {
+    private fun requireSmtpCode(
+        input: InputStream,
+        code: String,
+        readDeadline: Task6ProtocolReadDeadline,
+    ) {
+        readBoundedLine(input, readDeadline).useBytes {
+            require(it.isTerminalSmtpReply(code)) {
                 "SMTP SASL challenge was invalid"
             }
         }
     }
 
-    private fun readSmtpReply(input: InputStream, code: String) {
+    private fun requireSmtpPasswordOrEarlyRejection(
+        input: InputStream,
+        readDeadline: Task6ProtocolReadDeadline,
+    ): Boolean = readBoundedLine(input, readDeadline).useBytes { response ->
+        when {
+            response.isTerminalSmtpReply("334") -> true
+            response.isTerminalSmtpReply("535") -> false
+            else -> error("SMTP SASL username response was indeterminate")
+        }
+    }
+
+    private fun readSmtpReply(
+        input: InputStream,
+        code: String,
+        readDeadline: Task6ProtocolReadDeadline,
+    ) {
         repeat(MAX_SMTP_REPLY_LINES) {
-            readBoundedLine(input).useBytes { line ->
+            readBoundedLine(input, readDeadline).useBytes { line ->
                 require(line.startsWithAscii(code)) {
                     "SMTP EHLO response was invalid"
                 }
@@ -381,12 +519,17 @@ internal class DovecotIsolationProtocolProof private constructor(
         }
     }
 
-    private fun readBoundedLine(input: InputStream): ByteArray {
+    private fun readBoundedLine(
+        input: InputStream,
+        readDeadline: Task6ProtocolReadDeadline,
+    ): ByteArray {
         val buffer = ByteArray(MAX_PROTOCOL_LINE_BYTES + 1)
         var size = 0
         try {
             while (true) {
+                readDeadline.beforeRead()
                 val value = input.read()
+                readDeadline.afterRead()
                 check(value >= 0) { "Protocol response ended early" }
                 if (value == '\n'.code) {
                     check(
@@ -453,8 +596,28 @@ internal class DovecotIsolationProtocolProof private constructor(
         socket.enabledProtocols = socket.enabledProtocols.filter {
             it == "TLSv1.3" || it == "TLSv1.2"
         }.toTypedArray()
-        socket.soTimeout = SOCKET_TIMEOUT_MILLIS
+        socket.soTimeout = TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS
     }
+
+    private fun authenticationReadDeadline(
+        socket: Socket,
+    ): Task6AuthenticationReadDeadline = Task6AuthenticationReadDeadline(
+        timeoutMillis = TASK6_AUTHENTICATION_READ_TIMEOUT_MILLIS,
+        nanoTime = System::nanoTime,
+        applyReadTimeoutMillis = { remainingMillis ->
+            socket.soTimeout = remainingMillis
+        },
+    )
+
+    private fun setupReadDeadline(
+        socket: Socket,
+    ): Task6AuthenticationReadDeadline = Task6AuthenticationReadDeadline(
+        timeoutMillis = TASK6_PROTOCOL_CONNECT_TIMEOUT_MILLIS,
+        nanoTime = System::nanoTime,
+        applyReadTimeoutMillis = { remainingMillis ->
+            socket.soTimeout = remainingMillis
+        },
+    )
 
     private fun loopbackEndpoint(port: Int): InetSocketAddress =
         InetSocketAddress(LOOPBACK, port)
@@ -503,7 +666,6 @@ internal class DovecotIsolationProtocolProof private constructor(
             )
         }
 
-        private const val SOCKET_TIMEOUT_MILLIS = 1_000
         private const val MAX_PROTOCOL_LINE_BYTES = 16 * 1024
         private const val MAX_SMTP_REPLY_LINES = 64
         private const val MAX_HTTP_RESPONSE_BYTES = 16 * 1024

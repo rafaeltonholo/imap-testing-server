@@ -7,14 +7,11 @@
 - **Task 3 — Make OAuth decisions eligibility-aware:** complete.
 - **Task 4 — Make Postfix recipient routing eligibility-aware:** complete.
 - **Task 5 — Add a physically separate master-only IMAP ingress:** complete.
-- **Task 6 — Prove network isolation and credential rotation:** the original
-  implementation and non-live verification completed, and two checked Docker
-  Desktop lifecycles executed. The second disproved loopback-publication
-  isolation; the reviewed stdio transport implementation and rerun are
-  pending.
-- **Gate 0C:** in progress. Task 6 live isolation/rotation evidence is pending;
-  Tasks 7–9 still own mail behavior, lifecycle, and the final decision. This
-  document does not record a Gate 0C PASS.
+- **Task 6 — Prove network isolation and credential rotation:** complete under
+  the superseding Dovecot 2.4.4 evidence recorded below. The earlier 2.4.1
+  attempts remain historical evidence of the rejected host-publication design.
+- **Gate 0C:** in progress. Tasks 7–9 still own the remaining mail behavior,
+  lifecycle, and final decision. This document does not record a Gate 0C PASS.
 
 ## Task 1 baseline evidence
 
@@ -881,6 +878,113 @@ the operator credential, or any OpenSSL exec child survives its bounded
 lifecycle, Task 6 is `BLOCKED/STOP`; the assertion must not be weakened or
 skipped.
 
+### Task 6 superseding Dovecot 2.4.4 lifecycle evidence
+
+The following result was recorded immediately after the checked lifecycle
+completed, at `2026-08-05T12:00:55Z`. It supersedes only the pending Task 6
+conclusion above. The original Dovecot 2.4.1 evidence and the two failed
+host-publication attempts remain unchanged as historical evidence.
+
+The 2.4.4 reproof exposed real compatibility and proof-integrity failures
+before it passed:
+
+- Dovecot 2.4.4 labels the IPv6 socket-table peer column `remote_address`,
+  while the IPv4 table retains `rem_address`. The operator healthcheck now
+  accepts only those two exact pinned headers and still requires one IPv4
+  loopback listener.
+- Debian Postfix 3.10.12 did not provide the chroot `etc` directory before the
+  entrypoint copied resolver inputs. The entrypoint now creates exactly
+  `/var/spool/postfix/etc` before those copies.
+- Dovecot may spend its pinned 15-second authentication-penalty ceiling before
+  returning an early permanent rejection for a combined master username. The
+  protocol proof now uses one 20-second absolute monotonic authentication
+  deadline across all response lines, checks it before and after each byte,
+  and accepts only the protocol-specific permanent rejection without sending
+  the secret.
+- Review found that the effective-config tests could start nested Docker
+  commands that were invisible to the lifecycle fake. Docker ownership moved
+  entirely into the shell lifecycle. It creates a mode-`0700` evidence
+  directory, exclusively writes exactly four regular mode-`0600` files bounded
+  to `1..1048576` bytes, and then runs a pure Kotlin audit over the captured
+  base/proof Compose JSON and ordinary/operator `doveconf -n` output.
+- The last failing live 2.4.4 attempt reached startup, isolation, and rotation,
+  then failed while seeding the held-session proof. The application reserves
+  16 same-user loopback sessions, but Dovecot's default per-user/per-IP ceiling
+  admitted only 10. A focused RED test observed the absent setting as
+  `expected: 16, actual: null`; the standalone operator now pins
+  `mail_max_userip_connections = 16`. That failing lifecycle still completed
+  mandatory teardown and reported `baseline-match`.
+
+The post-repair non-live evidence was:
+
+- `DovecotTask5ProofLifecycleTest`: `44/44`, zero skipped;
+- `DovecotOperatorConfigTest`: `14/14`, zero skipped, including the exact
+  16-session capacity contract;
+- authentication classifier and isolation/deadline contracts: `20/20`, zero
+  skipped; and
+- the canonical lifecycle's complete Kotlin selection: `268/268`, zero
+  skipped, followed by the independent Python network-helper selection:
+  `22/22`.
+
+The canonical command was the sole checked entrypoint:
+
+```bash
+debug-dashboard/dashboard-server/testResources/dovecot-gate0c/run-task5-proof.sh
+```
+
+Before any operation proof, the lifecycle captured service-scoped Compose
+models containing only `oauth2-mock`, `dovecot`, `postfix`, and
+`dovecot-operator`. After startup it captured both effective Dovecot configs.
+`DovecotOperatorOwnedEvidenceLiveTest` passed `12/12` with zero skipped and
+proved the reviewed topology, mounts, profiles, healthcheck, four-passdb
+ordering, ordinary no-master boundary, and operator LOGIN-only mechanism from
+those lifecycle-owned artifacts.
+
+The containers reported these exact selected versions and packages:
+
+```text
+dovecot --version -> 2.4.4 (8b687aa65c)
+python --version -> Python 3.14.6
+postconf mail_version -> 3.10.12
+postconf compatibility_level -> 3.6
+dpkg-query postfix -> postfix=3.10.12-0+deb13u2
+dpkg-query libsasl2-2 -> libsasl2-2=2.1.28+dfsg1-9
+dpkg-query libsasl2-modules -> libsasl2-modules=2.1.28+dfsg1-9
+dpkg-query sasl2-bin -> sasl2-bin=2.1.28+dfsg1-9
+dpkg-query netcat-openbsd -> netcat-openbsd=1.229-1
+```
+
+Both Dovecot services used
+`dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4`.
+The rebuilt supporting images retained the selected parent digests
+`python:3.14.6-slim-trixie@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6`
+and
+`debian:13.6-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd`.
+The operator effective config reported configuration version 2.4.4 and the
+official image's storage-compatibility version 2.4.3. That value is the image's
+storage-format compatibility declaration, not a second or downgraded Dovecot
+runtime.
+
+Every checked live boundary passed with zero skips:
+
+- dependency-free operator healthcheck: `PASS`;
+- exec/stdio transport preflight and zero-process inventory: `1/1`;
+- eligible-target startup/master-login proof: `1/1`;
+- ordinary/operator protocol and network-isolation matrix: `1/1`;
+- staged credential probe, switch, old-session drain, and revocation: `1/1`;
+- full process proof, including 16 simultaneously held same-user sessions,
+  the seventeenth lease rejection before any transport start, and complete
+  session/process reaping: `1/1`; and
+- final zero-process inventory: `1/1`.
+
+The lifecycle never enumerated, resolved, inspected, or supplied the normal
+Stalwart service as an operand. Its ordinary baseline and postflight were
+limited to container IDs selected by the exact `dovecot-docker` project plus
+`dovecot`, `postfix`, or `oauth2-mock` service labels. Cleanup removed every
+fixed proof container, network, volume, runtime artifact, evidence file, and
+ownership lock, and the final allowlisted comparison reported exactly
+`baseline-match`. No normal Stalwart access was performed.
+
 ## Verification
 
 The focused audit command is:
@@ -893,11 +997,13 @@ cd debug-dashboard
   'mail.sandbox.dashboard.server.gate.dovecot.DovecotBaselineConfigAuditTest'
 ```
 
-The final run passed `4/4` with zero skipped or failed. It verifies the pinned
-Dovecot image inside the Dovecot service, exact service-scoped port lists
-(including rejection of duplicates or unreviewed syntax), absence of every
-fixed container name, absence of deferred eligibility hazards, and exactly
-one assignment for each required Postfix recipient restriction.
+The original focused run passed `4/4` with zero skipped or failed. The
+post-2.4.4 closeout rerun passed the expanded class `6/6`, also with zero
+skipped or failed. It verifies the pinned Dovecot image inside the Dovecot
+service, exact service-scoped port lists (including rejection of duplicates or
+unreviewed syntax), absence of every fixed container name, absence of deferred
+eligibility hazards, and exactly one assignment for each required Postfix
+recipient restriction.
 
 `docker compose config --quiet` exited `0`. The expanded
 `docker compose config` model was inspected with secret-bearing environment

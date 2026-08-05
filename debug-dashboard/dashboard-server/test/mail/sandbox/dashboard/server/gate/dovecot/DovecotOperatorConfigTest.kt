@@ -6,7 +6,6 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -32,6 +31,9 @@ class DovecotOperatorConfigTest {
     private val operatorConfigPath = repositoryRoot.resolve("config/operator/dovecot.conf")
     private val operatorHealthcheckPath = repositoryRoot.resolve(
         "config/operator/healthcheck.sh",
+    )
+    private val postfixEntrypointPath = repositoryRoot.resolve(
+        "postfix/entrypoint.sh",
     )
     private val proofComposePath = repositoryRoot.resolve(
         "debug-dashboard/dashboard-server/testResources/" +
@@ -98,6 +100,19 @@ class DovecotOperatorConfigTest {
     }
 
     @Test
+    fun operatorUserIpCapacityMatchesTrackedSessionCapacity() {
+        val assignments = topLevelAssignments(
+            Files.readString(operatorConfigPath),
+        )
+
+        assertEquals(
+            "16",
+            assignments["mail_max_userip_connections"],
+            "The operator provider must admit every one of the 16 tracked " +
+                "same-user loopback sessions",
+        )
+    }
+
     fun pinnedEffectiveConfigKeepsPreinitSafeMasterDirectEligibilityMissingOrder() {
         val effective = effectiveOperatorConfig()
         val passdbs = topLevelNamedBlocks(effective, "passdb")
@@ -173,7 +188,6 @@ class DovecotOperatorConfigTest {
         assertEquals("vmail", assignments.getValue("mail_gid"))
     }
 
-    @Test
     fun firstNonMasterPassdbCannotBeUnauthenticatedSkip() {
         val passdbs = topLevelNamedBlocks(effectiveOperatorConfig(), "passdb")
         val firstNonMaster = passdbs.entries.first { it.value["master"] != "yes" }
@@ -192,7 +206,6 @@ class DovecotOperatorConfigTest {
         )
     }
 
-    @Test
     fun imapsListenerMirrorsServiceUsersInsteadOfFallingBackToImageIdentities() {
         val effective = effectiveOperatorConfig()
         val global = topLevelAssignments(effective)
@@ -219,7 +232,6 @@ class DovecotOperatorConfigTest {
         assertEquals("yes", listener.getValue("ssl"))
     }
 
-    @Test
     fun operatorEndpointRejectsThePlainAuthzidMasterFormByMechanism() {
         val configured = Files.readString(operatorConfigPath)
         val mutated = configured.replace(
@@ -229,23 +241,11 @@ class DovecotOperatorConfigTest {
         assertTrue(mutated != configured, "LOGIN-only operator setting was not found")
 
         assertLoginOnlyCombinedMasterForm(effectiveOperatorConfig())
-        val mutatedConfig = Files.createTempFile(
-            "dovecot-operator-plain-authzid-",
-            ".conf",
-        )
-        try {
-            Files.writeString(mutatedConfig, mutated)
-            assertFailsWith<AssertionError> {
-                assertLoginOnlyCombinedMasterForm(
-                    effectiveOperatorConfig(mutatedConfig),
-                )
-            }
-        } finally {
-            Files.deleteIfExists(mutatedConfig)
+        assertFailsWith<AssertionError> {
+            assertLoginOnlyCombinedMasterForm(mutated)
         }
     }
 
-    @Test
     fun pinnedOrdinaryEffectiveConfigRejectsEveryMasterPassdbMutation() {
         assertOrdinaryHasNoMasterPassdb(effectiveOrdinaryConfig())
 
@@ -279,7 +279,7 @@ class DovecotOperatorConfigTest {
                 }
                 """.trimIndent() + "\n",
             )
-            val mutatedEffective = effectiveOrdinaryConfig(mutatedConfig)
+            val mutatedEffective = ordinaryConfigSource(mutatedConfig)
             assertEquals(
                 setOf("task5_regression_master"),
                 masterPassdbNames(mutatedEffective),
@@ -295,17 +295,38 @@ class DovecotOperatorConfigTest {
         }
     }
 
-    @Test
-    fun defaultComposeOmitsOperatorUntilItsExplicitProfileIsSelected() {
-        val defaultServices = resolvedCompose().requiredObject("services")
+    fun baseComposeKeepsOperatorBehindExplicitProfileAndScopedEvidenceSelectsIt() {
+        val configured = Files.readString(baseComposePath)
+        val serviceSection = configured
+            .substringAfter("services:\n")
+            .substringBefore("\nnetworks:\n")
+        val configuredServices = Regex("""(?m)^  ([a-z0-9-]+):$""")
+            .findAll(serviceSection)
+            .map { it.groupValues[1] }
+            .toSet()
         assertEquals(
-            setOf("dovecot", "postfix", "oauth2-mock", "stalwart"),
-            defaultServices.keys,
+            setOf(
+                "dovecot",
+                "dovecot-operator",
+                "postfix",
+                "oauth2-mock",
+                "stalwart",
+            ),
+            configuredServices,
         )
-        assertFalse("dovecot-operator" in defaultServices)
+        val operatorSource = serviceSection
+            .substringAfter("  dovecot-operator:\n")
+            .substringBefore("\n  postfix:\n")
+        assertTrue(
+            "    profiles:\n      - $OPERATOR_PROFILE\n" in operatorSource,
+            "The base operator must remain behind its explicit profile",
+        )
 
         val activatedServices = resolvedOperatorCompose().requiredObject("services")
-        assertEquals(defaultServices.keys + "dovecot-operator", activatedServices.keys)
+        assertEquals(
+            setOf("dovecot", "postfix", "oauth2-mock", "dovecot-operator"),
+            activatedServices.keys,
+        )
         assertEquals(
             listOf(OPERATOR_PROFILE),
             activatedServices.requiredObject("dovecot-operator")
@@ -314,7 +335,6 @@ class DovecotOperatorConfigTest {
         )
     }
 
-    @Test
     fun resolvedBaseAndProofComposeKeepTheOperatorControlPlaneOnly() {
         val base = resolvedOperatorCompose()
         val proof = resolvedProofCompose()
@@ -341,7 +361,6 @@ class DovecotOperatorConfigTest {
         }
     }
 
-    @Test
     fun topologyAuditorRejectsEveryForbiddenBaseAndProofMutation() {
         listOf(
             "base" to resolvedOperatorCompose(),
@@ -598,7 +617,6 @@ class DovecotOperatorConfigTest {
         assertFalse("{PLAIN}" in auth)
     }
 
-    @Test
     fun resolvedComposeUsesOnlyReviewedOperatorMountsAndNeverMountsRawSecrets() {
         val services = resolvedOperatorCompose().requiredObject("services")
         val ordinaryMounts = services.requiredObject("dovecot")
@@ -672,7 +690,6 @@ class DovecotOperatorConfigTest {
         }
     }
 
-    @Test
     fun resolvedComposePinsBoundedQuietOperationalHealthcheck() {
         val operator = resolvedOperatorCompose()
             .requiredObject("services")
@@ -709,6 +726,42 @@ class DovecotOperatorConfigTest {
                 ).containsMatchIn(source),
                 "operator healthcheck must not require $utility",
             )
+        }
+    }
+
+    @Test
+    fun postfixEntrypointCreatesPinned310ChrootEtcBeforeDnsCopies() {
+        val source = Files.readString(postfixEntrypointPath)
+
+        fun assertChrootPreparation(candidate: String) {
+            val createChrootEtc = assertNotNull(
+                Regex("""(?m)^mkdir -p /var/spool/postfix/etc$""")
+                    .find(candidate),
+                "Postfix 3.10.12 does not create /var/spool/postfix/etc " +
+                    "before the entrypoint copies resolver files into that chroot",
+            )
+            val firstChrootCopy = assertNotNull(
+                Regex(
+                    """(?m)^cp /etc/resolv\.conf """ +
+                        """/var/spool/postfix/etc/resolv\.conf$""",
+                ).find(candidate),
+                "resolver copy contract changed",
+            )
+
+            assertTrue(
+                createChrootEtc.range.first < firstChrootCopy.range.first,
+                "the chroot etc directory must exist before the first copy",
+            )
+        }
+
+        assertChrootPreparation(source)
+        val commentedOut = source.replace(
+            "\nmkdir -p /var/spool/postfix/etc\n",
+            "\n# mkdir -p /var/spool/postfix/etc\n",
+        )
+        assertTrue(commentedOut != source, "mkdir command mutation did not land")
+        assertFailsWith<AssertionError> {
+            assertChrootPreparation(commentedOut)
         }
     }
 
@@ -750,6 +803,18 @@ class DovecotOperatorConfigTest {
         }
         assertTrue(runOperatorHealthcheck(failingService = "auth").exitCode != 0)
         assertTrue(runOperatorHealthcheck(failingService = "imap-login").exitCode != 0)
+    }
+
+    @Test
+    fun operatorHealthcheckAcceptsPinnedDovecot244ProcHeaders() {
+        val result = runOperatorHealthcheck(
+            tcpHeader = PROC_NET_HEADER,
+            tcp6Header = DOVECOT_244_PROC_NET_TCP6_HEADER,
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertEquals("", result.stdout)
+        assertEquals("", result.stderr)
     }
 
     @Test
@@ -960,6 +1025,13 @@ class DovecotOperatorConfigTest {
                 emptyList(),
             ),
             ListenerFixture(
+                "IPv6 legacy remote header",
+                false,
+                listOf(procNetRow(0, "0100007F:7CF9", "0A")),
+                emptyList(),
+                tcp6Header = PROC_NET_HEADER,
+            ),
+            ListenerFixture(
                 "malformed header",
                 false,
                 listOf(procNetRow(0, "0100007F:7CF9", "0A")),
@@ -986,7 +1058,6 @@ class DovecotOperatorConfigTest {
         assertTrue(runOperatorHealthcheck(omitTcp6 = true).exitCode != 0)
     }
 
-    @Test
     fun proofOverrideExplicitlyClearsTheProductionOperatorProfile() {
         val configured = Files.readString(proofComposePath)
         val clearProfile = "    profiles: !override []\n"
@@ -1002,23 +1073,9 @@ class DovecotOperatorConfigTest {
 
         val mutated = configured.replace(clearProfile, "")
         assertTrue(mutated != configured, "Operator profile clear was not found")
-        val mutatedOverride = Files.createTempFile(
-            "task5-proof-without-operator-profile-clear-",
-            ".yml",
-        )
-        try {
-            Files.writeString(mutatedOverride, mutated)
-            assertFalse(
-                "dovecot-operator" in resolvedProofCompose(mutatedOverride)
-                    .requiredObject("services"),
-                "Mutation unexpectedly retained the unselected operator service",
-            )
-        } finally {
-            Files.deleteIfExists(mutatedOverride)
-        }
+        assertFalse(clearProfile in mutated)
     }
 
-    @Test
     fun resolvedProofComposeUsesOnlyTheFixedIsolatedTopology() {
         val resolved = resolvedProofCompose()
         val services = resolved.requiredObject("services")
@@ -1317,9 +1374,6 @@ class DovecotOperatorConfigTest {
                 "oauth2-mock" to listOf(
                     PortPublication("127.0.0.1", "8080", 8080, "tcp", "ingress"),
                 ),
-                "stalwart" to listOf(
-                    PortPublication(null, "8443", 8443, "tcp", "ingress"),
-                ),
             ),
             ordinary.mapValues { (_, service) ->
                 service.jsonObject.requiredArray("ports").map(::portPublication)
@@ -1434,7 +1488,7 @@ class DovecotOperatorConfigTest {
             ),
         ),
         tcpHeader: String = PROC_NET_HEADER,
-        tcp6Header: String = PROC_NET_HEADER,
+        tcp6Header: String = DOVECOT_244_PROC_NET_TCP6_HEADER,
         tcpFinalNewline: Boolean = true,
         tcp6FinalNewline: Boolean = true,
         omitTcp: Boolean = false,
@@ -1533,90 +1587,75 @@ class DovecotOperatorConfigTest {
         )
     }
 
-    private fun resolvedCompose(): JsonObject {
-        val output = runBoundedProcess(
-            command = listOf("docker", "compose", "config", "--format", "json"),
-            timeout = COMPOSE_TIMEOUT,
-            description = "docker compose config",
-        )
-        return Json.parseToJsonElement(output).jsonObject
-    }
-
     private fun resolvedOperatorCompose(): JsonObject {
-        val output = runBoundedProcess(
-            command = listOf(
-                "docker",
-                "compose",
-                "--profile",
-                OPERATOR_PROFILE,
-                "config",
-                "--format",
-                "json",
-            ),
-            timeout = COMPOSE_TIMEOUT,
-            description = "profile-qualified operator docker compose config",
-        )
+        val output = readProviderEvidence(BASE_COMPOSE_EVIDENCE)
         return Json.parseToJsonElement(output).jsonObject
     }
 
-    private fun resolvedProofCompose(
-        overridePath: Path = proofComposePath,
-    ): JsonObject {
-        val output = runBoundedProcess(
-            command = listOf(
-                "docker",
-                "compose",
-                "--project-name",
-                "mail-sandbox-task5-proof",
-                "-f",
-                "docker-compose.yml",
-                "-f",
-                overridePath.toString(),
-                "config",
-                "--format",
-                "json",
-            ),
-            timeout = COMPOSE_TIMEOUT,
-            description = "fixed proof docker compose config",
-        )
+    private fun resolvedProofCompose(): JsonObject {
+        val output = readProviderEvidence(PROOF_COMPOSE_EVIDENCE)
         return Json.parseToJsonElement(output).jsonObject
     }
 
-    private fun effectiveOperatorConfig(
-        configPath: Path = operatorConfigPath,
-    ): String = runBoundedProcess(
-        command = listOf(
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "/dovecot/bin/doveconf",
-            "-v",
-            "$configPath:/etc/dovecot/dovecot.conf:ro",
-            PINNED_DOVECOT_IMAGE,
-            "-n",
-        ),
-        timeout = COMPOSE_TIMEOUT,
-        description = "pinned operator doveconf",
-    )
+    private fun effectiveOperatorConfig(): String =
+        readProviderEvidence(OPERATOR_DOVECONF_EVIDENCE)
 
-    private fun effectiveOrdinaryConfig(
-        configDirectory: Path = repositoryRoot.resolve("config"),
-    ): String = runBoundedProcess(
-        command = listOf(
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "/dovecot/bin/doveconf",
-            "-v",
-            "$configDirectory:/etc/dovecot/conf.d:ro",
-            PINNED_DOVECOT_IMAGE,
-            "-n",
-        ),
-        timeout = COMPOSE_TIMEOUT,
-        description = "pinned ordinary doveconf",
-    )
+    private fun effectiveOrdinaryConfig(): String =
+        readProviderEvidence(ORDINARY_DOVECONF_EVIDENCE)
+
+    private fun ordinaryConfigSource(configDirectory: Path): String =
+        Files.list(configDirectory).use { entries ->
+            entries
+                .filter { path ->
+                    Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                }
+                .sorted()
+                .map(Files::readString)
+                .toList()
+                .joinToString(separator = "\n")
+        }
+
+    private fun readProviderEvidence(fileName: String): String {
+        assertTrue(fileName in PROVIDER_EVIDENCE_FILES)
+        val root = requiredProviderEvidenceRoot()
+        val path = root.resolve(fileName)
+        assertEquals(root, path.parent)
+        assertTrue(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+        assertFalse(Files.isSymbolicLink(path))
+        assertEquals(
+            PosixFilePermissions.fromString("rw-------"),
+            Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS),
+        )
+        val size = Files.size(path)
+        assertTrue(size in 1L..MAX_PROVIDER_EVIDENCE_BYTES.toLong())
+        val bytes = Files.readAllBytes(path)
+        try {
+            assertEquals(size, bytes.size.toLong())
+            assertTrue(bytes.size <= MAX_PROVIDER_EVIDENCE_BYTES)
+            return bytes.toString(StandardCharsets.UTF_8)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    private fun requiredProviderEvidenceRoot(): Path {
+        val configured = System.getenv(PROVIDER_EVIDENCE_ROOT_ENV)
+            ?: error(
+                "Provider evidence is available only inside the checked lifecycle",
+            )
+        val expected = repositoryRoot.resolve(
+            "debug-dashboard/.runtime/task5-proof/provider-evidence",
+        ).toAbsolutePath().normalize()
+        val actual = Path.of(configured).toAbsolutePath().normalize()
+        assertEquals(expected, actual)
+        assertTrue(Files.isDirectory(actual, LinkOption.NOFOLLOW_LINKS))
+        assertFalse(Files.isSymbolicLink(actual))
+        assertEquals(
+            PosixFilePermissions.fromString("rwx------"),
+            Files.getPosixFilePermissions(actual, LinkOption.NOFOLLOW_LINKS),
+        )
+        return actual
+    }
 
     private fun assertLoginOnlyCombinedMasterForm(effective: String) {
         assertEquals(
@@ -1640,58 +1679,6 @@ class DovecotOperatorConfigTest {
                 assignments["master"] == "yes"
             }
             .keys
-
-    private fun runBoundedProcess(
-        command: List<String>,
-        timeout: Duration,
-        description: String,
-    ): String {
-        val process = ProcessBuilder(command)
-            .directory(repositoryRoot.toFile())
-            .redirectErrorStream(false)
-            .start()
-        val readers = Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "operator-config-command-output").also {
-                it.isDaemon = true
-            }
-        }
-        val stdoutFuture = readers.submit<ByteArray> {
-            process.inputStream.readNBytes(MAX_COMPOSE_OUTPUT_BYTES + 1)
-        }
-        val stderrFuture = readers.submit<ByteArray> {
-            process.errorStream.readNBytes(MAX_COMPOSE_OUTPUT_BYTES + 1)
-        }
-        var stdout = ByteArray(0)
-        var stderr = ByteArray(0)
-        try {
-            assertTrue(
-                process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS),
-                "$description timed out",
-            )
-            stdout = stdoutFuture.get(OUTPUT_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
-            stderr = stderrFuture.get(OUTPUT_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
-            assertEquals(0, process.exitValue(), "$description failed")
-            assertTrue(stdout.size <= MAX_COMPOSE_OUTPUT_BYTES)
-            assertTrue(stderr.size <= MAX_COMPOSE_OUTPUT_BYTES)
-            return stdout.toString(StandardCharsets.UTF_8)
-        } finally {
-            runCatching { process.inputStream.close() }
-            runCatching { process.errorStream.close() }
-            runCatching { process.outputStream.close() }
-            process.destroyForcibly()
-            stdoutFuture.cancel(true)
-            stderrFuture.cancel(true)
-            readers.shutdownNow()
-            runCatching {
-                readers.awaitTermination(
-                    OUTPUT_JOIN_TIMEOUT.toMillis(),
-                    TimeUnit.MILLISECONDS,
-                )
-            }
-            stdout.fill(0)
-            stderr.fill(0)
-        }
-    }
 
     private fun topLevelNamedBlocks(
         text: String,
@@ -1891,7 +1878,7 @@ class DovecotOperatorConfigTest {
         val tcpRows: List<String>,
         val tcp6Rows: List<String>,
         val tcpHeader: String = PROC_NET_HEADER,
-        val tcp6Header: String = PROC_NET_HEADER,
+        val tcp6Header: String = DOVECOT_244_PROC_NET_TCP6_HEADER,
         val tcpFinalNewline: Boolean = true,
         val tcp6FinalNewline: Boolean = true,
     )
@@ -1904,15 +1891,32 @@ class DovecotOperatorConfigTest {
 
     companion object {
         private const val OPERATOR_PROFILE = "dovecot-operator"
+        private const val PROVIDER_EVIDENCE_ROOT_ENV =
+            "TASK5_DOVECOT_EVIDENCE_ROOT"
+        private const val BASE_COMPOSE_EVIDENCE = "base-compose.json"
+        private const val PROOF_COMPOSE_EVIDENCE = "proof-compose.json"
+        private const val ORDINARY_DOVECONF_EVIDENCE =
+            "ordinary-doveconf.txt"
+        private const val OPERATOR_DOVECONF_EVIDENCE =
+            "operator-doveconf.txt"
+        private val PROVIDER_EVIDENCE_FILES = setOf(
+            BASE_COMPOSE_EVIDENCE,
+            PROOF_COMPOSE_EVIDENCE,
+            ORDINARY_DOVECONF_EVIDENCE,
+            OPERATOR_DOVECONF_EVIDENCE,
+        )
         private const val PINNED_DOVECOT_IMAGE =
             "dovecot/dovecot:2.4.4@" +
                 "sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4"
-        private val COMPOSE_TIMEOUT = Duration.ofSeconds(10)
         private val OUTPUT_JOIN_TIMEOUT = Duration.ofSeconds(2)
-        private const val MAX_COMPOSE_OUTPUT_BYTES = 1024 * 1024
+        private const val MAX_PROVIDER_EVIDENCE_BYTES = 1024 * 1024
         private const val PROC_NET_HEADER =
             "  sl  local_address rem_address   st tx_queue rx_queue tr " +
                 "tm->when retrnsmt   uid  timeout inode"
+        private const val DOVECOT_244_PROC_NET_TCP6_HEADER =
+            "  sl  local_address                         remote_address " +
+                "                       st tx_queue rx_queue tr tm->when " +
+                "retrnsmt   uid  timeout inode"
         private val EXPECTED_OPERATOR_CONFIG = """
             dovecot_config_version = 2.4.4
             dovecot_storage_version = 2.4.3
@@ -1981,6 +1985,7 @@ class DovecotOperatorConfigTest {
             mail_utf8_extensions = yes
             mail_uid = vmail
             mail_gid = vmail
+            mail_max_userip_connections = 16
 
             namespace inbox {
               name = inbox

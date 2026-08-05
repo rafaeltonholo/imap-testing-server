@@ -99,13 +99,14 @@ SERVICE_STATUS_EOF
 check_proc_file() {
   proc_path=$1
   proc_address_width=$2
+  proc_remote_header=$3
   proc_seen_slots='|'
 
   {
     IFS=' ' read -r proc_h1 proc_h2 proc_h3 proc_h4 proc_h5 proc_h6 \
       proc_h7 proc_h8 proc_h9 proc_h10 proc_h11 proc_h12 proc_h_extra || return 1
     case "$proc_h1|$proc_h2|$proc_h3|$proc_h4|$proc_h5|$proc_h6|$proc_h7|$proc_h8|$proc_h9|$proc_h10|$proc_h11|$proc_h12|$proc_h_extra" in
-      'sl|local_address|rem_address|st|tx_queue|rx_queue|tr|tm->when|retrnsmt|uid|timeout|inode|') ;;
+      "sl|local_address|$proc_remote_header|st|tx_queue|rx_queue|tr|tm->when|retrnsmt|uid|timeout|inode|") ;;
       *) return 1 ;;
     esac
 
@@ -165,8 +166,8 @@ operator_listener_count=0
 operator_listener_exact=0
 operator_proc_tcp=${DOVECOT_OPERATOR_PROC_TCP:-/proc/net/tcp}
 operator_proc_tcp6=${DOVECOT_OPERATOR_PROC_TCP6:-/proc/net/tcp6}
-check_proc_file "$operator_proc_tcp" 8 || exit 1
-check_proc_file "$operator_proc_tcp6" 32 || exit 1
+check_proc_file "$operator_proc_tcp" 8 rem_address || exit 1
+check_proc_file "$operator_proc_tcp6" 32 remote_address || exit 1
 
 case "$operator_listener_count:$operator_listener_exact" in
   1:1) exit 0 ;;

@@ -40,6 +40,9 @@ postconf -P "smtps/inet/smtpd_tls_wrappermode=yes"
 postconf -P "smtps/inet/smtpd_sasl_auth_enable=yes"
 postconf -P "smtps/inet/smtpd_relay_restrictions=reject_unauth_destination"
 
+# Debian 13's Postfix package does not create the chroot etc directory.
+mkdir -p /var/spool/postfix/etc
+
 # Copy DNS config into the chroot so smtpd can resolve hostnames
 cp /etc/resolv.conf /var/spool/postfix/etc/resolv.conf
 cp /etc/hosts /var/spool/postfix/etc/hosts

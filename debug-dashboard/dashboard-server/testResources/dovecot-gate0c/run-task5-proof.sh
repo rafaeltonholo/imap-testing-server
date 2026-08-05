@@ -148,6 +148,11 @@ TASK5_NETWORK_ISOLATION_TEST="$TASK5_REPOSITORY_ROOT/$TASK5_NETWORK_ISOLATION_TE
 TASK5_RUNTIME_ROOT="$TASK5_DASHBOARD_ROOT/.runtime"
 TASK5_PROOF_ROOT="$TASK5_RUNTIME_ROOT/task5-proof"
 TASK5_PROOF_OWNER_MARKER="$TASK5_PROOF_ROOT/.task5-proof-owner"
+readonly TASK5_PROVIDER_EVIDENCE_ROOT="$TASK5_PROOF_ROOT/provider-evidence"
+readonly TASK5_BASE_COMPOSE_EVIDENCE="$TASK5_PROVIDER_EVIDENCE_ROOT/base-compose.json"
+readonly TASK5_PROOF_COMPOSE_EVIDENCE="$TASK5_PROVIDER_EVIDENCE_ROOT/proof-compose.json"
+readonly TASK5_ORDINARY_DOVECONF_EVIDENCE="$TASK5_PROVIDER_EVIDENCE_ROOT/ordinary-doveconf.txt"
+readonly TASK5_OPERATOR_DOVECONF_EVIDENCE="$TASK5_PROVIDER_EVIDENCE_ROOT/operator-doveconf.txt"
 readonly TASK5_EXEC_TRANSPORT_LIVE_CLASS="mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorExecTransportLiveTest"
 readonly TASK5_LIFECYCLE_LOCK="/private/tmp/mail-sandbox-task5-proof.lifecycle.lock"
 readonly TASK5_LIFECYCLE_LOCK_PARENT="${TASK5_LIFECYCLE_LOCK%/*}"
@@ -219,6 +224,12 @@ unset TASK5_ENVIRONMENT_NAME
 export DOCKER_HOST=unix:///var/run/docker.sock
 
 TASK5_PROJECT_FILTER="label=com.docker.compose.project=mail-sandbox-task5-proof"
+TASK5_BASELINE_PROJECT_FILTER="label=com.docker.compose.project=dovecot-docker"
+TASK5_BASELINE_SERVICES=(
+  dovecot
+  postfix
+  oauth2-mock
+)
 TASK5_FIXED_CONTAINER_NAMES=(
   mail-sandbox-task5-proof-dovecot-1
   mail-sandbox-task5-proof-dovecot-operator-1
@@ -439,6 +450,39 @@ task5_compose_with_lock() {
   task5_compose "$@"
 }
 
+task5_require_exact_output() {
+  local description="$1"
+  local expected="$2"
+  local actual
+  shift 2
+
+  task5_require_lifecycle_lock_ownership "$description" || return 1
+  if actual="$("$@")"; then
+    :
+  else
+    task5_error "$description command failed"
+    return 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    task5_error "$description returned an unexpected value"
+    return 1
+  fi
+  printf '%s -> %s\n' "$description" "$expected"
+}
+
+task5_require_success() {
+  local description="$1"
+  shift
+
+  task5_require_lifecycle_lock_ownership "$description" || return 1
+  if "$@" >/dev/null; then
+    printf '%s -> PASS\n' "$description"
+    return 0
+  fi
+  task5_error "$description failed"
+  return 1
+}
+
 task5_acquire_lifecycle_lock_body() {
   local token
   local mkdir_status
@@ -572,11 +616,13 @@ task5_create_owned_proof_root_body() {
     umask 077
     mkdir \
       "$TASK5_PROOF_ROOT/dovecot" \
+      "$TASK5_PROVIDER_EVIDENCE_ROOT" \
       "$TASK5_PROOF_ROOT/ssl"
   )
   task5_require_proof_root_ownership "proof-root child validation" ||
     return 1
   task5_require_mode "$TASK5_PROOF_ROOT/dovecot" 700 || return 1
+  task5_require_mode "$TASK5_PROVIDER_EVIDENCE_ROOT" 700 || return 1
   task5_require_mode "$TASK5_PROOF_ROOT/ssl" 700 || return 1
 }
 
@@ -584,27 +630,12 @@ task5_create_owned_proof_root() {
   task5_run_with_signal_deferral task5_create_owned_proof_root_body
 }
 
-task5_lines_contain_exact_name() {
-  local lines="$1"
-  local exact_name="$2"
-  local line
-
-  while IFS= read -r line; do
-    if [[ "$line" == "$exact_name" ]]; then
-      return 0
-    fi
-  done <<< "$lines"
-  return 1
-}
-
 task5_inventory_is_empty() {
   local description="$1"
   local containers="query-failed"
   local networks="query-failed"
   local volumes="query-failed"
-  local container_names="query-failed"
-  local network_names="query-failed"
-  local volume_names="query-failed"
+  local exact_resources
   local exact_name
   local queries_succeeded=1
   local exact_name_collision=0
@@ -630,40 +661,42 @@ task5_inventory_is_empty() {
   else
     queries_succeeded=0
   fi
-  if container_names="$(
-    docker ps --all --format '{{.Names}}'
-  )"; then
-    :
-  else
-    queries_succeeded=0
-  fi
-  if network_names="$(
-    docker network ls --format '{{.Name}}'
-  )"; then
-    :
-  else
-    queries_succeeded=0
-  fi
-  if volume_names="$(
-    docker volume ls --format '{{.Name}}'
-  )"; then
-    :
-  else
-    queries_succeeded=0
-  fi
-
   for exact_name in "${TASK5_FIXED_CONTAINER_NAMES[@]}"; do
-    if task5_lines_contain_exact_name "$container_names" "$exact_name"; then
+    exact_resources="query-failed"
+    if exact_resources="$(
+      docker ps --all --quiet --filter "name=^/${exact_name}$"
+    )"; then
+      :
+    else
+      queries_succeeded=0
+    fi
+    if [[ -n "$exact_resources" ]]; then
       exact_name_collision=1
     fi
   done
   for exact_name in "${TASK5_FIXED_NETWORK_NAMES[@]}"; do
-    if task5_lines_contain_exact_name "$network_names" "$exact_name"; then
+    exact_resources="query-failed"
+    if exact_resources="$(
+      docker network ls --quiet --filter "name=^${exact_name}$"
+    )"; then
+      :
+    else
+      queries_succeeded=0
+    fi
+    if [[ -n "$exact_resources" ]]; then
       exact_name_collision=1
     fi
   done
   for exact_name in "${TASK5_FIXED_VOLUME_NAMES[@]}"; do
-    if task5_lines_contain_exact_name "$volume_names" "$exact_name"; then
+    exact_resources="query-failed"
+    if exact_resources="$(
+      docker volume ls --quiet --filter "name=^${exact_name}$"
+    )"; then
+      :
+    else
+      queries_succeeded=0
+    fi
+    if [[ -n "$exact_resources" ]]; then
       exact_name_collision=1
     fi
   done
@@ -692,12 +725,125 @@ task5_require_mode() {
   return 1
 }
 
+task5_capture_provider_evidence() {
+  local description="$1"
+  local path="$2"
+  local size
+  shift 2
+
+  case "$path" in
+    "$TASK5_BASE_COMPOSE_EVIDENCE" | \
+      "$TASK5_PROOF_COMPOSE_EVIDENCE" | \
+      "$TASK5_ORDINARY_DOVECONF_EVIDENCE" | \
+      "$TASK5_OPERATOR_DOVECONF_EVIDENCE")
+      ;;
+    *)
+      task5_error "$description requested an unknown evidence path"
+      return 1
+      ;;
+  esac
+  task5_require_lifecycle_lock_ownership "$description" || return 1
+  task5_require_proof_root_ownership "$description" || return 1
+  if ! task5_directory_is_exact_physical "$TASK5_PROVIDER_EVIDENCE_ROOT" ||
+    [[ "$(task5_path_mode "$TASK5_PROVIDER_EVIDENCE_ROOT")" != "700" ]]; then
+    task5_error "$description evidence directory is unsafe"
+    return 1
+  fi
+  if ! (
+    umask 077
+    set -o noclobber
+    "$@" > "$path"
+  ); then
+    task5_error "$description command failed"
+    return 1
+  fi
+  task5_require_lifecycle_lock_ownership "$description publication" ||
+    return 1
+  task5_require_proof_root_ownership "$description publication" || return 1
+  if [[ ! -f "$path" ]] || [[ -L "$path" ]] ||
+    ! task5_require_mode "$path" 600; then
+    task5_error "$description evidence file is unsafe"
+    return 1
+  fi
+  if ! size="$(task5_path_size "$path")" ||
+    [[ ! "$size" =~ ^[0-9]+$ ]] ||
+    ((size < 1 || size > 1048576)); then
+    task5_error "$description evidence size is invalid"
+    return 1
+  fi
+  printf '%s -> captured\n' "$description"
+}
+
 task5_record_cleanup_failure() {
   local description="$1"
   task5_error "cleanup failed: $description"
   if [[ "$TASK5_CLEANUP_STATUS" -eq 0 ]]; then
     TASK5_CLEANUP_STATUS=1
   fi
+}
+
+task5_baseline_service_is_allowed() {
+  case "$1" in
+    dovecot | postfix | oauth2-mock) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+task5_baseline_container_id_is_valid() {
+  [[ "${#1}" -eq 64 ]] && [[ "$1" != *[!0-9a-f]* ]]
+}
+
+task5_capture_allowlisted_baseline_ids() {
+  local unsorted="$1"
+  local sorted="$2"
+  local TASK5_BASELINE_SERVICE
+  local baseline_ids
+  local container_id
+
+  : > "$unsorted" || return 1
+  for TASK5_BASELINE_SERVICE in "${TASK5_BASELINE_SERVICES[@]}"; do
+    if baseline_ids="$(
+      docker ps --all --quiet --no-trunc \
+        --filter "$TASK5_BASELINE_PROJECT_FILTER" \
+        --filter "label=com.docker.compose.service=$TASK5_BASELINE_SERVICE"
+    )"; then
+      :
+    else
+      return 1
+    fi
+
+    while IFS= read -r container_id; do
+      if [[ -z "$container_id" ]]; then
+        continue
+      fi
+      task5_baseline_container_id_is_valid "$container_id" || return 1
+      printf '%s %s\n' \
+        "$TASK5_BASELINE_SERVICE" "$container_id" >> "$unsorted" || return 1
+    done <<< "$baseline_ids"
+  done
+  LC_ALL=C sort "$unsorted" > "$sorted"
+}
+
+task5_write_allowlisted_baseline_state() {
+  local ids="$1"
+  local output="$2"
+  local baseline_service
+  local container_id
+  local extra
+
+  : > "$output" || return 1
+  while IFS=' ' read -r baseline_service container_id extra; do
+    if [[ -z "$baseline_service" ]] && [[ -z "$container_id" ]]; then
+      continue
+    fi
+    task5_baseline_service_is_allowed "$baseline_service" || return 1
+    task5_baseline_container_id_is_valid "$container_id" || return 1
+    [[ -z "$extra" ]] || return 1
+    printf '%s ' "$baseline_service" >> "$output" || return 1
+    docker inspect \
+      --format "$TASK5_HEALTH_INSPECT_FORMAT" \
+      "$container_id" >> "$output" || return 1
+  done < "$ids"
 }
 
 task5_allocate_baseline_directory_body() {
@@ -747,6 +893,8 @@ task5_remove_unready_baseline() {
   if ! rm -f -- \
     "$TASK5_BASELINE_DIRECTORY/ids.unsorted" \
     "$TASK5_BASELINE_DIRECTORY/ids" \
+    "$TASK5_BASELINE_DIRECTORY/ids.after.unsorted" \
+    "$TASK5_BASELINE_DIRECTORY/ids.after" \
     "$TASK5_BASELINE_DIRECTORY/before" \
     "$TASK5_BASELINE_DIRECTORY/after"; then
     task5_record_cleanup_failure \
@@ -760,41 +908,48 @@ task5_remove_unready_baseline() {
 
 task5_compare_baseline() {
   local after="$TASK5_BASELINE_DIRECTORY/after"
-  local container_id
-  local inspections_succeeded=1
-  local comparison_succeeded=0
+  local after_ids_unsorted="$TASK5_BASELINE_DIRECTORY/ids.after.unsorted"
+  local after_ids="$TASK5_BASELINE_DIRECTORY/ids.after"
+  local identities_match=0
+  local states_captured=0
+  local states_match=0
 
-  if ! : > "$after"; then
-    task5_record_cleanup_failure "could not create after-state baseline"
-    return
-  fi
-
-  while IFS= read -r container_id; do
-    if [[ -z "$container_id" ]]; then
-      continue
-    fi
-    if docker inspect \
-      --format "$TASK5_HEALTH_INSPECT_FORMAT" \
-      "$container_id" >> "$after"; then
-      :
+  if task5_capture_allowlisted_baseline_ids \
+    "$after_ids_unsorted" "$after_ids"; then
+    if cmp "$TASK5_BASELINE_DIRECTORY/ids" "$after_ids"; then
+      identities_match=1
     else
-      inspections_succeeded=0
-      task5_record_cleanup_failure "could not inspect a baseline container"
+      task5_record_cleanup_failure \
+        "allowlisted ordinary-service container inventory changed"
     fi
-  done < "$TASK5_BASELINE_DIRECTORY/ids"
-
-  if cmp "$TASK5_BASELINE_DIRECTORY/before" "$after"; then
-    comparison_succeeded=1
   else
-    task5_record_cleanup_failure "a pre-existing container changed"
+    task5_record_cleanup_failure \
+      "could not recapture allowlisted ordinary-service containers"
   fi
 
-  if [[ "$inspections_succeeded" -eq 1 ]] &&
-    [[ "$comparison_succeeded" -eq 1 ]]; then
+  if task5_write_allowlisted_baseline_state \
+    "$TASK5_BASELINE_DIRECTORY/ids" "$after"; then
+    states_captured=1
+  else
+    task5_record_cleanup_failure \
+      "could not inspect an allowlisted baseline container"
+  fi
+  if [[ "$states_captured" -eq 1 ]]; then
+    if cmp "$TASK5_BASELINE_DIRECTORY/before" "$after"; then
+      states_match=1
+    else
+      task5_record_cleanup_failure \
+        "an allowlisted pre-existing container changed"
+    fi
+  fi
+
+  if [[ "$identities_match" -eq 1 ]] && [[ "$states_match" -eq 1 ]]; then
     printf '%s\n' "baseline-match"
     if ! rm -f -- \
       "$TASK5_BASELINE_DIRECTORY/ids.unsorted" \
       "$TASK5_BASELINE_DIRECTORY/ids" \
+      "$after_ids_unsorted" \
+      "$after_ids" \
       "$TASK5_BASELINE_DIRECTORY/before" \
       "$after"; then
       task5_record_cleanup_failure \
@@ -1042,30 +1197,18 @@ task5_inventory_is_empty "initial"
 
 task5_allocate_baseline_directory
 
-if docker ps --quiet > "$TASK5_BASELINE_DIRECTORY/ids.unsorted"; then
-  :
-else
-  task5_error "baseline container list failed"
+if ! task5_capture_allowlisted_baseline_ids \
+  "$TASK5_BASELINE_DIRECTORY/ids.unsorted" \
+  "$TASK5_BASELINE_DIRECTORY/ids"; then
+  task5_error "allowlisted baseline container list failed"
   false
 fi
-LC_ALL=C sort \
-  "$TASK5_BASELINE_DIRECTORY/ids.unsorted" \
-  > "$TASK5_BASELINE_DIRECTORY/ids"
-: > "$TASK5_BASELINE_DIRECTORY/before"
-while IFS= read -r TASK5_CONTAINER_ID; do
-  if [[ -z "$TASK5_CONTAINER_ID" ]]; then
-    continue
-  fi
-  if docker inspect \
-    --format "$TASK5_HEALTH_INSPECT_FORMAT" \
-    "$TASK5_CONTAINER_ID" >> "$TASK5_BASELINE_DIRECTORY/before"; then
-    :
-  else
-    task5_error "baseline container inspection failed"
-    false
-  fi
-done < "$TASK5_BASELINE_DIRECTORY/ids"
-unset TASK5_CONTAINER_ID
+if ! task5_write_allowlisted_baseline_state \
+  "$TASK5_BASELINE_DIRECTORY/ids" \
+  "$TASK5_BASELINE_DIRECTORY/before"; then
+  task5_error "allowlisted baseline container inspection failed"
+  false
+fi
 TASK5_BASELINE_READY=1
 
 for TASK5_PROOF_PORT in 1993 21995 2993 21025 28080; do
@@ -1089,6 +1232,8 @@ task5_require_lifecycle_lock_ownership "non-live configuration checks"
   "$TASK5_KOTLIN" test \
     --include-module dashboard-server \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorConfigTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotAuthenticationResponseClassifierTest \
+    --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotIsolationMailboxContractTest \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorCredentialStoreTest \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorProcessTransportTest \
     --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorApplicationLeaseRegistryTest \
@@ -1102,9 +1247,11 @@ task5_require_lifecycle_lock_ownership "non-live configuration checks"
 task5_require_lifecycle_lock_ownership "network isolation Python checks"
 python3 -m unittest "$TASK5_NETWORK_ISOLATION_TEST_RELATIVE"
 task5_require_lifecycle_lock_ownership "base Compose config"
-COMPOSE_DISABLE_ENV_FILE=1 docker compose --file docker-compose.yml config --quiet
+COMPOSE_DISABLE_ENV_FILE=1 docker compose --file docker-compose.yml \
+  config --quiet oauth2-mock dovecot postfix
 task5_require_lifecycle_lock_ownership "proof Compose config"
-COMPOSE_DISABLE_ENV_FILE=1 task5_compose config --quiet
+COMPOSE_DISABLE_ENV_FILE=1 task5_compose \
+  config --quiet oauth2-mock dovecot postfix dovecot-operator
 
 export DOVECOT_LIVE_TESTS=1
 export DOVECOT_LIVE_PROFILE=task5-proof
@@ -1113,6 +1260,19 @@ export COMPOSE_FILE="docker-compose.yml:$TASK5_PROOF_COMPOSE_RELATIVE"
 export COMPOSE_DISABLE_ENV_FILE=1
 
 task5_create_owned_proof_root
+
+task5_capture_provider_evidence \
+  "base service-scoped Compose model" \
+  "$TASK5_BASE_COMPOSE_EVIDENCE" \
+  /usr/bin/env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME \
+    docker compose --file docker-compose.yml \
+      --profile dovecot-operator config --format json \
+      oauth2-mock dovecot postfix dovecot-operator
+task5_capture_provider_evidence \
+  "proof service-scoped Compose model" \
+  "$TASK5_PROOF_COMPOSE_EVIDENCE" \
+  task5_compose_with_lock config --format json \
+    oauth2-mock dovecot postfix dovecot-operator
 
 task5_require_proof_root_ownership "TLS material creation"
 (
@@ -1186,6 +1346,69 @@ task5_compose_with_lock \
 task5_compose_with_lock \
   --profile dovecot-operator \
   ps oauth2-mock dovecot postfix dovecot-operator
+
+task5_require_proof_root_ownership "provider version and config proof"
+task5_require_exact_output \
+  "dovecot --version" \
+  "2.4.4 (8b687aa65c)" \
+  task5_compose_with_lock exec -T dovecot dovecot --version
+task5_require_exact_output \
+  "python --version" \
+  "Python 3.14.6" \
+  task5_compose_with_lock exec -T oauth2-mock python --version
+task5_require_exact_output \
+  "postconf mail_version" \
+  "3.10.12" \
+  task5_compose_with_lock exec -T postfix postconf -h mail_version
+task5_require_exact_output \
+  "postconf compatibility_level" \
+  "3.6" \
+  task5_compose_with_lock exec -T postfix postconf -h compatibility_level
+task5_require_exact_output \
+  "dpkg-query postfix" \
+  "postfix=3.10.12-0+deb13u2" \
+  task5_compose_with_lock exec -T postfix \
+    dpkg-query -W '-f=${Package}=${Version}\n' postfix
+task5_require_exact_output \
+  "dpkg-query libsasl2-2" \
+  "libsasl2-2=2.1.28+dfsg1-9" \
+  task5_compose_with_lock exec -T postfix \
+    dpkg-query -W '-f=${Package}=${Version}\n' libsasl2-2
+task5_require_exact_output \
+  "dpkg-query libsasl2-modules" \
+  "libsasl2-modules=2.1.28+dfsg1-9" \
+  task5_compose_with_lock exec -T postfix \
+    dpkg-query -W '-f=${Package}=${Version}\n' libsasl2-modules
+task5_require_exact_output \
+  "dpkg-query sasl2-bin" \
+  "sasl2-bin=2.1.28+dfsg1-9" \
+  task5_compose_with_lock exec -T postfix \
+    dpkg-query -W '-f=${Package}=${Version}\n' sasl2-bin
+task5_require_exact_output \
+  "dpkg-query netcat-openbsd" \
+  "netcat-openbsd=1.229-1" \
+  task5_compose_with_lock exec -T postfix \
+    dpkg-query -W '-f=${Package}=${Version}\n' netcat-openbsd
+task5_capture_provider_evidence \
+  "ordinary doveconf -n" \
+  "$TASK5_ORDINARY_DOVECONF_EVIDENCE" \
+  task5_compose_with_lock exec -T dovecot /dovecot/bin/doveconf -n
+task5_capture_provider_evidence \
+  "operator doveconf -n" \
+  "$TASK5_OPERATOR_DOVECONF_EVIDENCE" \
+  task5_compose_with_lock exec -T dovecot-operator /dovecot/bin/doveconf -n
+task5_require_proof_root_ownership "owned provider evidence audit"
+(
+  cd -- "$TASK5_DASHBOARD_ROOT"
+  TASK5_DOVECOT_EVIDENCE_ROOT="$TASK5_PROVIDER_EVIDENCE_ROOT" \
+    "$TASK5_KOTLIN" test \
+      --include-module dashboard-server \
+      --include-classes mail.sandbox.dashboard.server.gate.dovecot.DovecotOperatorOwnedEvidenceLiveTest
+)
+task5_require_success \
+  "operator healthcheck" \
+  task5_compose_with_lock exec -T dovecot-operator \
+    /usr/local/bin/operator-healthcheck
 
 task5_require_proof_root_ownership "operator preflight checkpoint"
 (
