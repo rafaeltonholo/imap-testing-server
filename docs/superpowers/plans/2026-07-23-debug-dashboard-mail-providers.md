@@ -6,7 +6,7 @@
 
 **Architecture:** Expose one application-facing mail port with sealed provider-specific keys, but keep two direct adapters. Dovecot uses the Gate 0C isolated master/operator IMAP ingress and UID/UIDVALIDITY commands. Stalwart discovers JMAP Session while directly authenticated with a leased Account-bound AppPassword from the Gate 0B encrypted store; an unready Account fails before any JMAP call. Batch results are itemized and state conflicts remain explicit.
 
-**Tech Stack:** Kotlin/JVM, Jakarta Mail API 2.1.5, Angus Mail 2.0.5, Ktor client, kotlinx.serialization, IMAP UIDPLUS/MOVE where advertised, Stalwart v0.16.15 JMAP Mail.
+**Tech Stack:** Kotlin/JVM, Jakarta Mail API 2.1.5, Angus Mail 2.0.5, Ktor client, kotlinx.serialization, IMAP UIDPLUS/MOVE where advertised, Stalwart v0.16.16 JMAP Mail.
 
 ---
 

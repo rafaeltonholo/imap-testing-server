@@ -6,7 +6,7 @@
 
 **Architecture:** Treat dependency freshness as a stop/go gate in four layers: Kotlin/Wasm, Dovecot/Postfix/base images, Stalwart, then cross-stack evidence. Each layer starts with an exact-version RED test, changes only its owned declarations and compatibility code, proves the resolved/runtime graph, and commits independently. Framework-managed and distribution-managed versions remain visible exceptions; no task forces an independently newer artifact into an unsupported parent graph.
 
-**Tech Stack:** Kotlin Toolchain 0.11.1, Kotlin 2.4.10, Compose Multiplatform 1.11.1, Ktor 3.5.2, kotlinx.serialization 1.11.0, JUnit Platform 6.1.2, Dovecot 2.4.4, Stalwart v0.16.15, Python 3.14.6, Debian 13.6, Debian Postfix 3.10.12, Docker Compose, Python stdlib tests, Selenium/Chrome.
+**Tech Stack:** Kotlin Toolchain 0.11.1, Kotlin 2.4.10, Compose Multiplatform 1.11.1, Ktor 3.5.2, kotlinx.serialization 1.11.0, JUnit Platform 6.1.2, Dovecot 2.4.4, Stalwart v0.16.16, Python 3.14.6, Debian 13.6, Debian Postfix 3.10.12, Docker Compose, Python stdlib tests, Selenium/Chrome.
 
 **Design:** `docs/superpowers/specs/2026-08-01-latest-coherent-dependencies-design.md`
 
@@ -341,7 +341,7 @@ git commit -m "test: reprove browser gate on latest Compose stack"
 
 Using only `unittest` and `pathlib`, require SQLite JDBC `3.53.2.1`, Jakarta
 Mail API `2.1.5`, Angus Mail `2.0.5`, and jsoup `1.23.1` in active future
-plans. Require Stalwart v0.16.15 in active implementation/provider/mail plans,
+plans. Require Stalwart v0.16.16 in active implementation/provider/mail plans,
 while the completed Gate 0B plan retains its v0.16.14 evidence under an
 explicit supersession banner. Assert the superseded planned values do not
 remain in active dependency declarations. Do not add MCP or optional-Python
@@ -833,7 +833,14 @@ git add docs/debug-dashboard/gates/0c-dovecot.md \
 git commit -m "test: reprove Dovecot gate on latest provider stack"
 ```
 
-## Task 7: Characterize copy/move RED and move active Stalwart targets to v0.16.15
+## Task 7: Characterize copy/move RED and move active Stalwart targets to v0.16.16
+
+> **Completion-day freshness amendment (2026-08-04):** v0.16.15 was the
+> approved latest stable target, but Stalwart published stable v0.16.16 on
+> 2026-08-02 before this task began. Policy A therefore requires v0.16.16 and
+> its exact OCI index digest. The tagged v0.16.16 migration script is
+> byte-identical to v0.16.15, while CLI 1.0.12 remains selected because its
+> official `latest`, `1.0`, and `1.0.12` tags share the same index digest.
 
 **Files:**
 
@@ -865,7 +872,7 @@ git commit -m "test: reprove Dovecot gate on latest provider stack"
 Require the exact image:
 
 ```text
-stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136
+stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
 ```
 
 Require CLI:
@@ -874,10 +881,10 @@ Require CLI:
 stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52
 ```
 
-Require the v0.16.15 migration-script URL while retaining script SHA-256
+Require the v0.16.16 migration-script URL while retaining script SHA-256
 `008a490b4c3c60572806958e1960749ecdddf263316683017003797b9c34ca1c`.
 Require migration overlay SHA-256
-`318c0275f253268cfa00e465a23aadb66059c405f0264a1e501fc2d8d2b8f16a`
+`77dee99e79f4ce6a6be63edc51b5090e8fbab484fbdc04331cf0bd19f4bc28ca`
 when its only semantic target change is the approved image reference.
 
 ```bash
@@ -1046,15 +1053,15 @@ enumerate, or compare normal Stalwart.
 
 - [ ] **Step 4: Update target constants and fixtures mechanically but safely**
 
-Replace only active v0.16.14 targets. Change tests that deliberately used
-v0.16.15 as the wrong-version fixture to another explicit mismatch such as
-`v0.16.13`; do not accidentally make negative tests valid. Preserve deliberate
-`:latest` negative fixtures that prove floating tags are rejected.
+Replace only active v0.16.14 targets. Preserve tests that deliberately use
+v0.16.15 as a wrong-version fixture because it remains an explicit mismatch
+for v0.16.16; do not accidentally make negative tests valid. Preserve
+deliberate `:latest` negative fixtures that prove floating tags are rejected.
 
 Leave the normal `docker-compose.yml` and `stalwart/config.toml` byte-for-byte
 unchanged in this task. They remain the capture source until Task 9 receives
 the explicit phrase and records a verified rollback capture. Tests must permit
-that one known legacy source model temporarily while requiring v0.16.15 for
+that one known legacy source model temporarily while requiring v0.16.16 for
 every migration target and disposable fixture. The dependency gate remains
 incomplete while that source model is present.
 
@@ -1084,11 +1091,11 @@ Then operate on images only:
 
 ```bash
 docker pull \
-  stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136
+  stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
 docker pull \
   stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52
 docker image inspect \
-  stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136 \
+  stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced \
   --format '{{json .RepoDigests}} {{.Id}}'
 docker image inspect \
   stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52 \
@@ -1098,19 +1105,19 @@ docker run --rm --pull never --network none \
   --version
 docker run --rm --pull never --network none \
   --entrypoint /usr/local/bin/stalwart \
-  stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136 \
+  stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced \
   --version
 ```
 
 Expected: each `RepoDigests` contains the selected multi-architecture digest;
-CLI reports 1.0.12; server reports 0.16.15. Update the documented and tested
+CLI reports 1.0.12; server reports 0.16.16. Update the documented and tested
 platform-local `STALWART_IMAGE_ID` to the `.Id` returned only after that
 RepoDigest check. The `.Id` is supplementary host-local evidence, never a
 substitute for the approved repository digest.
 
-- [ ] **Step 7: Run both new contracts GREEN on v0.16.15**
+- [ ] **Step 7: Run both new contracts GREEN on v0.16.16**
 
-Repeat the complete single-shell lifecycle from Step 3 after the v0.16.15 pin,
+Repeat the complete single-shell lifecycle from Step 3 after the v0.16.16 pin,
 including installing the EXIT/INT/TERM cleanup handlers before fixture
 preparation. Change only the final version-specific assertions:
 
@@ -1124,7 +1131,7 @@ Expected: both selected classes PASS without assumption/skip, and the guarded
 EXIT handler proves the exact Gate project/container/network/volume/ports,
 runtime directory, and lock state are restored before this task may commit.
 
-If v0.16.15 violates the approved provider behavior, leave the batch RED and
+If v0.16.16 violates the approved provider behavior, leave the batch RED and
 stop; never downgrade. If the failure instead demonstrates a client
 request/response incompatibility, first add its smallest fixture to
 `GateJmapClientTest.kt`, run that focused unit RED, make the minimal
@@ -1237,7 +1244,7 @@ cd ..
 
 Expected: runner lifecycle test and canonical offline Gate 0B PASS.
 
-- [ ] **Step 4: Run the complete v0.16.15 disposable gate once**
+- [ ] **Step 4: Run the complete v0.16.16 disposable gate once**
 
 ```bash
 debug-dashboard/dashboard-server/testResources/stalwart-gate0b/run-latest-proof.sh
@@ -1250,7 +1257,7 @@ the EXIT cleanup/postflight passes even if any body command fails.
 
 - [ ] **Step 5: Repair only a demonstrated client incompatibility**
 
-If v0.16.15 itself violates approved behavior, leave Gate 0B RED and stop;
+If v0.16.16 itself violates approved behavior, leave Gate 0B RED and stop;
 never downgrade. If the runner proves an existing client parser/request
 composer incompatible, add the smallest fixture to `GateJmapClientTest.kt`,
 run that unit RED, make the minimal `GateJmapClient.kt` change, rerun the unit
@@ -1259,7 +1266,7 @@ repair.
 
 - [ ] **Step 6: Append superseding evidence and commit**
 
-Record the v0.16.15 image/digest, reported version, runner hash, every selected
+Record the v0.16.16 image/digest, reported version, runner hash, every selected
 class/phase, commands/results, copy/move/Registry/routing/deletion behavior,
 and cleanup comparison. Preserve v0.16.14 evidence as historical.
 
@@ -1272,7 +1279,7 @@ git add debug-dashboard/dashboard-server/testResources/stalwart-gate0b/run-lates
 git commit -m "test: reprove Stalwart gate on latest provider stack"
 ```
 
-## Task 9: Perform the normal Stalwart v0.16.15 cutover only after explicit authorization
+## Task 9: Perform the normal Stalwart v0.16.16 cutover only after explicit authorization
 
 **Files:**
 
@@ -1334,7 +1341,7 @@ user while the source remains stopped.
 After reporting the capture/rollback evidence, stop and require exactly:
 
 ```text
-I explicitly authorize applying the Stalwart v0.16.15 migration, replacing the captured normal store, starting the new runtime, and performing the documented rollback if required.
+I explicitly authorize applying the Stalwart v0.16.16 migration, replacing the captured normal store, starting the new runtime, and performing the documented rollback if required.
 ```
 
 Do not infer this second authorization from the capture phrase. Without it,
@@ -1391,13 +1398,13 @@ Python suite RED before implementation and GREEN afterward. Do not execute a
 Task 9 migration command until the exact packages are installed, the explicit
 version assertion passes, and the receipt tests are GREEN.
 
-- [ ] **Step 6: Install the exact normal v0.16.15 runtime model**
+- [ ] **Step 6: Install the exact normal v0.16.16 runtime model**
 
 Only after both authorization boundaries and capture verification pass,
 replace the legacy service with this shape:
 
 ```yaml
-image: stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136
+image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
 container_name: stalwart-dev
 user: "2000:2000"
 restart: unless-stopped
@@ -1449,7 +1456,7 @@ afterward.
 - [ ] **Step 7: Execute the reviewed receipt-bound migration**
 
 Use the existing capture → dry-run → apply → bootstrap/routing proof → recovery
-retirement workflow, now bound to v0.16.15, the exact OCI index digest, the
+retirement workflow, now bound to v0.16.16, the exact OCI index digest, the
 reviewed migration script digest, and the new overlay hash. Never hand-edit a
 receipt or reuse a v0.16.14 receipt. Begin with the runbook's separate
 `verify` and `prove-rollback` commands now that the second authorization covers
@@ -1469,7 +1476,7 @@ recovery credentials. Compare data/account inventory to the captured source.
 - [ ] **Step 9: Update current operational docs and commit**
 
 Update the repository-local Stalwart skill and Docker references to the proven
-v0.16.15 filesystem/listener/management model. Remove active instructions to
+v0.16.16 filesystem/listener/management model. Remove active instructions to
 edit `config.toml`, use `ADMIN_SECRET`, call legacy `/api/principal`, mount
 `/opt/stalwart`, or publish non-loopback 8443. Preserve historical migration
 explanations where explicitly labeled as source history. Verify any OAuth2
@@ -1490,7 +1497,7 @@ git add docker-compose.yml stalwart/config.json stalwart/config.toml \
   .ai/skills/stalwart/references/config.md \
   .ai/skills/stalwart/references/admin-api.md \
   .ai/skills/stalwart/references/oauth2.md
-git commit -m "build: cut over Stalwart v0.16.15 runtime"
+git commit -m "build: cut over Stalwart v0.16.16 runtime"
 ```
 
 ## Task 10: Run the final cross-stack dependency and regression audit
@@ -1521,7 +1528,7 @@ test -z "$(git status --porcelain)"
 git log --format='%H %s' -n 40 | \
   rg ' test: reprove Stalwart gate on latest provider stack$'
 git log --format='%H %s' -n 40 | \
-  rg ' build: cut over Stalwart v0.16.15 runtime$'
+  rg ' build: cut over Stalwart v0.16.16 runtime$'
 ```
 
 Expected: the primary checkout, clean status, and both the integrated Task 8
@@ -1756,7 +1763,7 @@ for selected_image in \
   'python:3.14.6-slim-trixie@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6' \
   'debian:13.6-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd' \
   'dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4' \
-  'stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136' \
+  'stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced' \
   'stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52'; do
   docker pull "$selected_image"
   docker image inspect "$selected_image" \
@@ -1776,14 +1783,14 @@ docker run --rm --pull never --network none \
   --version
 docker run --rm --pull never --network none \
   --entrypoint /usr/local/bin/stalwart \
-  stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136 \
+  stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced \
   --version
 docker run --rm --pull never --network none \
   stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52 \
   --version
 ```
 
-Expected: Python 3.14.6, Debian 13.6, Dovecot 2.4.4, Stalwart 0.16.15,
+Expected: Python 3.14.6, Debian 13.6, Dovecot 2.4.4, Stalwart 0.16.16,
 and CLI 1.0.12. The Gate 0C evidence separately proves the rebuilt
 Debian-managed Postfix/SASL package versions and configuration.
 

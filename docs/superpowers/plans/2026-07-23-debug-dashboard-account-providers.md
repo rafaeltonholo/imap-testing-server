@@ -6,7 +6,7 @@
 
 **Architecture:** Promote the proven Gate 0B/0C clients into typed account-admin adapters. Project provider-native state plus safe Stalwart mail-access readiness into a joined logical registry; never make SQLite or the AppPassword snapshot a second account authority. Multi-provider account work runs as a per-address saga, while Stalwart enrollment/repair/rotation/removal use the Gate-0B-proven Account-ID lock, encrypted snapshot, and direct Account-bound credential lifecycle.
 
-**Tech Stack:** Kotlin/JVM, Ktor client/server, kotlinx.serialization, JDK NIO atomic file operations, allowlisted `docker compose`/`doveadm`, Stalwart v0.16.15 JMAP management.
+**Tech Stack:** Kotlin/JVM, Ktor client/server, kotlinx.serialization, JDK NIO atomic file operations, allowlisted `docker compose`/`doveadm`, Stalwart v0.16.16 JMAP management.
 
 ---
 

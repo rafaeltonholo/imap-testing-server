@@ -91,7 +91,7 @@ dependencies are introduced:
 | Component | Selected immutable reference/version |
 |---|---|
 | Dovecot | `dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4` |
-| Stalwart | `stalwartlabs/stalwart:v0.16.15@sha256:4f926193e5dd9ceb1e24ba48160702310381b12e51972c2fb0cc9de020388136` |
+| Stalwart | `stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced` |
 | Stalwart CLI | `stalwartlabs/cli:1.0.12@sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52` |
 | OAuth mock base | `python:3.14.6-slim-trixie@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6` |
 | Postfix base | `debian:13.6-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd` |
@@ -105,6 +105,12 @@ distribution-managed. `main.cf` explicitly sets `compatibility_level = 3.6`,
 the newest compatibility boundary used by the selected Postfix 3.10 line, so a
 repository-owned replacement `main.cf` does not accidentally re-enable legacy
 defaults.
+
+Stalwart v0.16.15 was the latest stable release when this design was approved,
+but v0.16.16 was published on 2026-08-02 before the Stalwart batch began. The
+required completion-day freshness check therefore advances the selected server
+to v0.16.16. The Stalwart CLI remains 1.0.12 because the official `latest`,
+`1.0`, and `1.0.12` tags resolve to the same immutable index digest above.
 
 ### 3.3 Repository tooling
 
@@ -217,13 +223,13 @@ or bypass a failure in an earlier one.
 
 ### Batch 3 — Stalwart baseline
 
-- Move every active v0.16 target to the exact v0.16.15 index digest and the
+- Move every active v0.16 target to the exact v0.16.16 index digest and the
   versioned Stalwart CLI reference.
 - Retain the byte-identical v0.16 migration script digest while changing its
-  source URL to the v0.16.15 tag.
+  source URL to the v0.16.16 tag.
 - Regenerate receipt-bound expectations through the existing migration
   process; never hand-edit runtime receipts.
-- Add copy/move coverage for the v0.16.15 `Email/copy` and
+- Add copy/move coverage for the `Email/copy` and
   `onSuccessDestroyOriginal` fixes.
 - Keep disposable Gate 0B validation separate from the normal Stalwart data
   migration. No live Stalwart capture, restart, migration, or replacement is
@@ -281,7 +287,7 @@ or bypass a failure in an earlier one.
 - Gate 0C passes against Dovecot 2.4.4, Python 3.14.6, Debian 13.6, and Postfix
   3.10.12, including ordinary protocols, master isolation, rotation, SMTP
   delivery, and clean teardown.
-- Gate 0B passes against Stalwart v0.16.15, including permissions, AppPassword
+- Gate 0B passes against Stalwart v0.16.16, including permissions, AppPassword
   lifecycle, Registry projections, Blob behavior, copy/move, deletion, routing,
   and cleanup.
 - Container-reported versions and `RepoDigests` match the selected references.
@@ -313,8 +319,8 @@ requirements.
 - Maven Central metadata: <https://repo.maven.apache.org/maven2/>
 - Dovecot 2.4 releases: <https://dovecot.org/releases/2.4/>
 - Dovecot image metadata: <https://hub.docker.com/v2/repositories/dovecot/dovecot/tags/2.4.4>
-- Stalwart v0.16.15: <https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.15>
-- Stalwart image metadata: <https://hub.docker.com/v2/repositories/stalwartlabs/stalwart/tags/v0.16.15>
+- Stalwart v0.16.16: <https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.16>
+- Stalwart image metadata: <https://hub.docker.com/v2/repositories/stalwartlabs/stalwart/tags/v0.16.16>
 - Python releases: <https://www.python.org/downloads/>
 - Debian releases: <https://www.debian.org/releases/>
 - Debian Postfix package: <https://packages.debian.org/trixie/postfix>

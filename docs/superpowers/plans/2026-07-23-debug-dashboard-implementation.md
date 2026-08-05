@@ -6,7 +6,7 @@
 
 **Architecture:** Execute three stop/go feasibility gates before feature work. Then build shared KMP contracts, a loopback Ktor/JVM control plane, direct Dovecot/IMAP/Postfix and Stalwart/JMAP adapters, an evidence pipeline, and a Compose/Wasm Evidence Split SPA. Stalwart mail calls authenticate with the Account's active dashboard AppPassword leased from an owner-only encrypted snapshot; rotation may temporarily retain one staged/retiring generation. Normal passwords exist only inside explicit create, enrollment, repair, reset, or rotation requests. Treat provider work as typed, idempotent operations backed by SQLite while keeping the credential snapshot outside SQLite.
 
-**Tech Stack:** Kotlin Toolchain 0.11.1 wrapper and YAML model, Kotlin 2.3.x, Compose Multiplatform/Wasm, Ktor/JVM, kotlinx.serialization, SQLite JDBC 3.53.2.1, Jakarta Mail API 2.1.5/Angus Mail 2.0.5, jsoup 1.23.1, Selenium/JVM, Docker Compose, Dovecot/Postfix/OAuth mock, Stalwart v0.16.15.
+**Tech Stack:** Kotlin Toolchain 0.11.1 wrapper and YAML model, Kotlin 2.4.10, Compose Multiplatform/Wasm, Ktor/JVM, kotlinx.serialization, SQLite JDBC 3.53.2.1, Jakarta Mail API 2.1.5/Angus Mail 2.0.5, jsoup 1.23.1, Selenium/JVM, Docker Compose, Dovecot/Postfix/OAuth mock, Stalwart v0.16.16.
 
 ---
 
@@ -49,7 +49,7 @@ The planning-time impersonation blocker is resolved by the approved design. No S
 | Order | Plan | Required outcome |
 |---|---|---|
 | 0A | `2026-07-23-debug-dashboard-gate-0a-kotlin-toolchain.md` | Toolchain-only Compose/Wasm + Ktor + browser proof |
-| 0B | `2026-07-23-debug-dashboard-gate-0b-stalwart.md` | Stalwart v0.16.15 management plus Account-bound AppPassword/store/lifecycle, mail, submission, isolation, and deletion proof |
+| 0B | `2026-07-23-debug-dashboard-gate-0b-stalwart.md` | Stalwart v0.16.16 management plus Account-bound AppPassword/store/lifecycle, mail, submission, isolation, and deletion proof |
 | 0C | `2026-07-23-debug-dashboard-gate-0c-dovecot.md` | Hashed eligibility authority, isolated operator path, local routing, and deletion proof |
 | 1 | `2026-07-23-debug-dashboard-foundation.md` | Shared contracts, HTTP security boundary, operation ledger, API/event shell |
 | 2 | `2026-07-23-debug-dashboard-account-providers.md` | Live registry and account create/password/delete on both profiles |
