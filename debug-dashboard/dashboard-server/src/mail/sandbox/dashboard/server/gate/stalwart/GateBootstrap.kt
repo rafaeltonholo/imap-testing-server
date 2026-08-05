@@ -22,7 +22,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 internal object StalwartFixtureAudit {
-    private const val IMAGE = "stalwartlabs/stalwart:v0.16.14"
+    private const val IMAGE =
+        "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
     private const val PUBLIC_URL = "http://127.0.0.1:18443"
     private const val CONFIG_JSON =
         "{\"@type\":\"RocksDb\",\"path\":\"/var/lib/stalwart/\"}\n"
@@ -221,7 +222,7 @@ internal object GateBootstrap {
         "sysDomainCreate",
         "sysTaskGet",
         "sysTaskQuery",
-    )
+    ) + DASHBOARD_ACCOUNT_PERMISSIONS
     val temporaryApiKeyPermissions: Set<String> = linkedSetOf(
         "sysApiKeyCreate",
         "sysApiKeyGet",
@@ -232,15 +233,6 @@ internal object GateBootstrap {
         managementPermissions + temporaryApiKeyPermissions
     val forbiddenManagementPermissionFragments: Set<String> = setOf(
         "impersonate",
-        "jmap",
-        "imap",
-        "pop3",
-        "smtp",
-        "email",
-        "blob",
-        "identity",
-        "submission",
-        "sysAccountPassword",
         "sysApiKey",
         "sysAppPassword",
     )

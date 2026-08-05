@@ -2724,7 +2724,7 @@ private const val INPUT_SCHEMA =
     "mail-sandbox.stalwart-v016-routing-input.v1"
 private const val VERIFIER_SCHEMA =
     "mail-sandbox.stalwart-v016-routing-verifier.v1"
-private const val SERVER_VERSION = "0.16.14"
+private const val SERVER_VERSION = "0.16.16"
 private const val MANAGEMENT_ADDRESS =
     "dashboard-management@local.test"
 

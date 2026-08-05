@@ -530,7 +530,10 @@ secret = "%{env:ADMIN_SECRET}%"
                 "Image": (
                     "stalwartlabs/stalwart:latest"
                     if legacy
-                    else "stalwartlabs/stalwart:v0.16.14"
+                    else (
+                        "stalwartlabs/stalwart:v0.16.16@"
+                        "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+                    )
                 ),
                 "Labels": {
                     "com.docker.compose.project": (

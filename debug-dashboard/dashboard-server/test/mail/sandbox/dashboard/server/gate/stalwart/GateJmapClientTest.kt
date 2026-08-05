@@ -18,6 +18,19 @@ import kotlinx.serialization.json.put
 
 class GateJmapClientTest {
     @Test
+    fun httpResponseCarriesRedirectLocationAsRedactedMetadata() {
+        val response = GateHttpResponse(
+            status = 307,
+            effectiveUrl = URI("http://127.0.0.1:18443/.well-known/jmap"),
+            body = "redirect-body-marker",
+            location = "/jmap/session",
+        )
+
+        assertEquals("/jmap/session", response.location)
+        assertFalse(response.toString().contains("redirect-body-marker"))
+    }
+
+    @Test
     fun endpointProfilesPinTheOnlyAllowedOriginsAndApiUrls() {
         assertEquals(
             listOf(
@@ -142,6 +155,75 @@ class GateJmapClientTest {
         }
 
         assertEquals(GateJmapFailure.InvalidResponse, failure.kind)
+    }
+
+    @Test
+    fun discoveryFollowsOnlyTheCanonicalSameOriginSessionRedirect() = runBlocking {
+        val discoveryUrl = URI("http://127.0.0.1:18443/.well-known/jmap")
+        val canonicalSessionUrl = URI("http://127.0.0.1:18443/jmap/session")
+        val transport = QueueTransport(
+            listOf(
+                GateHttpResponse(
+                    status = 307,
+                    effectiveUrl = discoveryUrl,
+                    body = "",
+                    location = "/jmap/session",
+                ),
+                GateHttpResponse(
+                    status = 200,
+                    effectiveUrl = canonicalSessionUrl,
+                    body = validSessionBody,
+                ),
+            ),
+        )
+
+        val session = GateJmapClient(
+            profile = StalwartEndpointProfile.GATE_FIXTURE,
+            credential = GateCredential.bearer(
+                "API_test-only-canonical-redirect".toCharArray(),
+            ),
+            transport = transport,
+        ).use { client ->
+            client.discoverSession()
+        }
+
+        assertEquals(StalwartEndpointProfile.GATE_FIXTURE.apiUrl, session.apiUrl)
+        assertEquals(
+            listOf(discoveryUrl, canonicalSessionUrl),
+            transport.requests.map(GateHttpRequest::url),
+        )
+
+        listOf(
+            null,
+            "/jmap/",
+            "http://127.0.0.1:18080/jmap/session",
+            "http://example.test/jmap/session",
+        ).forEach { location ->
+            val rejectedTransport = QueueTransport(
+                listOf(
+                    GateHttpResponse(
+                        status = 307,
+                        effectiveUrl = discoveryUrl,
+                        body = "",
+                        location = location,
+                    ),
+                ),
+            )
+            val failure = assertFailsWith<GateJmapException> {
+                GateJmapClient(
+                    profile = StalwartEndpointProfile.GATE_FIXTURE,
+                    credential = GateCredential.bearer(
+                        "API_test-only-rejected-redirect".toCharArray(),
+                    ),
+                    transport = rejectedTransport,
+                ).use { client ->
+                    client.discoverSession()
+                }
+            }
+
+            assertEquals(GateJmapFailure.InvalidResponse, failure.kind)
+            assertEquals(listOf(discoveryUrl), rejectedTransport.requests.map(GateHttpRequest::url))
+        }
     }
 
     @Test

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash-recoverable Stalwart v0.16.14 bootstrap and offline planner.
+"""Crash-recoverable Stalwart v0.16.16 bootstrap and offline planner.
 
 The pure planner remains import-safe and stdlib-only.  Live Registry, migration
 runtime, and Kotlin routing operations are reachable only through the explicit
@@ -28,7 +28,7 @@ import time
 from typing import BinaryIO, Callable, Mapping, Sequence
 
 
-SERVER_VERSION = "0.16.14"
+SERVER_VERSION = "0.16.16"
 MANAGEMENT_ADDRESS = "dashboard-management@local.test"
 MANAGEMENT_LOCAL_PART = "dashboard-management"
 MANAGEMENT_KEY_DESCRIPTION = "mail-sandbox/debug-dashboard/management"

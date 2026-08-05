@@ -1,5 +1,19 @@
 # Gate 0B — Stalwart v0.16.14
 
+## Superseding v0.16.16 evidence
+
+The isolated latest-provider runner supersedes the v0.16.14 evidence below for
+the active dashboard baseline. It passed bootstrap, recovery retirement, raw
+Blob compatibility, the permission matrix, AppPassword semantics, the mail
+credential lifecycle and all restart phases, same-Account mailbox and keyword
+mutations, and Account creation followed by SMTP/JMAP routing, reading, and
+deletion. Its exact scoped cleanup also passed.
+
+This proof used Kotlin Toolchain `0.11.1`, Kotlin `2.4.10`, and the repository's
+pinned image
+`stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`.
+The remaining v0.16.14 sections are retained as historical evidence.
+
 ## Task 1 status
 
 The disposable fixture and scoped bootstrap harness are implemented. The final

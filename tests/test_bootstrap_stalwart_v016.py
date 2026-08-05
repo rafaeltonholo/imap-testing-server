@@ -285,7 +285,7 @@ TASK6_APPLY_PAYLOAD = {
         "management_status": 200,
         "operation_count": 5,
         "operations_sha256": "f" * 64,
-        "server_version": "0.16.14",
+        "server_version": "0.16.16",
     },
     "runtime_artifacts": {
         "config": task6_file("config.json", 31),
@@ -1121,7 +1121,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.14",
+            server_version="0.16.16",
         )
 
     def write_proof(
@@ -1536,7 +1536,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             bootstrap.plan_crash_recovery(final_state, remote_keys=()).state,
             "validated-final",
         )
-        self.assertEqual(final_state.final_receipt.server_version, "0.16.14")
+        self.assertEqual(final_state.final_receipt.server_version, "0.16.16")
         self.assertIn("redacted", repr(final_state.final_receipt).lower())
 
     def test_remote_orphan_is_exactly_revoked_then_replaced_once(self) -> None:
@@ -1824,7 +1824,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                     authenticated_username=(
                         "dashboard-management@local.test"
                     ),
-                    server_version="0.16.14",
+                    server_version="0.16.16",
                 )
         except TypeError:
             self.fail("key adoption lacks a complete-inventory API")
@@ -1836,7 +1836,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.14",
+            server_version="0.16.16",
         )
         payload = bootstrap.build_key_checkpoint_payload(
             account,
@@ -1852,7 +1852,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             {
                 "authentication": {
                     "account_id": "management-id",
-                    "server_version": "0.16.14",
+                    "server_version": "0.16.16",
                     "status": 200,
                     "username": "dashboard-management@local.test",
                 },
@@ -2281,7 +2281,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                         authenticated_username=(
                             "dashboard-management@local.test"
                         ),
-                        server_version="0.16.14",
+                        server_version="0.16.16",
                     )
 
         incomplete = safe_objects[:-1]
@@ -2296,7 +2296,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.14",
+                server_version="0.16.16",
             )
 
         incompatible_preserved = self.preserved_objects()
@@ -2312,7 +2312,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.14",
+                server_version="0.16.16",
             )
 
     def test_executor_proof_binds_durable_account_domain_id(self) -> None:
@@ -2338,7 +2338,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.14",
+                server_version="0.16.16",
             )
 
         forged_account = replace(
@@ -2362,7 +2362,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.14",
+            server_version="0.16.16",
         )
         forged_payload = bootstrap.build_proof_payload(
             inputs,
@@ -2405,7 +2405,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 "server_version",
             },
         )
-        self.assertEqual(payload["server_version"], "0.16.14")
+        self.assertEqual(payload["server_version"], "0.16.16")
         self.assertEqual(
             payload["schema"],
             "mail-sandbox.stalwart-v016-bootstrap-receipt.v2",
@@ -2420,7 +2420,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             payload["authentication"],
             {
                 "account_id": "management-id",
-                "server_version": "0.16.14",
+                "server_version": "0.16.16",
                 "status": 200,
                 "username": "dashboard-management@local.test",
             },
@@ -3887,7 +3887,7 @@ class ProductionOrchestratorTest(unittest.TestCase):
             "management_credential_id": "management-credential",
             "preserved_objects_sha256": "b" * 64,
             "schema": "mail-sandbox.stalwart-v016-routing-input.v1",
-            "server_version": "0.16.14",
+            "server_version": "0.16.16",
         }
 
     def dependencies(
@@ -3961,7 +3961,7 @@ class ProductionOrchestratorTest(unittest.TestCase):
             runtime = SimpleNamespace(
                 base_url="http://127.0.0.1:18080",
                 api_url="http://127.0.0.1:18080/jmap/",
-                server_version="0.16.14",
+                server_version="0.16.16",
                 borrow_recovery_credential=lambda: memoryview(recovery).toreadonly(),
             )
             try:
@@ -4671,7 +4671,7 @@ class ProductionOrchestratorTest(unittest.TestCase):
                 runtime = SimpleNamespace(
                     base_url="http://127.0.0.1:18080",
                     api_url="http://127.0.0.1:18080/jmap/",
-                    server_version="0.16.14",
+                    server_version="0.16.16",
                     borrow_recovery_credential=borrow,
                 )
                 return operation(runtime)

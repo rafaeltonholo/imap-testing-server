@@ -575,8 +575,8 @@ class StalwartBootstrapTest {
             },
         )
         assertFalse("credentials" in retirementPatch)
-        assertFalse(retirementPatch.toString().contains("Password"))
-        assertFalse(retirementPatch.toString().contains("ApiKey"))
+        assertFalse(retirementPatch.toString().contains("\"@type\":\"Password\""))
+        assertFalse(retirementPatch.toString().contains("\"@type\":\"ApiKey\""))
 
         assertEquals("management-id", result.managementAccountId)
         assertEquals("API_good-secret", result.managementApiKey.concatToString())

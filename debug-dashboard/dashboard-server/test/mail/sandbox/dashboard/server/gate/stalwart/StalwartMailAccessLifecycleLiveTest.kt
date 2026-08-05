@@ -718,9 +718,21 @@ private fun requireCompleted(
     result: StalwartMailAccessResult,
     expectedState: StalwartMailAccessState,
 ) {
-    val completed = assertIs<StalwartMailAccessResult.Completed>(result)
+    val completed = assertIs<StalwartMailAccessResult.Completed>(
+        value = result,
+        message = "Mail access operation returned ${result.safeOutcome()}",
+    )
     assertEquals(expectedState, completed.projection.state)
 }
+
+private fun StalwartMailAccessResult.safeOutcome(): String =
+    when (this) {
+        is StalwartMailAccessResult.Completed -> "Completed/${projection.state}"
+        is StalwartMailAccessResult.RetryableFailure ->
+            "RetryableFailure/$reason/${projection.state}"
+        is StalwartMailAccessResult.ReconciliationRequired ->
+            "ReconciliationRequired/$reason/${projection.state}"
+    }
 
 private fun assertAuthenticated(result: StalwartCredentialProbeResult) {
     val authenticated = assertIs<StalwartCredentialProbeResult.Authenticated>(result)

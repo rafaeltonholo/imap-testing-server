@@ -256,7 +256,7 @@ class StalwartGateCleanupTest {
                 Files.writeString(
                     fixture.compose,
                     Files.readString(fixture.compose).replace(
-                        "stalwartlabs/stalwart:v0.16.14",
+                        "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
                         "stalwartlabs/stalwart:latest",
                     ),
                 )

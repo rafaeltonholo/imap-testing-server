@@ -44,7 +44,10 @@ LATEST_RECEIPT_NAME = "latest-source.json"
 RECEIPT_SCHEMA = "mail-sandbox.stalwart-v015-source.v1"
 LEGACY_CONFIG_TARGET = "/opt/stalwart/etc/config.toml"
 LEGACY_DATA_TARGET = "/opt/stalwart/data"
-V016_IMAGE_REFERENCE = "stalwartlabs/stalwart:v0.16.14"
+V016_IMAGE_REFERENCE = (
+    "stalwartlabs/stalwart:v0.16.16@"
+    "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+)
 V016_CONFIG_ROOT_TARGET = "/etc/stalwart"
 V016_DATA_TARGET = "/var/lib/stalwart"
 ROLLBACK_SERVICE = "stalwart-rollback"

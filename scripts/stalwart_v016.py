@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed preparation for the Stalwart v0.16.14 migration."""
+"""Fail-closed preparation for the Stalwart v0.16.16 migration."""
 
 from __future__ import annotations
 
@@ -27,10 +27,13 @@ from types import ModuleType
 from typing import Callable, NamedTuple
 
 
-STALWART_IMAGE = "stalwartlabs/stalwart:v0.16.14"
+STALWART_IMAGE = (
+    "stalwartlabs/stalwart:v0.16.16@"
+    "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+)
 STALWART_IMAGE_ID = (
     "sha256:"
-    "25001929f36a62521cedc50f12527080dac4cf6a0cc31b617b669d921cafc36a"
+    "66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
 )
 BOOTSTRAP_MANAGEMENT_PERMISSIONS = (
     "authenticate",
@@ -50,8 +53,8 @@ BOOTSTRAP_IP_RESTRICTION_DECISION = (
     "disabled-local-only-loopback-network-isolation"
 )
 STALWART_CLI_IMAGE = (
-    "stalwartlabs/cli@sha256:"
-    "fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52"
+    "stalwartlabs/cli:1.0.12@"
+    "sha256:fe199affac1d120a8c200ef39ae629765a2976270e0453575c1caf906ee15b52"
 )
 MIGRATION_SCRIPT_SHA256 = (
     "008a490b4c3c60572806958e1960749ecdddf263316683017003797b9c34ca1c"
@@ -60,7 +63,7 @@ NORMAL_RUNTIME_EVIDENCE_SCHEMA = (
     "mail-sandbox.stalwart-v016-normal-runtime-evidence.v2"
 )
 MIGRATION_COMPOSE_SHA256 = (
-    "01004cae40f4d5f5fd06a9dd3297c8bcaf068c0b50cb464182d3ae6271aa4114"
+    "77dee99e79f4ce6a6be63edc51b5090e8fbab484fbdc04331cf0bd19f4bc28ca"
 )
 CONVERTED_CONFIG_BYTES = (
     b'{\n'
@@ -3050,7 +3053,7 @@ class MigrationBootstrapRuntime:
 
     @property
     def server_version(self) -> str:
-        return "0.16.14"
+        return "0.16.16"
 
     @property
     def container_id(self) -> str:
@@ -6778,7 +6781,7 @@ def _build_recovery_retirement_proof(
         ),
         retirement_attempt_sha256=plan.retirement_attempt.sha256,
         operation_plan_sha256=plan.operation_plan_sha256,
-        server_version="0.16.14",
+        server_version="0.16.16",
         management_status=200,
         readiness_status=200,
         old_recovery_auth_status=old_recovery_auth_status,
@@ -7376,11 +7379,11 @@ class MigrationApplyExecutor:
 
 def _validated_server_version(stdout: bytes) -> str:
     if type(stdout) is not bytes or stdout not in {
-        b"0.16.14",
-        b"0.16.14\n",
+        b"0.16.16",
+        b"0.16.16\n",
     }:
         raise MigrationError("post-apply version output is malformed")
-    return "0.16.14"
+    return "0.16.16"
 
 
 def _validated_account_query_ids(stdout: bytes) -> tuple[str, ...]:
@@ -9328,7 +9331,7 @@ def _post_apply_proof_metadata(
         or type(proof.operation_count) is not int
         or proof.operation_count != len(plan.operations)
         or type(proof.server_version) is not str
-        or proof.server_version != "0.16.14"
+        or proof.server_version != "0.16.16"
         or type(proof.management_status) is not int
         or proof.management_status != 200
     ):
@@ -9517,7 +9520,7 @@ def _validate_apply_receipt_payload_with_runtime_metadata(
     expected_proof = {
         "operations_sha256": plan.operations_sha256,
         "operation_count": len(plan.operations),
-        "server_version": "0.16.14",
+        "server_version": "0.16.16",
         "management_status": 200,
     }
     expected_payload = {
@@ -9562,7 +9565,7 @@ def prepare_apply(
     """Prepare one apply using injected executor and authoritative census seam.
 
     The caller-supplied verifier is the offline contract boundary for a future
-    live v0.16.14 management census. This module makes no live request itself.
+    live v0.16.16 management census. This module makes no live request itself.
     """
     _require_fixed_apply_paths(
         paths,
@@ -11907,7 +11910,7 @@ def _validated_authoritative_bootstrap_token(
         bootstrap_receipt_sha256=receipt_after.sha256,
         apply_receipt_sha256=apply_receipt.sha256,
         bootstrap_proof_sha256=proof_snapshot.sha256,
-        server_version="0.16.14",
+        server_version="0.16.16",
         authentication_status=200,
         management_account_id=account_id,
         management_api_key_id=credential_id,
@@ -12169,7 +12172,7 @@ def _bootstrap_retirement_metadata(
             receipt.sha256,
             binding.bootstrap_receipt_sha256,
         )
-        or binding.server_version != "0.16.14"
+        or binding.server_version != "0.16.16"
         or type(binding.authentication_status) is not int
         or binding.authentication_status != 200
         or type(binding.ip_restriction_decision) is not str
@@ -12488,7 +12491,7 @@ def _recovery_proof_metadata(
             proof.operation_plan_sha256,
             plan.operation_plan_sha256,
         )
-        or proof.server_version != "0.16.14"
+        or proof.server_version != "0.16.16"
         or type(proof.management_status) is not int
         or proof.management_status != 200
         or type(proof.readiness_status) is not int
@@ -12496,7 +12499,7 @@ def _recovery_proof_metadata(
         or type(proof.old_recovery_auth_status) is not int
         or proof.old_recovery_auth_status not in {401, 403}
         or proof.normal_url != "http://127.0.0.1:8443"
-        or proof.image_reference != "stalwartlabs/stalwart:v0.16.14"
+        or proof.image_reference != STALWART_IMAGE
         or proof.image_id != STALWART_IMAGE_ID
         or type(proof.container_id) is not str
         or re.fullmatch(r"[0-9a-f]{64}", proof.container_id) is None
@@ -14366,7 +14369,7 @@ def _absolute_cli_path(value: str) -> Path:
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare, execute, and retire the fail-closed Stalwart v0.16.14 "
+            "Prepare, execute, and retire the fail-closed Stalwart v0.16.16 "
             "migration."
         ),
     )

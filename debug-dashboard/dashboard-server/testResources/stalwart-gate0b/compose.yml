@@ -1,6 +1,6 @@
 services:
   stalwart-data-owner:
-    image: stalwartlabs/stalwart:v0.16.14
+    image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command: ["chown 2000:2000 /var/lib/stalwart && chmod 0700 /var/lib/stalwart"]
@@ -9,7 +9,7 @@ services:
       - ../../../.runtime/stalwart-gate0b/data:/var/lib/stalwart
 
   stalwart:
-    image: stalwartlabs/stalwart:v0.16.14
+    image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
     user: "2000:2000"
     depends_on:
       stalwart-data-owner:

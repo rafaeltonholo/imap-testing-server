@@ -1002,7 +1002,7 @@ class StalwartRoutingProofCliTest {
             put("undo_status", "pending")
         }
         return StalwartRoutingVerifierEvidence(
-            serverVersion = "0.16.14",
+            serverVersion = "0.16.16",
             managementAccountId = "managementaccount",
             managementCredentialId = "managementcredential",
             bootstrapProof = bootstrapProof(),
@@ -1129,7 +1129,7 @@ class StalwartRoutingProofCliTest {
                 "schema",
                 "mail-sandbox.stalwart-v016-routing-input.v1",
             )
-            put("server_version", "0.16.14")
+            put("server_version", "0.16.16")
         }
 
     private fun bootstrapProof(): JsonObject = buildJsonObject {

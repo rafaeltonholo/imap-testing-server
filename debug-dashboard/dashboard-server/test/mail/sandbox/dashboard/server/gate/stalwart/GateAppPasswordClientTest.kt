@@ -2152,6 +2152,44 @@ class GateAppPasswordClientTest {
         }
 
     @Test
+    fun authenticatedSessionProvesCoreWhenCoreEchoIsPermissionDenied() =
+        runBlocking {
+            val accountId = "account7"
+            val address = "dashboard-routing-sender@local.test"
+            val responses = completeMailProbeResponses(
+                accountId = accountId,
+                address = address,
+            ).toMutableList()
+            responses[1] = jmapMethodErrorResponse(
+                callId = "gate-1",
+                type = "forbidden",
+            )
+            val transport = RecordingGateHttpTransport(responses)
+            val secret = StalwartBorrowedSecret.takeOwnership(
+                "app_test-only-core-session-probe".encodeToByteArray(),
+            )
+
+            val result = secret.use {
+                GateStalwartMailCredentialProbeRemote(
+                    endpointProfile = StalwartEndpointProfile.MIGRATION_BOOTSTRAP,
+                    transport = transport,
+                ).probe(
+                    accountId = accountId,
+                    address = address,
+                    secret = it,
+                )
+            }
+
+            val authenticated =
+                assertIs<StalwartCredentialProbeResult.Authenticated>(result)
+            assertEquals(
+                STALWART_REQUIRED_MAIL_CAPABILITIES,
+                authenticated.capabilities,
+            )
+            assertEquals(5, transport.requests.size)
+        }
+
+    @Test
     fun managementRevocationNeverBlindlyRetriesAfterPostFetchMismatch() =
         runBlocking {
             val managementAccountId = "management7"

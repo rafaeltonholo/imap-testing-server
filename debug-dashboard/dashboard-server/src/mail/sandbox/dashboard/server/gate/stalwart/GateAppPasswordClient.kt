@@ -309,6 +309,40 @@ internal val DASHBOARD_MAIL_PERMISSIONS: Set<String> = linkedSetOf(
     "jmapBlobUpload",
 )
 
+internal val DASHBOARD_ACCOUNT_PERMISSIONS: Set<String> =
+    DASHBOARD_MAIL_PERMISSIONS + linkedSetOf(
+        "emailSend",
+        "emailReceive",
+        "imapAuthenticate",
+        "imapAclGet",
+        "imapAclSet",
+        "imapMyRights",
+        "imapListRights",
+        "imapAppend",
+        "imapCapability",
+        "imapId",
+        "imapCopy",
+        "imapMove",
+        "imapCreate",
+        "imapDelete",
+        "imapEnable",
+        "imapExpunge",
+        "imapFetch",
+        "imapIdle",
+        "imapList",
+        "imapLsub",
+        "imapNamespace",
+        "imapRename",
+        "imapSearch",
+        "imapSort",
+        "imapSelect",
+        "imapExamine",
+        "imapStatus",
+        "imapStore",
+        "imapSubscribe",
+        "imapThread",
+    )
+
 internal class GateAppPasswordDescription private constructor(
     val value: String,
 ) {
@@ -1834,7 +1868,11 @@ internal class GateStalwartMailCredentialProbeRemote(
                 ) {
                     "Mail credential authenticated the wrong Account"
                 }
-                val proven = linkedSetOf<StalwartMailCapability>()
+                // A successfully authenticated, identity-bound JMAP Session is
+                // itself a Core proof. Stalwart v0.16.16 may deny Core/echo to
+                // a mail-only AppPassword while allowing every required mail
+                // method, so echo remains an optional supplemental probe.
+                val proven = linkedSetOf(StalwartMailCapability.Core)
                 if (proveCapability { proveCore(mailClient) }) {
                     proven += StalwartMailCapability.Core
                 }

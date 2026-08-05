@@ -12,7 +12,8 @@ internal data class StalwartResolvedMount(
 )
 
 internal object StalwartDockerMountAudit {
-    private const val IMAGE = "stalwartlabs/stalwart:v0.16.14"
+    private const val IMAGE =
+        "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
     private const val PROJECT = "mail-sandbox-stalwart-gate"
     private const val COMPOSE_RELATIVE =
         "dashboard-server/testResources/stalwart-gate0b/compose.yml"

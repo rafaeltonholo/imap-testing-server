@@ -54,7 +54,15 @@ class StalwartFixtureSecretTest {
     fun fixtureAuditRejectsEveryUnsafeMutation() {
         val fixture = fixture()
         val mutations = mapOf<String, (FixtureText) -> FixtureText>(
-            "moving image tag" to { it.copy(base = it.base.replace("v0.16.14", "latest")) },
+            "moving image tag" to {
+                it.copy(
+                    base =
+                        it.base.replace(
+                            "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+                            "stalwartlabs/stalwart:latest",
+                        ),
+                )
+            },
             "runtime user" to { it.copy(base = it.base.replace("\"2000:2000\"", "\"0:0\"")) },
             "enterprise license" to {
                 it.copy(base = it.base + "\n    environment:\n      STALWART_LICENSE_KEY: unsafe\n")

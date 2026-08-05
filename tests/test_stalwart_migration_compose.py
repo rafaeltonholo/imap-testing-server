@@ -73,6 +73,10 @@ EXPECTED_OWNER_COMMAND = [
     "chown -R 2000:2000 /var/lib/stalwart && "
     "chmod 0700 /var/lib/stalwart",
 ]
+EXPECTED_STALWART_IMAGE = (
+    "stalwartlabs/stalwart:v0.16.16@"
+    "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+)
 
 
 def render_compose(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -116,7 +120,7 @@ def require_exact_owner_service(
     expected = {
         "command": EXPECTED_OWNER_COMMAND,
         "entrypoint": ["/bin/sh", "-c"],
-        "image": "stalwartlabs/stalwart:v0.16.14",
+        "image": EXPECTED_STALWART_IMAGE,
         "networks": {"default": None},
         "profiles": ["stalwart-migration"],
         "restart": "no",
@@ -222,7 +226,7 @@ class StalwartMigrationComposeTest(unittest.TestCase):
     def test_resolved_service_has_dormant_pinned_migration_identity(self) -> None:
         service = self.migration_service()
 
-        self.assertEqual(service.get("image"), "stalwartlabs/stalwart:v0.16.14")
+        self.assertEqual(service.get("image"), EXPECTED_STALWART_IMAGE)
         self.assertEqual(
             service.get("container_name"),
             "mail-sandbox-stalwart-migration",

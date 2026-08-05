@@ -190,13 +190,6 @@ class StalwartRawBlobCompatibilityLiveTest {
             "Management scope contains a disabled or non-boolean permission",
         )
         assertEquals(GateBootstrap.managementPermissions, permissions.keys)
-        assertFalse(
-            permissions.keys.any { permission ->
-                permission.contains("blob", ignoreCase = true) ||
-                    permission.startsWith("jmap")
-            },
-            "Management scope unexpectedly contains a mail or Blob permission",
-        )
     }
 
     private fun requireSingleRegistryObject(response: JsonObject): JsonObject {

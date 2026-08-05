@@ -1,4 +1,4 @@
-# Stalwart v0.15 to v0.16.14 Operator Runbook
+# Stalwart v0.15 to v0.16.16 Operator Runbook
 
 This is the operator sequence for the one-time, fail-closed migration of the
 real mail-sandbox Stalwart store. It records commands and checkpoints; it is
@@ -151,7 +151,7 @@ will adopt or destroy.
 Only after Step 1 succeeds may the primary checkout be updated to the reviewed
 v0.16 model. Its Stalwart service is fixed to:
 
-- image `stalwartlabs/stalwart:v0.16.14`;
+- image `stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`;
 - container name `stalwart-dev`;
 - user `2000:2000`;
 - restart policy `unless-stopped`;
@@ -167,7 +167,7 @@ v0.16 model. Its Stalwart service is fixed to:
 - no `ADMIN_SECRET` or `STALWART_RECOVERY_*` variable.
 
 The expected local image ID is
-`sha256:25001929f36a62521cedc50f12527080dac4cf6a0cc31b617b669d921cafc36a`.
+`sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`.
 The migration tools validate it locally and use `--pull never`.
 
 `stalwart/config.json` must contain exactly this pretty-printed byte sequence:
@@ -217,7 +217,7 @@ Download only the tagged upstream script and verify its fixed digest:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/stalwartlabs/stalwart/v0.16.14/resources/scripts/migrate_v016.py \
+  https://raw.githubusercontent.com/stalwartlabs/stalwart/v0.16.16/resources/scripts/migrate_v016.py \
   -o debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
 chmod 0600 \
   debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
@@ -263,7 +263,7 @@ The `apply` preflight supplies all three fixed `STALWART_MIGRATION_*` path
 variables and performs the exact primary-root, captured-project, two-file
 `config --quiet` validation before any `up`.
 
-That internally validated overlay pins v0.16.14, runs the owner helper as root
+That internally validated overlay pins v0.16.16, runs the owner helper as root
 only for the fixed ownership operation, runs Stalwart as UID/GID 2000,
 publishes only `127.0.0.1:18080:8080`, binds the whole recovery config directory
 read-only, binds the real data store writable, and sources the mode-`0600`
@@ -344,7 +344,7 @@ python3 scripts/stalwart_v016.py retire-recovery
 ```
 
 Retirement revalidates the whole Task 5–7 receipt chain. It starts only the
-base Compose Stalwart service on `127.0.0.1:8443`, proves v0.16.14 readiness,
+base Compose Stalwart service on `127.0.0.1:8443`, proves v0.16.16 readiness,
 authenticates the exact immutable management Account/API-key binding, proves
 the old recovery credential returns 401 or 403, and verifies there is one
 expected writer with no migration container. It durably writes

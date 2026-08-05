@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed stdlib transport for Stalwart v0.16.14 Registry calls.
+"""Fail-closed stdlib transport for Stalwart v0.16.16 Registry calls.
 
 The transport is intentionally pinned to the loopback listener exposed by the
 v0.16 migration overlay.  It does not accept configurable origins or follow

@@ -1,6 +1,6 @@
 services:
   stalwart-migration-data-owner:
-    image: stalwartlabs/stalwart:v0.16.14
+    image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
     profiles:
       - stalwart-migration
     user: "0:0"
@@ -25,7 +25,7 @@ services:
           create_host_path: false
 
   stalwart: !override
-    image: stalwartlabs/stalwart:v0.16.14
+    image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
     container_name: mail-sandbox-stalwart-migration
     profiles:
       - stalwart-migration

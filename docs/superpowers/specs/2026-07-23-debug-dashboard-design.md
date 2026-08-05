@@ -32,7 +32,7 @@ A disabled baseline action does not count as support. The release remains not re
 
 - One loopback-only dashboard for the repository's local Docker Compose sandbox.
 - Dovecot with IMAP and Postfix SMTP/LMTP.
-- Stalwart v0.16.14 with JMAP mail, submission, and JMAP-based management.
+- Stalwart v0.16.16 with JMAP mail, submission, and JMAP-based management.
 - One logical email address with independent Dovecot and Stalwart provider instances.
 - Direct mailbox append and real protocol-level delivery as distinct modes.
 - Deterministic fixtures, authored text, uploaded EML, random scenarios, and generated threads.
@@ -63,7 +63,7 @@ A disabled baseline action does not count as support. The release remains not re
 | Shared code | KMP contracts targeting JVM and `wasmJs` |
 | Build | Kotlin Toolchain wrapper and YAML module model only |
 | Supported profiles | `dovecot-imap` and `stalwart-jmap` |
-| Stalwart baseline | Pin v0.16.14 and migrate before dashboard implementation |
+| Stalwart baseline | Pin v0.16.16 and migrate before dashboard implementation |
 | Stalwart mail access | One dashboard-owned, mail-only AppPassword per ordinary Account; no global impersonation |
 | Stalwart enrollment | Use the Account's normal password only for the active create, enroll, repair, or explicit rotate request |
 | Local secret store | Small JDK-only AES-256-GCM snapshot under `.runtime`; repository-owner access is trusted |
@@ -252,7 +252,7 @@ Normal browsing and mutation must not require the dashboard to persist every use
 
 The Dovecot operator approach is a Gate 0C contract test. If the current image cannot isolate the master identity without weakening ordinary account authentication, implementation stops for a credential-strategy decision.
 
-Tagged v0.16.14 makes this split necessary: AppPasswords are server-generated, returned only when created, scoped to the Account that owns them, and explicitly rejected for impersonation. A non-impersonating management credential can revoke a known secondary credential through an Account update but cannot create an AppPassword for another Account.
+Tagged v0.16.16 makes this split necessary: AppPasswords are server-generated, returned only when created, scoped to the Account that owns them, and explicitly rejected for impersonation. A non-impersonating management credential can revoke a known secondary credential through an Account update but cannot create an AppPassword for another Account.
 
 The dashboard therefore creates an AppPassword only while authenticated as the exact ordinary Account:
 
@@ -285,7 +285,7 @@ Enrollment and repair create no new credential until reserved-prefix inventory i
 
 **Remove dashboard access** does not delete the Account and does not require its normal password. It takes the Account's exclusive mail-credential lock, drains active mail operations, revokes all reserved-prefix credentials through the management adapter, verifies none remain, then erases the local record and returns to `enrollmentRequired`. Remote success followed by local-erasure failure becomes `removalPending`; local material is never erased first.
 
-Credential-list updates accept a trusted test-sandbox no-concurrent-writer contract: while enrollment, repair, rotation, removal, password reset, or Account deletion owns the Account lock, teammates do not edit that Account's credentials in the Stalwart UI or another tool. v0.16.14 does not provide an `ifInState` guard for this Account credential patch. The adapter therefore re-fetches immediately before mutation, removes only credential IDs carrying the reserved prefix, submits once, then re-fetches and verifies that all unrelated credential IDs and values were preserved. An observed mismatch leaves the Account in `recoveryRequired` and the operation in `reconciliationRequired`; the design does not add a distributed lock for external tools.
+Credential-list updates accept a trusted test-sandbox no-concurrent-writer contract: while enrollment, repair, rotation, removal, password reset, or Account deletion owns the Account lock, teammates do not edit that Account's credentials in the Stalwart UI or another tool. v0.16.16 does not provide an `ifInState` guard for this Account credential patch. The adapter therefore re-fetches immediately before mutation, removes only credential IDs carrying the reserved prefix, submits once, then re-fetches and verifies that all unrelated credential IDs and values were preserved. An observed mismatch leaves the Account in `recoveryRequired` and the operation in `reconciliationRequired`; the design does not add a distributed lock for external tools.
 
 Manual rotation acquires the same exclusive lock and blocks new mail operations. It waits up to 30 seconds for existing per-Account credential leases to close before creating anything; timeout leaves the active credential unchanged. After the drain, it authenticates with the request-scoped normal password, creates and durably captures one successor, probes it, records `rotating`, switches the active generation, records the old generation as retiring, revokes the old credential, verifies old failure/new success, and removes old local bytes. Quota exhaustion stops before changing the active credential.
 
@@ -603,7 +603,7 @@ Time-adjacent events appear, when requested, in a separate Nearby evidence group
 
 Correlation contract tests interleave two accounts and cover duplicate and missing Message-IDs, queue/session reuse, multi-recipient delivery, malformed parser input, and redaction failure paths. They assert both the expected inclusion set and the deterministic exclusion set for each selected account.
 
-Stalwart's documented structured Log filter is text-only. Level, event, and time filtering may be applied to fetched normalized pages, but server-side filter claims require a v0.16.14 probe.
+Stalwart's documented structured Log filter is text-only. Level, event, and time filtering may be applied to fetched normalized pages, but server-side filter claims require a v0.16.16 probe.
 
 ## 12. User Interface
 
@@ -726,16 +726,16 @@ Before feature implementation:
 4. History navigation, API calls, SSE reconnect, keyboard/focus semantics, and a production build are verified in a modern WasmGC browser.
 5. If Kotlin Toolchain alone cannot support this, work stops for a design decision. There is no hidden fallback.
 
-### Gate 0B — Stalwart v0.16.14 baseline
+### Gate 0B — Stalwart v0.16.16 baseline
 
 Before dashboard provider implementation:
 
-1. Pin `stalwartlabs/stalwart` to v0.16.14 rather than `latest`.
+1. Pin `stalwartlabs/stalwart` to v0.16.16 rather than `latest`.
 2. Back up existing Stalwart state before migration; never edit RocksDB directly.
 3. Replace legacy TOML/REST management assumptions with the v0.16 object model.
 4. Retain the internal directory so password changes are real; layer OAuth/OIDC as an authentication flow rather than an external account directory.
 5. Bind the Stalwart host port to loopback and record the source address Stalwart observes through Docker; IP-restrict credentials only if that local path is stable.
-6. Establish an immutable protected management Account with an API key, permission `Replace`, only `authenticate`, Account get/query/create/update/destroy, Domain get/query/create, Task get/query, and optional Log get/query permissions, and no impersonation or mail permissions. The exact v0.16.14 permission names are captured by the contract probe rather than represented by a wildcard grant.
+6. Establish an immutable protected management Account with an API key, permission `Replace`, only `authenticate`, Account get/query/create/update/destroy, Domain get/query/create, Task get/query, and optional Log get/query permissions, and no impersonation or mail permissions. The exact v0.16.16 permission names are captured by the contract probe rather than represented by a wildcard grant.
 7. Prove an ordinary Account authenticated with its request-scoped normal password can create a server-generated AppPassword, the secret is returned only on creation and cannot be changed, and at least two credentials may coexist for bounded manual rotation.
 8. Prove the management API key without `impersonate` cannot create or use another Account's AppPassword for mail, but can freshly fetch and revoke the exact dashboard credential through the trusted no-concurrent-writer Account update while preserving the normal password and every unrelated credential.
 9. Give the dashboard AppPassword permission `Replace` with only the exact JMAP authentication/mail/blob/Identity/submission permissions required by the baseline. Prove it cannot impersonate, manage Accounts/Domains/Tasks/Logs, change normal passwords, or create/update/destroy AppPasswords.
@@ -824,7 +824,7 @@ The suite uses newly generated disposable accounts and never deletes pre-existin
 - fake-server tests for protocol errors and partial results;
 - live Dovecot password/OAuth/userdb/LMTP/master eligibility and admin tests;
 - live Postfix SMTP receipt tests;
-- live Stalwart v0.16.14 management/mail/submission tests;
+- live Stalwart v0.16.16 management/mail/submission tests;
 - Stalwart AppPassword create/capture/direct-auth/targeted-revoke/rotation/recovery/remove tests with no impersonation and the trusted external-writer exclusion;
 - Stalwart state mismatch, partial `Foo/set`, Identity, Log, DestroyAccount Task, and management/mail-credential permission behavior;
 - Docker log follow/reconnect and service allowlist behavior.
@@ -889,7 +889,7 @@ These are implementation gates, not unresolved product choices:
 
 - Kotlin Toolchain Wasm asset/bootstrap and browser-test ergonomics.
 - Stalwart documentation inconsistency between generated `/api` examples and the v0.16 `/jmap`/Session model.
-- Exact minimal v0.16.14 AppPassword permission set for the required JMAP mail, blob, Identity, and submission calls.
+- Exact minimal v0.16.16 AppPassword permission set for the required JMAP mail, blob, Identity, and submission calls.
 - Non-impersonating management revocation of one dashboard credential while preserving every unrelated credential.
 - Stable AppPassword overlap/quota, read-once capture, cache invalidation, and restart reconciliation behavior.
 - Stalwart DestroyAccount task observation when cleanup completes before the first query.
@@ -897,7 +897,7 @@ These are implementation gates, not unresolved product choices:
   fixed Docker-exec/stdio control path and every rejected Docker Desktop
   network path.
 - Provider-side local-only routing and mailbox-arrival correlation.
-- Exact import-to-submission creation-ID chaining on v0.16.14.
+- Exact import-to-submission creation-ID chaining on v0.16.16.
 - Actual server-side filters supported by `x:Log/query`.
 - Exact open-source condensed workhorse and monospace families.
 - Final spacing, density, and breakpoint tokens after the first real Compose render.
@@ -909,14 +909,14 @@ These are implementation gates, not unresolved product choices:
 - [Kotlin Toolchain Compose support](https://kotlin-toolchain.org/dev/user-guide/builtin-tech/compose-multiplatform/)
 - [Kotlin Toolchain Ktor support](https://kotlin-toolchain.org/dev/user-guide/builtin-tech/ktor/)
 - [Stalwart v0.16 upgrade guide](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md)
-- [Stalwart v0.16.14 release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.14)
+- [Stalwart v0.16.16 release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.16)
 - [Stalwart management overview](https://stalw.art/docs/management/)
 - [Stalwart Account object](https://stalw.art/docs/ref/object/account/)
 - [Stalwart AccountPassword object](https://stalw.art/docs/ref/object/account-password/)
 - [Stalwart AppPassword object](https://stalw.art/docs/ref/object/app-password/)
 - [Stalwart AppPassword authentication](https://stalw.art/docs/auth/authentication/app-password/)
-- [Stalwart v0.16.14 credential implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.14/crates/common/src/auth/credential.rs)
-- [Stalwart v0.16.14 authentication implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.14/crates/common/src/auth/authentication.rs)
+- [Stalwart v0.16.16 credential implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.16/crates/common/src/auth/credential.rs)
+- [Stalwart v0.16.16 authentication implementation](https://github.com/stalwartlabs/stalwart/blob/v0.16.16/crates/common/src/auth/authentication.rs)
 - [Stalwart Task object](https://stalw.art/docs/ref/object/task/)
 - [Stalwart Log object](https://stalw.art/docs/ref/object/log/)
 - [Stalwart API-key authentication](https://stalw.art/docs/auth/authentication/api-key/)

@@ -156,6 +156,7 @@ internal class GateHttpResponse(
     val status: Int,
     val effectiveUrl: URI,
     val body: String,
+    val location: String? = null,
 ) {
     override fun toString(): String =
         "GateHttpResponse(status=$status, effectiveUrl=$effectiveUrl, body=redacted)"
@@ -224,17 +225,45 @@ internal class GateJmapClient(
         requireOpen()
         cachedSession?.let { return it }
         val discoveryUrl = profile.baseUrl.resolve("/.well-known/jmap")
-        val response = transport.execute(
+        val discoveryResponse = transport.execute(
             GateHttpRequest(
                 method = "GET",
                 url = discoveryUrl,
                 credential = credential,
             ),
         )
-        if (response.effectiveUrl != discoveryUrl) {
+        if (discoveryResponse.effectiveUrl != discoveryUrl) {
             invalidResponse(
                 "JMAP Session discovery did not remain on its pinned URL",
             )
+        }
+        val response = if (discoveryResponse.status == CANONICAL_REDIRECT_STATUS) {
+            val canonicalSessionUrl = profile.baseUrl.resolve(CANONICAL_SESSION_PATH)
+            val location = discoveryResponse.location
+                ?: invalidResponse("JMAP Session redirect omitted Location")
+            val redirectUrl = try {
+                discoveryUrl.resolve(location)
+            } catch (_: Exception) {
+                invalidResponse("JMAP Session redirect Location was malformed")
+            }
+            if (redirectUrl != canonicalSessionUrl) {
+                invalidResponse("JMAP Session redirect target was not canonical")
+            }
+            transport.execute(
+                GateHttpRequest(
+                    method = "GET",
+                    url = canonicalSessionUrl,
+                    credential = credential,
+                ),
+            ).also { redirected ->
+                if (redirected.effectiveUrl != canonicalSessionUrl) {
+                    invalidResponse(
+                        "JMAP Session response did not remain on its canonical URL",
+                    )
+                }
+            }
+        } else {
+            discoveryResponse
         }
         requireSuccess(response, "JMAP Session discovery")
         val json = parseObject(response.body, "JMAP Session")
@@ -537,6 +566,8 @@ internal class GateJmapClient(
         )
         const val STALWART_CAPABILITY = "urn:stalwart:jmap"
         const val MAX_REGISTRY_QUERY_PAGE = 100
+        const val CANONICAL_REDIRECT_STATUS = 307
+        const val CANONICAL_SESSION_PATH = "/jmap/session"
     }
 }
 
@@ -569,6 +600,7 @@ internal class KtorGateHttpTransport(
         return readGateHttpResponse(
             status = response.status.value,
             effectiveUrl = URI(response.call.request.url.toString()),
+            location = response.headers[HttpHeaders.Location],
         ) {
             response.bodyAsText()
         }
@@ -610,6 +642,7 @@ internal suspend fun <T> executeGateTransportRequest(
 internal suspend fun readGateHttpResponse(
     status: Int,
     effectiveUrl: URI,
+    location: String? = null,
     bodyReader: suspend () -> String,
 ): GateHttpResponse =
     try {
@@ -617,6 +650,7 @@ internal suspend fun readGateHttpResponse(
             status = status,
             effectiveUrl = effectiveUrl,
             body = bodyReader(),
+            location = location,
         )
     } catch (failure: CancellationException) {
         throw failure
