@@ -229,8 +229,10 @@ or bypass a failure in an earlier one.
   source URL to the v0.16.16 tag.
 - Regenerate receipt-bound expectations through the existing migration
   process; never hand-edit runtime receipts.
-- Add copy/move coverage for the `Email/copy` and
-  `onSuccessDestroyOriginal` fixes.
+- Add same-account copy/move and keyword coverage through `Email/set`
+  mailbox-membership/keyword patches with `ifInState`. JMAP `Email/copy` is a
+  cross-account operation and remains outside the dashboard requirement; do
+  not add impersonation or a shared-account ACL solely to exercise it.
 - Keep disposable Gate 0B validation separate from the normal Stalwart data
   migration. No live Stalwart capture, restart, migration, or replacement is
   authorized without the repository's existing explicit capture phrase.

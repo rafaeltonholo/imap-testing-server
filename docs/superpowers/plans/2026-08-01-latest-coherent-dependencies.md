@@ -833,7 +833,7 @@ git add docs/debug-dashboard/gates/0c-dovecot.md \
 git commit -m "test: reprove Dovecot gate on latest provider stack"
 ```
 
-## Task 7: Characterize copy/move RED and move active Stalwart targets to v0.16.16
+## Task 7: Add missing mail/account contracts and move active Stalwart targets to v0.16.16
 
 > **Completion-day freshness amendment (2026-08-04):** v0.16.15 was the
 > approved latest stable target, but Stalwart published stable v0.16.16 on
@@ -841,6 +841,13 @@ git commit -m "test: reprove Dovecot gate on latest provider stack"
 > its exact OCI index digest. The tagged v0.16.16 migration script is
 > byte-identical to v0.16.15, while CLI 1.0.12 remains selected because its
 > official `latest`, `1.0`, and `1.0.12` tags share the same index digest.
+>
+> **Contract correction:** JMAP `Email/copy` is strictly cross-account and
+> rejects equal source/target Account IDs. The dashboard's per-account folder
+> copy/move requirement uses `Email/set` mailbox-membership patches. Do not add
+> impersonation, management mail permissions, or a shared-account ACL only to
+> reproduce an upstream cross-account regression that the dashboard will not
+> invoke.
 
 **Files:**
 
@@ -864,7 +871,7 @@ git commit -m "test: reprove Dovecot gate on latest provider stack"
 - Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartGateCleanupTest.kt`
 - Modify: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRoutingProofCliTest.kt`
 - Modify if required by the GREEN run: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/GateJmapClientTest.kt`
-- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartCopyMoveLiveTest.kt`
+- Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailMutationLiveTest.kt`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRegistryRoutingDeletionLiveTest.kt`
 
 - [ ] **Step 1: Change target-identity tests only and verify RED**
@@ -900,13 +907,16 @@ Expected: FAIL on the old v0.16.14 target identity.
 - [ ] **Step 2: Write the two missing disposable live contracts**
 
 Before changing the disposable image pin, create
-`StalwartCopyMoveLiveTest.kt`. Against only the Gate fixture it must import one
-uniquely marked Email, create a target Mailbox, and prove:
+`StalwartMailMutationLiveTest.kt`. Against only the Gate fixture it must import
+one uniquely marked Email, create a target Mailbox, and prove:
 
-1. one `Email/copy` request/reconciliation creates exactly one target copy;
-2. move uses `onSuccessDestroyOriginal` and leaves the target readable;
-3. a source Email is destroyed only after copy success;
-4. method errors and partial outcomes remain typed failures.
+1. same-account copy adds the target mailbox membership while retaining the
+   source membership;
+2. same-account move atomically adds the target membership and removes the
+   source membership in one `Email/set` update;
+3. `$seen` and `$flagged` can each be added and removed;
+4. stale `ifInState`, method errors, and partial `notUpdated` outcomes remain
+   typed failures without broad retry or cross-account `Email/copy`.
 
 Record marker/mailbox/Email IDs before every dispatch and reconcile the exact
 marker in a `NonCancellable` `finally`, including lost-response paths.
@@ -926,7 +936,7 @@ only the exact Gate-owned Account; it must not perform broad Registry cleanup.
 Reuse `GateJmapClient.call()`, the existing fixture-secret abstractions, and
 the exact cleanup registry. Do not change a client pre-emptively.
 
-- [ ] **Step 3: Characterize both new contracts and keep v0.16.14 RED**
+- [ ] **Step 3: Characterize both new contracts while target identity stays RED**
 
 Run the existing Gate 0B fixture prepare → recovery Compose up → bootstrap →
 recovery retirement sequence under only project
@@ -939,7 +949,7 @@ before the first preparation command:
 (
 set -eu
 gate_repository_root="$PWD"
-copy_move_status=0
+mail_mutation_status=0
 registry_routing_status=0
 
 cleanup_gate0b() {
@@ -1031,22 +1041,22 @@ if STALWART_LIVE_TESTS=1 \
   ./kotlin test \
     --include-module dashboard-server \
     --include-classes \
-    'mail.sandbox.dashboard.server.gate.stalwart.StalwartCopyMoveLiveTest'; then
-  copy_move_status=0
+    'mail.sandbox.dashboard.server.gate.stalwart.StalwartMailMutationLiveTest'; then
+  mail_mutation_status=0
 else
-  copy_move_status=$?
+  mail_mutation_status=$?
 fi
 
 test "$registry_routing_status" -eq 0
-test "$copy_move_status" -ne 0
+test "$mail_mutation_status" -eq 0
 exit 0
 )
 ```
 
 Expected: Registry projection, SMTP/JMAP routing, and Account deletion PASS as
-a v0.16.14 characterization; copy/move FAILS on the known v0.16.14
-duplicate-copy/`onSuccessDestroyOriginal` contract, not compilation, setup,
-credentials, or cleanup. The combined new-contract gate therefore remains RED.
+a v0.16.14 characterization; same-account mailbox/keyword mutations also PASS.
+The target-identity tests from Step 1 keep the upgrade batch RED until every
+active disposable/migration target uses the exact v0.16.16 reference.
 `StalwartGateCleanupLiveTest` runs in a guaranteed postflight and proves only
 the exact Gate project, ports, and runtime root are absent. Do not query,
 enumerate, or compare normal Stalwart.
@@ -1123,7 +1133,7 @@ preparation. Change only the final version-specific assertions:
 
 ```bash
 test "$registry_routing_status" -eq 0
-test "$copy_move_status" -eq 0
+test "$mail_mutation_status" -eq 0
 exit 0
 ```
 
@@ -1154,7 +1164,7 @@ git add docker-compose.stalwart-migration.yml \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartFixtureSecretTest.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartGateCleanupTest.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRoutingProofCliTest.kt \
-  debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartCopyMoveLiveTest.kt \
+  debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailMutationLiveTest.kt \
   debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRegistryRoutingDeletionLiveTest.kt \
   debug-dashboard/dashboard-server/testResources/stalwart-gate0b/compose.yml \
   tests/test_stalwart_migration_compose.py \
@@ -1169,7 +1179,7 @@ git commit -m "build: upgrade Stalwart target baseline"
 
 - Create: `debug-dashboard/dashboard-server/testResources/stalwart-gate0b/run-latest-proof.sh`
 - Create: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartLatestProofLifecycleTest.kt`
-- Execute: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartCopyMoveLiveTest.kt`
+- Execute: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartMailMutationLiveTest.kt`
 - Execute: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/StalwartRegistryRoutingDeletionLiveTest.kt`
 - Modify if required by a proven regression: `debug-dashboard/dashboard-server/src/mail/sandbox/dashboard/server/gate/stalwart/GateJmapClient.kt`
 - Modify if required by a proven regression: `debug-dashboard/dashboard-server/test/mail/sandbox/dashboard/server/gate/stalwart/GateJmapClientTest.kt`
@@ -1215,7 +1225,7 @@ prepare command. The runner must then execute, as individual checked commands:
 - `StalwartMailAccessRestartPrepareLiveTest` and
   `StalwartMailAccessRestartReconcileLiveTest` for each of `staged`, `retiring`,
   and `removal-pending`;
-- `StalwartCopyMoveLiveTest`; and
+- `StalwartMailMutationLiveTest`; and
 - `StalwartRegistryRoutingDeletionLiveTest`.
 
 Use no command whose failure is consumed by a later passing command. Each new
@@ -1250,7 +1260,8 @@ Expected: runner lifecycle test and canonical offline Gate 0B PASS.
 debug-dashboard/dashboard-server/testResources/stalwart-gate0b/run-latest-proof.sh
 ```
 
-Expected: every named class/phase executes without assumption/skip; copy/move,
+Expected: every named class/phase executes without assumption/skip; same-account
+copy/move/keyword mutation,
 Registry projection, actual SMTP delivery, JMAP submission delivery, positive
 data-bearing Account deletion, and post-deletion auth/recipient denial PASS;
 the EXIT cleanup/postflight passes even if any body command fails.
@@ -1267,7 +1278,7 @@ repair.
 - [ ] **Step 6: Append superseding evidence and commit**
 
 Record the v0.16.16 image/digest, reported version, runner hash, every selected
-class/phase, commands/results, copy/move/Registry/routing/deletion behavior,
+class/phase, commands/results, mail-mutation/Registry/routing/deletion behavior,
 and cleanup comparison. Preserve v0.16.14 evidence as historical.
 
 ```bash
