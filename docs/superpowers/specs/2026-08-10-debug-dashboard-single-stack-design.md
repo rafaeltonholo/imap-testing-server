@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-10
 
-**Status:** Approved architecture; written-spec review pending
+**Status:** Approved architecture; independent written-spec review passed
 
 **Target:** `debug-dashboard/` and the repository-root Docker Compose mail sandbox
 
