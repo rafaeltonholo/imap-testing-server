@@ -273,6 +273,8 @@ def reload_and_verify(
     """Reload Dovecot and prove its root-service user projection."""
     if reload:
         _run_doveadm(runner, ["doveadm", "reload"])
+    for record in records:
+        _run_doveadm(runner, ["doveadm", "user", record.address], capture=True)
     if exact:
         result = _run_doveadm(runner, ["doveadm", "user", "*"], capture=True)
         projected = [line.strip() for line in str(getattr(result, "stdout", "")).splitlines() if line.strip()]
@@ -281,9 +283,6 @@ def reload_and_verify(
             raise UsersFileError(
                 f"full Dovecot projection mismatch: expected {sorted(expected)!r}, got {sorted(projected)!r}"
             )
-    else:
-        for record in records:
-            _run_doveadm(runner, ["doveadm", "user", record.address], capture=True)
     if deleted_address is not None:
         try:
             result = runner(["doveadm", "user", deleted_address], check=False, capture=True)
@@ -313,15 +312,24 @@ def _durable_projection(
         ) from exc
 
 
-def _mutation(
+def _mutate_users(
     users_path: Path,
     transform: Callable[[list[UserRecord]], list[UserRecord]],
     *,
     runner: Runner,
+    missing_only: bool = False,
+    exact: bool = False,
+    defer_provider_verification: bool = False,
     deleted_address: str | None = None,
+    verify_even_unchanged: bool = False,
 ) -> bool:
+    """Run the only locked users-authority mutation sequence."""
     with _locked(users_path) as descriptor:
-        if users_path.exists() or users_path.is_symlink():
+        destination_exists = users_path.exists() or users_path.is_symlink()
+        if destination_exists and missing_only:
+            _require_regular_file(users_path, require_mode=True)
+            return False
+        if destination_exists:
             records, original = _read_users(users_path)
         else:
             records, original = [], b""
@@ -332,12 +340,21 @@ def _mutation(
             digest = hashlib.sha256(rendered).hexdigest()
             _write_lock_state(descriptor, f"{PENDING_PREFIX}{digest}\n")
             _atomic_write(users_path, rendered)
-            _durable_projection(
+            if not defer_provider_verification:
+                _durable_projection(
+                    updated,
+                    runner=runner,
+                    deleted_address=deleted_address,
+                    exact=exact,
+                )
+                _write_lock_state(descriptor, "")
+        elif verify_even_unchanged:
+            reload_and_verify(
                 updated,
                 runner=runner,
                 deleted_address=deleted_address,
+                exact=exact,
             )
-            _write_lock_state(descriptor, "")
         elif deleted_address is not None:
             reload_and_verify(
                 updated,
@@ -352,29 +369,31 @@ def bootstrap_defaults(
     users_path: Path = USERS_FILE,
     defaults_path: Path = DEFAULTS_FILE,
     *,
-    defer_verification: bool = False,
+    defer_provider_verification: bool = False,
     lifecycle: str | None = None,
     runner: Runner = docker_exec,
 ) -> bool:
     """Create the authority from defaults only when the destination is absent."""
-    if defer_verification and lifecycle != START_LOCAL_LIFECYCLE:
+    if defer_provider_verification and lifecycle != START_LOCAL_LIFECYCLE:
         raise UsersFileError(
-            f"deferred verification is reserved for lifecycle {START_LOCAL_LIFECYCLE!r}"
+            f"deferred provider verification is reserved for lifecycle {START_LOCAL_LIFECYCLE!r}"
         )
-    if not defer_verification and lifecycle is not None:
-        raise UsersFileError("lifecycle is valid only with deferred verification")
-    records, rendered = _read_defaults(defaults_path)
-    with _locked(users_path) as descriptor:
-        if users_path.exists() or users_path.is_symlink():
-            _require_regular_file(users_path, require_mode=True)
-            return False
-        digest = hashlib.sha256(rendered).hexdigest()
-        _write_lock_state(descriptor, f"{PENDING_PREFIX}{digest}\n")
-        _atomic_write(users_path, rendered)
-        if not defer_verification:
-            _durable_projection(records, runner=runner, exact=True)
-            _write_lock_state(descriptor, "")
-        return True
+    if not defer_provider_verification and lifecycle is not None:
+        raise UsersFileError("lifecycle is valid only with deferred provider verification")
+
+    def load_defaults(records: list[UserRecord]) -> list[UserRecord]:
+        del records
+        defaults, _ = _read_defaults(defaults_path)
+        return defaults
+
+    return _mutate_users(
+        users_path,
+        load_defaults,
+        runner=runner,
+        missing_only=True,
+        exact=True,
+        defer_provider_verification=defer_provider_verification,
+    )
 
 
 def reset_defaults(
@@ -384,20 +403,18 @@ def reset_defaults(
     runner: Runner = docker_exec,
 ) -> bool:
     """Atomically replace only the auth authority with tracked defaults."""
-    records, rendered = _read_defaults(defaults_path)
-    with _locked(users_path) as descriptor:
-        original = b""
-        if users_path.exists() or users_path.is_symlink():
-            _, original = _read_users(users_path)
-        changed = rendered != original
-        if changed:
-            digest = hashlib.sha256(rendered).hexdigest()
-            _write_lock_state(descriptor, f"{PENDING_PREFIX}{digest}\n")
-            _atomic_write(users_path, rendered)
-        _durable_projection(records, runner=runner, exact=True)
-        if changed:
-            _write_lock_state(descriptor, "")
-        return changed
+    def load_defaults(records: list[UserRecord]) -> list[UserRecord]:
+        del records
+        defaults, _ = _read_defaults(defaults_path)
+        return defaults
+
+    return _mutate_users(
+        users_path,
+        load_defaults,
+        runner=runner,
+        exact=True,
+        verify_even_unchanged=True,
+    )
 
 
 def upsert_user(
@@ -419,7 +436,7 @@ def upsert_user(
         records.append(replacement)
         return records
 
-    return _mutation(users_path, transform, runner=runner)
+    return _mutate_users(users_path, transform, runner=runner)
 
 
 def delete_user(
@@ -430,7 +447,7 @@ def delete_user(
 ) -> bool:
     """Delete only one auth record; mailbox and provider data are out of scope."""
     _validate_address(address)
-    return _mutation(
+    return _mutate_users(
         users_path,
         lambda records: [record for record in records if record.address != address],
         runner=runner,
@@ -457,13 +474,17 @@ def verify_users(users_path: Path = USERS_FILE, *, runner: Runner = docker_exec)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--users-file", type=Path, default=USERS_FILE)
     parser.add_argument("--defaults-file", type=Path, default=DEFAULTS_FILE)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    bootstrap = commands.add_parser("bootstrap-defaults", help="create missing users from defaults")
-    bootstrap.add_argument("--defer-verification", action="store_true")
+    bootstrap = commands.add_parser(
+        "bootstrap-defaults",
+        help="create missing users from defaults",
+        allow_abbrev=False,
+    )
+    bootstrap.add_argument("--defer-provider-verification", action="store_true")
     bootstrap.add_argument("--lifecycle", choices=[START_LOCAL_LIFECYCLE])
     commands.add_parser("reset-defaults", help="replace users with defaults and verify")
     upsert = commands.add_parser("upsert", help="insert or update one user")
@@ -482,7 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             changed = bootstrap_defaults(
                 args.users_file,
                 args.defaults_file,
-                defer_verification=args.defer_verification,
+                defer_provider_verification=args.defer_provider_verification,
                 lifecycle=args.lifecycle,
             )
             print("created config/users" if changed else "config/users already exists; preserved")

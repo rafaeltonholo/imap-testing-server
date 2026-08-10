@@ -28,8 +28,9 @@ python3 scripts/create_and_feed_account.py --email dev@local.test
 # Inject mail
 python3 scripts/send_message.py --email dev@local.test --message mails/16-test.eml
 
-# Reset environment
-python3 scripts/reset.py
+# Destructive reset (requires the exact confirmation shown below)
+python3 scripts/reset.py --destroy-all-provider-data
+# Then type exactly: destroy vmail/, stalwart-data/, config/users
 
 # View logs
 docker compose logs -f dovecot

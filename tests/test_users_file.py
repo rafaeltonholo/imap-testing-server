@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import importlib
+import inspect
 import io
 import multiprocessing
 import os
@@ -23,6 +24,7 @@ DEFAULTS_PATH = REPOSITORY_ROOT / "config" / "users.defaults"
 RESET_SCRIPT = REPOSITORY_ROOT / "scripts" / "reset.py"
 DASHBOARD_RESET = REPOSITORY_ROOT / "debug-dashboard" / "reset-local-accounts.sh"
 ACTIVE_AUTHORITY_DOCS = [
+    REPOSITORY_ROOT / ".ai" / "guidelines.md",
     REPOSITORY_ROOT / "CLAUDE.md",
     REPOSITORY_ROOT / ".ai" / "architecture.md",
     REPOSITORY_ROOT / ".ai" / "skills" / "python-scripts" / "references" / "script-inventory.md",
@@ -155,7 +157,11 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(DEFAULT_TEXT.encode(), self.users.read_bytes())
         self.assertEqual(0o600, stat.S_IMODE(self.users.stat().st_mode))
         self.assertEqual(
-            [["doveadm", "reload"], ["doveadm", "user", "*"]],
+            [
+                ["doveadm", "reload"],
+                *[["doveadm", "user", address] for address in DEFAULT_ADDRESSES],
+                ["doveadm", "user", "*"],
+            ],
             calls,
         )
 
@@ -171,6 +177,44 @@ class MutationTests(unittest.TestCase):
             self.assertFalse(changed)
             self.assertEqual(existing, self.users.read_bytes())
             verify.assert_not_called()
+
+    def test_existing_bootstrap_never_reads_missing_or_invalid_defaults(self) -> None:
+        invalid_defaults = self.root / "invalid.defaults"
+        invalid_defaults.write_text("not a passwd file\n", encoding="utf-8")
+        missing_defaults = self.root / "missing.defaults"
+
+        for existing in (b"", b"dev@local.test:{PLAIN}modified::::::\n"):
+            for defaults_path in (missing_defaults, invalid_defaults):
+                with self.subTest(existing=existing, defaults_path=defaults_path.name):
+                    self.users.write_bytes(existing)
+                    self.users.chmod(0o600)
+
+                    try:
+                        changed = users_file.bootstrap_defaults(
+                            self.users,
+                            defaults_path,
+                            runner=self.runner,
+                        )
+                    except users_file.UsersFileError as exc:
+                        self.fail(f"existing destination read defaults unexpectedly: {exc}")
+
+                    self.assertFalse(changed)
+                    self.assertEqual(existing, self.users.read_bytes())
+
+    def test_existing_bootstrap_checks_destination_safety_before_defaults(self) -> None:
+        missing_defaults = self.root / "missing.defaults"
+        outside = self.root / "outside"
+        outside.write_bytes(b"preserve")
+        self.users.symlink_to(outside)
+        with self.assertRaisesRegex(users_file.UsersFileError, "symlink"):
+            users_file.bootstrap_defaults(self.users, missing_defaults, runner=self.runner)
+        self.assertEqual(b"preserve", outside.read_bytes())
+
+        self.users.unlink()
+        self.users.write_bytes(b"")
+        self.users.chmod(0o644)
+        with self.assertRaisesRegex(users_file.UsersFileError, "0600"):
+            users_file.bootstrap_defaults(self.users, missing_defaults, runner=self.runner)
 
     def test_upsert_preserves_unrelated_records_and_writes_eight_fields(self) -> None:
         self.write_users(
@@ -305,6 +349,19 @@ class MutationTests(unittest.TestCase):
             users_file.upsert_user("dev@local.test", "new", self.users, runner=failing_runner)
         self.assertIn("{PLAIN}new", self.users.read_text())
 
+    def test_all_public_mutations_delegate_to_one_locked_primitive(self) -> None:
+        for mutation in (
+            users_file.bootstrap_defaults,
+            users_file.reset_defaults,
+            users_file.upsert_user,
+            users_file.delete_user,
+        ):
+            with self.subTest(mutation=mutation.__name__):
+                source = inspect.getsource(mutation)
+                self.assertIn("return _mutate_users(", source)
+                self.assertNotIn("_atomic_write(", source)
+                self.assertNotIn("with _locked(", source)
+
 
 @unittest.skipIf(users_file is None, "users_file.py has not been implemented yet")
 class ProjectionAndDeferTests(unittest.TestCase):
@@ -317,7 +374,7 @@ class ProjectionAndDeferTests(unittest.TestCase):
         self.defaults.write_text(DEFAULT_TEXT, encoding="utf-8")
         self.defaults.chmod(0o600)
 
-    def test_reset_defaults_reloads_and_compares_full_wildcard_projection(self) -> None:
+    def test_reset_defaults_reloads_checks_every_user_and_compares_wildcard(self) -> None:
         self.users.write_text("old@local.test:{PLAIN}old::::::\n", encoding="utf-8")
         self.users.chmod(0o600)
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -329,12 +386,40 @@ class ProjectionAndDeferTests(unittest.TestCase):
 
         users_file.reset_defaults(self.users, self.defaults, runner=runner)
 
-        self.assertIn((["doveadm", "reload"], {}), calls)
-        self.assertIn(
-            (["doveadm", "user", "*"], {"capture": True}),
+        self.assertEqual(
+            [
+                (["doveadm", "reload"], {}),
+                *[
+                    (["doveadm", "user", address], {"capture": True})
+                    for address in DEFAULT_ADDRESSES
+                ],
+                (["doveadm", "user", "*"], {"capture": True}),
+            ],
             calls,
         )
         self.assertEqual(DEFAULT_TEXT, self.users.read_text())
+
+    def test_unchanged_reset_still_runs_full_projection_verification(self) -> None:
+        self.users.write_text(DEFAULT_TEXT, encoding="utf-8")
+        self.users.chmod(0o600)
+        calls: list[list[str]] = []
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            stdout = "\n".join(DEFAULT_ADDRESSES) + "\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        changed = users_file.reset_defaults(self.users, self.defaults, runner=runner)
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            [
+                ["doveadm", "reload"],
+                *[["doveadm", "user", address] for address in DEFAULT_ADDRESSES],
+                ["doveadm", "user", "*"],
+            ],
+            calls,
+        )
 
     def test_deleted_user_requires_nonzero_doveadm_user_result(self) -> None:
         self.users.write_text("dev@local.test:{PLAIN}secret::::::\n", encoding="utf-8")
@@ -355,23 +440,29 @@ class ProjectionAndDeferTests(unittest.TestCase):
             stdout = "\n".join(DEFAULT_ADDRESSES) + "\n" if command[-1:] == ["*"] else ""
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-        with self.assertRaises(users_file.UsersFileError):
+        try:
+            with self.assertRaises(users_file.UsersFileError):
+                users_file.bootstrap_defaults(
+                    self.users,
+                    self.defaults,
+                    defer_provider_verification=True,
+                    lifecycle="anything-else",
+                    runner=runner,
+                )
+        except TypeError as exc:
+            self.fail(f"exact internal defer-provider field is missing: {exc}")
+        self.assertFalse(self.users.exists())
+
+        try:
             users_file.bootstrap_defaults(
                 self.users,
                 self.defaults,
-                defer_verification=True,
-                lifecycle="anything-else",
+                defer_provider_verification=True,
+                lifecycle="dashboard-start-local",
                 runner=runner,
             )
-        self.assertFalse(self.users.exists())
-
-        users_file.bootstrap_defaults(
-            self.users,
-            self.defaults,
-            defer_verification=True,
-            lifecycle="dashboard-start-local",
-            runner=runner,
-        )
+        except TypeError as exc:
+            self.fail(f"exact internal defer-provider field is missing: {exc}")
         self.assertEqual([], calls)
         self.assertTrue(users_file.verification_pending(self.users))
         with self.assertRaisesRegex(users_file.UsersFileError, "pending"):
@@ -379,8 +470,42 @@ class ProjectionAndDeferTests(unittest.TestCase):
 
         users_file.verify_users(self.users, runner=runner)
         self.assertFalse(users_file.verification_pending(self.users))
-        self.assertEqual(["doveadm", "reload"], calls[0])
-        self.assertEqual(["doveadm", "user", "*"], calls[1])
+        self.assertEqual(
+            [
+                ["doveadm", "reload"],
+                *[["doveadm", "user", address] for address in DEFAULT_ADDRESSES],
+                ["doveadm", "user", "*"],
+            ],
+            calls,
+        )
+
+    def test_cli_accepts_only_exact_defer_provider_verification_name(self) -> None:
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            try:
+                args = users_file.build_parser().parse_args(
+                    [
+                        "bootstrap-defaults",
+                        "--defer-provider-verification",
+                        "--lifecycle",
+                        "dashboard-start-local",
+                    ]
+                )
+            except SystemExit as exc:
+                self.fail(f"exact defer-provider flag was rejected with exit {exc.code}")
+        self.assertTrue(args.defer_provider_verification)
+        for rejected_flag in ("--defer-verification", "--defer-provider"):
+            with self.subTest(rejected_flag=rejected_flag), mock.patch(
+                "sys.stderr", new=io.StringIO()
+            ):
+                with self.assertRaises(SystemExit):
+                    users_file.build_parser().parse_args(
+                        [
+                            "bootstrap-defaults",
+                            rejected_flag,
+                            "--lifecycle",
+                            "dashboard-start-local",
+                        ]
+                    )
 
 
 class ResetScopeTests(unittest.TestCase):
@@ -393,7 +518,11 @@ class ResetScopeTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(REPOSITORY_ROOT)):
                 source = path.read_text(encoding="utf-8")
                 self.assertNotIn("sync_stalwart_users.py", source)
-        for path in (REPOSITORY_ROOT / "CLAUDE.md", REPOSITORY_ROOT / "README.md"):
+        for path in (
+            REPOSITORY_ROOT / ".ai" / "guidelines.md",
+            REPOSITORY_ROOT / "CLAUDE.md",
+            REPOSITORY_ROOT / "README.md",
+        ):
             with self.subTest(path=path.relative_to(REPOSITORY_ROOT)):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
@@ -401,6 +530,7 @@ class ResetScopeTests(unittest.TestCase):
                     source,
                 )
                 self.assertNotIn("python3 scripts/reset.py   #", source)
+                self.assertIn("destroy vmail/, stalwart-data/, config/users", source)
 
     def test_dashboard_reset_is_narrow_and_never_names_provider_data(self) -> None:
         self.assertTrue(DASHBOARD_RESET.is_file())
