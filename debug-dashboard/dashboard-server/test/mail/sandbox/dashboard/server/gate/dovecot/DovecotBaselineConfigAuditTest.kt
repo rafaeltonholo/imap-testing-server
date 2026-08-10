@@ -124,6 +124,32 @@ class DovecotBaselineConfigAuditTest {
     }
 
     @Test
+    fun ordinaryConsumersUseTheSharedCanonicalUsersAuthority() {
+        val authConfig = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
+        val oauthSource = Files.readString(repositoryRoot.resolve("oauth2-mock/server.py"))
+        val dovecotService = serviceLines("dovecot").joinToString("\n")
+        val oauthService = serviceLines("oauth2-mock").joinToString("\n")
+
+        assertTrue("- ./config:/etc/dovecot/conf.d:ro" in dovecotService)
+        assertFalse(".runtime/dovecot" in dovecotService)
+        assertTrue("- ./config:/etc/mail-sandbox-config:ro" in oauthService)
+        assertFalse(".runtime/dovecot" in oauthService)
+        assertEquals(
+            2,
+            Regex(
+                """(?m)^\s*passwd_file_path\s*=\s*/etc/dovecot/conf\.d/users\s*$""",
+            ).findAll(authConfig).count(),
+        )
+        assertFalse("/etc/dovecot/runtime/users" in authConfig)
+        assertTrue(
+            "ELIGIBILITY_FILE = Path(\"/etc/mail-sandbox-config/users\")" in oauthSource,
+        )
+        assertTrue("PLAIN_PREFIX = \"{PLAIN}\"" in oauthSource)
+        assertFalse("ARGON2_HASH" in oauthSource)
+        assertFalse("{ARGON2ID}" in oauthSource)
+    }
+
+    @Test
     fun deferredEligibilityHazardsAreAbsentAfterTheirOwningTasksRemoveThem() {
         val authConfig = Files.readString(repositoryRoot.resolve("config/10-auth.conf"))
         val postfixConfig = Files.readString(repositoryRoot.resolve("postfix/main.cf"))

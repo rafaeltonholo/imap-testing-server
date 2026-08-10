@@ -39,8 +39,6 @@ Token lifetimes:
   - Auth codes:     60s
 """
 
-import base64
-import binascii
 from enum import Enum
 import json
 import os
@@ -57,7 +55,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 PORT = 8080
 SOCKETMAP_PORT = 10001
 BASE_URL = f"http://localhost:{PORT}"
-ELIGIBILITY_FILE = Path("/etc/dovecot/runtime/users")
+ELIGIBILITY_FILE = Path("/etc/mail-sandbox-config/users")
 
 # In-memory stores
 auth_codes = {}    # code → {username, redirect_uri, client_id, exp}
@@ -112,20 +110,12 @@ class EligibilityReader:
     MAX_ADDRESS_LENGTH = 254
     MAX_LOCAL_PART_LENGTH = 64
     MAX_DOMAIN_LENGTH = 253
-    MAX_HASH_LENGTH = 4 * 1024
-    MAX_ENCODED_SEGMENT_LENGTH = 1024
+    MAX_PASSWORD_FIELD_LENGTH = 4 * 1024
     PASSWD_DELIMITER_COUNT = 7
     EMPTY_USERDB_FIELDS = "::::::"
+    PLAIN_PREFIX = "{PLAIN}"
     LOCAL_PART = re.compile(r"[a-z0-9](?:[a-z0-9._+%-]{0,62}[a-z0-9])?")
     DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-    ARGON2_HASH = re.compile(
-        r"\{ARGON2ID\}"
-        r"\$argon2id"
-        r"\$v=19"
-        r"\$m=([1-9][0-9]{0,9}),t=([1-9][0-9]{0,9}),p=([1-9][0-9]{0,9})"
-        r"\$([A-Za-z0-9+/]{1,1024})"
-        r"\$([A-Za-z0-9+/]{1,1024})"
-    )
 
     def __init__(self, path=ELIGIBILITY_FILE):
         self._path = Path(path)
@@ -221,10 +211,10 @@ class EligibilityReader:
             ):
                 raise ValueError("eligibility authority entry is invalid")
             credential_fields = raw_line[: -len(self.EMPTY_USERDB_FIELDS)]
-            address, provider_hash = credential_fields.split(":", 1)
+            address, password_field = credential_fields.split(":", 1)
             if (
                 not self._is_canonical_address(address)
-                or not self._is_canonical_hash(provider_hash)
+                or not self._is_canonical_password_field(password_field)
                 or address in addresses
             ):
                 raise ValueError("eligibility authority entry is invalid")
@@ -288,36 +278,18 @@ class EligibilityReader:
         return bool(labels) and all(cls.DOMAIN_LABEL.fullmatch(label) for label in labels)
 
     @classmethod
-    def _is_canonical_hash(cls, provider_hash):
+    def _is_canonical_password_field(cls, password_field):
         if (
-            not isinstance(provider_hash, str)
-            or not 1 <= len(provider_hash) <= cls.MAX_HASH_LENGTH
+            not isinstance(password_field, str)
+            or not password_field.startswith(cls.PLAIN_PREFIX)
+            or len(password_field) > cls.MAX_PASSWORD_FIELD_LENGTH
         ):
             return False
-        match = cls.ARGON2_HASH.fullmatch(provider_hash)
-        if not match:
-            return False
-        parameters = match.group(1, 2, 3)
-        if any(not 1 <= int(value) <= 2_147_483_647 for value in parameters):
-            return False
-        return all(
-            cls._is_canonical_phc_base64(value)
-            for value in match.group(4, 5)
+        password = password_field.removeprefix(cls.PLAIN_PREFIX)
+        return bool(password) and not any(
+            character in password
+            for character in ("\0", "\n", "\r", ":")
         )
-
-    @classmethod
-    def _is_canonical_phc_base64(cls, value):
-        if (
-            not 1 <= len(value) <= cls.MAX_ENCODED_SEGMENT_LENGTH
-            or len(value) % 4 == 1
-        ):
-            return False
-        padding = "=" * ((4 - len(value) % 4) % 4)
-        try:
-            decoded = base64.b64decode(value + padding, validate=True)
-        except (binascii.Error, ValueError):
-            return False
-        return base64.b64encode(decoded).decode("ascii").rstrip("=") == value
 
 
 default_eligibility_reader = EligibilityReader()

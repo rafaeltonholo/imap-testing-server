@@ -9,7 +9,6 @@ services:
       - "127.0.0.1:1995:31995"   # POP3S (TLS; image listens on 31995)
     volumes:
       - ./config:/etc/dovecot/conf.d:ro
-      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
       - ./ssl:/etc/dovecot/ssl:ro
       - ./vmail:/srv/vmail
       - ./logs:/var/log/dovecot
@@ -70,7 +69,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # OAuth2 introspection endpoint
     volumes:
-      - ./debug-dashboard/.runtime/dovecot:/etc/dovecot/runtime:ro
+      - ./config:/etc/mail-sandbox-config:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import socket, urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=1).close(); request=b'eligible healthcheck@invalid'; connection=socket.create_connection(('127.0.0.1', 10001), 1); connection.settimeout(1); connection.sendall(str(len(request)).encode('ascii')+b':'+request+b','); stream=connection.makefile('rb'); response=stream.read(12); stream.close(); connection.close(); assert response == b'9:NOTFOUND ,'"]
       interval: 5s

@@ -198,6 +198,16 @@ class BaseStackDependencyPolicyTest(unittest.TestCase):
         ]
         self.assertEqual([f"image: {STALWART_LEGACY_HOLD}"], stalwart_images)
 
+    def test_ordinary_consumers_mount_only_the_shared_config_authority(self) -> None:
+        dovecot = "\n".join(self.compose_service("dovecot"))
+        oauth2 = "\n".join(self.compose_service("oauth2-mock"))
+
+        self.assertIn("- ./config:/etc/dovecot/conf.d:ro", dovecot)
+        self.assertNotIn("./debug-dashboard/.runtime/dovecot:", dovecot)
+        self.assertIn("- ./config:/etc/mail-sandbox-config:ro", oauth2)
+        self.assertNotIn("./debug-dashboard/.runtime/dovecot:", oauth2)
+        self.assertNotIn("/etc/mail-sandbox-config/users:", oauth2)
+
     def test_oauth2_image_uses_exact_python_base_and_index_digest(self) -> None:
         lines = [
             line.strip()

@@ -31,14 +31,11 @@ server = importlib.util.module_from_spec(SERVER_SPEC)
 SERVER_SPEC.loader.exec_module(server)
 
 
-VALID_HASH = (
-    "{ARGON2ID}$argon2id$v=19$m=65536,t=3,p=1"
-    "$c2FsdA$ZGlnZXN0"
-)
+VALID_PASSWORD_FIELD = "{PLAIN}secret"
 
 
-def eligibility_record(address, provider_hash=VALID_HASH):
-    return f"{address}:{provider_hash}::::::"
+def eligibility_record(address, password_field=VALID_PASSWORD_FIELD):
+    return f"{address}:{password_field}::::::"
 
 
 class MutableEligibilityReader:
@@ -434,19 +431,7 @@ class EligibilityReaderTest(unittest.TestCase):
         malformed_authorities = (
             f"{eligibility_record('eligible@local.test')}\r\n",
             f"{eligibility_record('ELIGIBLE@local.test')}\n",
-            f"{eligibility_record('eligible@local.test', '{ARGON2ID}garbage')}\n",
-            (
-                eligibility_record(
-                    "eligible@local.test",
-                    "{ARGON2ID}$argon2id$v=19$m=2147483648,t=3,p=1"
-                    "$c2FsdA$ZGlnZXN0",
-                )
-                + "\n"
-            ),
-            (
-                f"{eligibility_record('eligible@local.test')}\n"
-                f"{eligibility_record('eligible@local.test')}\n"
-            ),
+            f"{eligibility_record('eligible@local.test', '{PLAIN}')}\n",
         )
 
         for index, contents in enumerate(malformed_authorities):
@@ -454,6 +439,40 @@ class EligibilityReaderTest(unittest.TestCase):
                 self.write_authority(contents)
                 reader = server.EligibilityReader(self.authority)
                 self.assertFalse(reader.is_eligible("eligible@local.test"))
+
+    def test_duplicate_addresses_fail_closed(self):
+        self.write_authority(
+            f"{eligibility_record('eligible@local.test')}\n"
+            f"{eligibility_record('eligible@local.test', '{PLAIN}other')}\n",
+        )
+
+        reader = server.EligibilityReader(self.authority)
+
+        self.assertEqual(
+            server.EligibilityResult.UNAVAILABLE,
+            reader.eligibility("eligible@local.test"),
+        )
+
+    def test_argon2id_two_field_non_eight_field_and_final_field_are_rejected(self):
+        invalid_records = (
+            (
+                "eligible@local.test:{ARGON2ID}$argon2id$v=19$"
+                "m=65536,t=3,p=1$c2FsdA$ZGlnZXN0::::::\n"
+            ),
+            "eligible@local.test:{PLAIN}secret\n",
+            "eligible@local.test:{PLAIN}secret:::::\n",
+            "eligible@local.test:{PLAIN}secret::::::tail\n",
+            "eligible@local.test:{PLAIN}secret:::::shell:\n",
+        )
+
+        for record in invalid_records:
+            with self.subTest(record=record):
+                self.write_authority(record)
+                reader = server.EligibilityReader(self.authority)
+                self.assertEqual(
+                    server.EligibilityResult.UNAVAILABLE,
+                    reader.eligibility("eligible@local.test"),
+                )
 
     def test_shared_passwd_shape_corpus_matches_reader_grammar(self):
         for shape in self._read_passwd_shape_corpus():
@@ -614,7 +633,7 @@ class EligibilityReaderTest(unittest.TestCase):
                         "eligible@local.test",
                     ).replace(
                         "{{hash}}",
-                        VALID_HASH,
+                        VALID_PASSWORD_FIELD,
                     ),
                 },
             )
@@ -710,14 +729,21 @@ class EligibilityReaderTest(unittest.TestCase):
 
         self.assertFalse(reader.is_eligible("eligible@local.test"))
 
-    def test_each_decision_reads_the_current_authority(self):
+    def test_atomic_replacement_is_visible_to_the_long_running_reader(self):
         self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
         reader = server.EligibilityReader(self.authority)
         self.assertTrue(reader.is_eligible("eligible@local.test"))
 
-        self.write_authority("")
+        replacement = self.root / "users.replacement"
+        replacement.write_text(
+            f"{eligibility_record('replacement@local.test')}\n",
+            encoding="utf-8",
+        )
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, self.authority)
 
         self.assertFalse(reader.is_eligible("eligible@local.test"))
+        self.assertTrue(reader.is_eligible("replacement@local.test"))
 
     def test_explicit_result_distinguishes_absence_from_unavailable_authority(self):
         self.write_authority(f"{eligibility_record('eligible@local.test')}\n")
@@ -1764,9 +1790,9 @@ class SupervisedHTTPServerCapacityTest(unittest.TestCase):
 
 
 class OAuthComposeTest(unittest.TestCase):
-    def test_oauth_mounts_only_the_eligibility_directory_read_only(self):
+    def test_oauth_mounts_the_shared_config_directory_read_only(self):
         self.assertEqual(
-            Path("/etc/dovecot/runtime/users"),
+            Path("/etc/mail-sandbox-config/users"),
             server.ELIGIBILITY_FILE,
         )
         compose = SERVER_PATH.parent.parent.joinpath("docker-compose.yml").read_text(
@@ -1787,15 +1813,13 @@ class OAuthComposeTest(unittest.TestCase):
         service = "\n".join(lines[service_start:service_end])
 
         self.assertIn(
-            (
-                "- ./debug-dashboard/.runtime/dovecot:"
-                "/etc/dovecot/runtime:ro"
-            ),
+            "- ./config:/etc/mail-sandbox-config:ro",
             service,
         )
+        self.assertNotIn(".runtime/dovecot", service)
         self.assertNotIn(".runtime/secrets", service)
         self.assertNotIn(".runtime/dovecot-operator", service)
-        self.assertNotIn("/etc/dovecot/runtime/users:", service)
+        self.assertNotIn("/etc/mail-sandbox-config/users:", service)
 
     def test_socketmap_is_ready_internally_and_never_published_to_host(self):
         compose = SERVER_PATH.parent.parent.joinpath("docker-compose.yml").read_text(
