@@ -94,6 +94,6 @@ selections:
 No numerically newer published entry was visible in the cited stable/artifact
 metadata for Ktor, kotlinx.serialization, JUnit, Logback, Selenium, the
 selected js-joda WebJar coordinate, Dovecot, or Stalwart. Material3 and Skiko
-are the only parent-managed exceptions in the Kotlin graph; the JUnit engine
-and launcher versions are BOM-managed, and the Debian binaries are
+are the only parent-managed exceptions in the Kotlin graph; the JUnit API,
+engine, and launcher versions are BOM-managed, and the Debian binaries are
 distribution-managed.

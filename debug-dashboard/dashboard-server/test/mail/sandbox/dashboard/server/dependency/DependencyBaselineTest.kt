@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class DependencyBaselineTest {
@@ -329,6 +330,72 @@ class DependencyBaselineTest {
         )
     }
 
+    @Test
+    fun dependencyOwnershipRejectsQuotedDuplicate() {
+        val dependency = "jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}"
+        val modules = mapOf(
+            "dashboard-server" to ModuleYaml(
+                name = "dashboard-server",
+                path = Path.of("dashboard-server/module.yaml"),
+                content = "dependencies:\n  - $dependency",
+            ),
+            "dashboard-web" to ModuleYaml(
+                name = "dashboard-web",
+                path = Path.of("dashboard-web/module.yaml"),
+                content = "dependencies:\n  - '$dependency'",
+            ),
+        )
+
+        assertFailsWith<AssertionError> {
+            assertDependencyOwnership(
+                modules = modules,
+                expectedModule = "dashboard-server",
+                coordinate = "jakarta.mail:jakarta.mail-api",
+                dependency = dependency,
+            )
+        }
+    }
+
+    @Test
+    fun dependencyOwnershipRejectsWrongModule() {
+        val dependency = "jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}"
+        val modules = mapOf(
+            "dashboard-web" to ModuleYaml(
+                name = "dashboard-web",
+                path = Path.of("dashboard-web/module.yaml"),
+                content = "dependencies:\n  - $dependency",
+            ),
+        )
+
+        assertFailsWith<AssertionError> {
+            assertDependencyOwnership(
+                modules = modules,
+                expectedModule = "dashboard-server",
+                coordinate = "jakarta.mail:jakarta.mail-api",
+                dependency = dependency,
+            )
+        }
+    }
+
+    @Test
+    fun dependencyOwnershipAcceptsQuotedSoleDeclaration() {
+        val dependency = "jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}"
+        val modules = mapOf(
+            "dashboard-server" to ModuleYaml(
+                name = "dashboard-server",
+                path = Path.of("dashboard-server/module.yaml"),
+                content = "dependencies:\n  - \"$dependency\"",
+            ),
+        )
+
+        assertDependencyOwnership(
+            modules = modules,
+            expectedModule = "dashboard-server",
+            coordinate = "jakarta.mail:jakarta.mail-api",
+            dependency = dependency,
+        )
+    }
+
     private fun assertJUnitOwnership(module: ModuleYaml, section: String) {
         assertSnippet(
             module,
@@ -374,10 +441,10 @@ class DependencyBaselineTest {
     ) {
         val declarations = modules.values.flatMap { module ->
             scanActiveYamlValues(module.content)
-                .filter { declaration ->
-                    declaration.isListItem && declaration.value.startsWith("$coordinate:")
-                }
-                .map { declaration -> "${module.name}:${declaration.value}" }
+                .filter { declaration -> declaration.isListItem }
+                .map { declaration -> declaration.value.unquotedYamlScalar() }
+                .filter { value -> value.startsWith("$coordinate:") }
+                .map { value -> "${module.name}:$value" }
         }
 
         assertEquals(
