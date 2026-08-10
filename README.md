@@ -671,7 +671,12 @@ python3 scripts/create_folder.py --email dev@local.test --folder INBOX.Archive
 ### Reset the Environment
 
 ```sh
-python3 scripts/reset.py   # wipes vmail/, stalwart-data/, and restores default config/users
+# Narrow: replace and verify only config/users.
+./debug-dashboard/reset-local-accounts.sh --dovecot-defaults
+
+# Destructive: wipe vmail/ and stalwart-data/, then replace and verify config/users.
+python3 scripts/reset.py --destroy-all-provider-data
+# Then type exactly: destroy vmail/, stalwart-data/, config/users
 ```
 
 ### Inspect Mail Inside the Container

@@ -12,11 +12,11 @@ explicitly identifies an optional dependency.
 | `generate_random_emails.py`    | Generate and inject random test emails |
 | `generate_thread.py`           | Generate a random email thread under `mails/threads/` |
 | `send_thread.py`               | Send a pre-built thread into a user's mailbox |
-| `sync_stalwart_users.py`       | Sync users from `config/users` into Stalwart |
+| `users_file.py`                | Bootstrap, reset, mutate, and verify the canonical Dovecot passwd-file authority |
 | `capture_stalwart_v015.py`     | Capture and verify the stopped v0.15 store and prove isolated rollback |
 | `stalwart_v016.py`             | Plan, apply, retire, and inspect the fail-closed v0.16 migration |
 | `bootstrap_stalwart_v016.py`   | Validate fixed assets and bootstrap the scoped v0.16 runtime |
 | `stalwart_v016_registry.py`    | Provide the pinned stdlib Registry transport used by the migration tools (not a standalone CLI) |
 | `convert_msg.py`               | Convert Outlook `.msg` files to `.eml`; optional legacy helper requiring `extract-msg` |
-| `reset.py`                     | Wipe `vmail/` and `stalwart-data/`, then restore defaults |
+| `reset.py`                     | With explicit destructive authorization, wipe both provider stores and restore verified Dovecot defaults |
 | `lib.py`                       | Shared utilities (not a standalone script) |

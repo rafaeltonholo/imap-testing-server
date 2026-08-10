@@ -2,48 +2,27 @@
 """Create a Dovecot user account and optionally seed their inbox with .eml files."""
 
 import argparse
-import os
 import subprocess
-import sys
-from pathlib import Path
 
 from lib import (
-    CONFIG_DIR,
     DOCKER_CONTAINER,
     MAILS_DIR,
-    USERS_FILE,
     VMAIL_DIR,
     create_mailbox,
     inject_mail,
 )
+from users_file import upsert_user
 
 DEFAULT_PASSWORD = "secret"
 DEFAULT_MAILBOXES = ["INBOX", "INBOX.Sent", "INBOX.Drafts", "INBOX.Trash"]
 INJECTION_DELAY = 2.5
 
 
-def user_exists(email: str) -> bool:
-    if not USERS_FILE.exists():
-        return False
-    return any(line.startswith(f"{email}:") for line in USERS_FILE.read_text().splitlines())
-
-
 def create_or_update_user(email: str, password: str) -> None:
     """Add or update a user in the passwd-file and create their Maildir."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     VMAIL_DIR.mkdir(parents=True, exist_ok=True)
-
-    new_line = f"{email}:{{PLAIN}}{password}"
-
-    if user_exists(email):
-        print("  User already exists - updating password line.")
-        lines = USERS_FILE.read_text().splitlines()
-        lines = [new_line if line.startswith(f"{email}:") else line for line in lines]
-        USERS_FILE.write_text("\n".join(lines) + "\n")
-    else:
-        print(f"  Adding new user to {USERS_FILE}")
-        with USERS_FILE.open("a") as f:
-            f.write(new_line + "\n")
+    upsert_user(email, password)
+    print("  Canonical Dovecot auth record updated and verified.")
 
     maildir = VMAIL_DIR / email / "Maildir"
     maildir.mkdir(parents=True, exist_ok=True)

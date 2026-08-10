@@ -77,16 +77,21 @@ python3 scripts/send_thread.py --thread onboarding --email dev@local.test --date
 python3 scripts/create_folder.py --email dev@local.test --folder INBOX.Archive
 ```
 
-**Sync users into Stalwart (after first start or adding new users):**
+**Reset only the Dovecot auth records to tracked defaults:**
 
 ```sh
-python3 scripts/sync_stalwart_users.py
+./debug-dashboard/reset-local-accounts.sh --dovecot-defaults
 ```
+
+Dovecot and Stalwart have independent account authorities. Manage Stalwart
+accounts through its provider-specific management flow; do not copy Dovecot
+passwords into Stalwart.
 
 **Reset the environment to a clean state:**
 
 ```sh
-python3 scripts/reset.py   # wipes vmail/, stalwart-data/, and restores default config/users
+python3 scripts/reset.py --destroy-all-provider-data
+# Then type exactly: destroy vmail/, stalwart-data/, config/users
 ```
 
 **Inspect mail inside the container:**

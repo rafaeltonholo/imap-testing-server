@@ -21,6 +21,8 @@ curl -u admin:secret http://localhost:8443/api/principal/dev@local.test
 curl -u admin:secret -X DELETE http://localhost:8443/api/principal/dev@local.test
 ```
 
-## Scripted Provisioning
+## Provisioning Authority
 
-Use `python3 scripts/sync_stalwart_users.py` to sync all users from `config/users` into Stalwart.
+Stalwart and Dovecot have independent account authorities. Manage Stalwart
+principals through its provider-specific admin flow; do not bulk-copy Dovecot
+passwd-file credentials into Stalwart.

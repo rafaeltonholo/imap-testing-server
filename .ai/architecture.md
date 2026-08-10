@@ -31,7 +31,7 @@ Client (IMAP/JMAP)
 
 ## Data Flow
 
-- Users defined in `config/users` (Dovecot) and synced to Stalwart via `sync_stalwart_users.py`
+- Dovecot users are defined in `config/users`; Stalwart keeps an independent account authority
 - Mail injected via `doveadm save` (scripts) or SMTP submission (Postfix → LMTP → Dovecot)
 - Maildir layout: `./vmail/<email>/Maildir/`
 

@@ -4,6 +4,8 @@ stalwart-data/*
 mails/temp/*
 config/*.bak-*
 /config/users
+/config/users.lock
+/config/users.tmp-*
 debug-dashboard/.runtime/dovecot/
 debug-dashboard/.runtime/dovecot-operator/
 debug-dashboard/.runtime/secrets/

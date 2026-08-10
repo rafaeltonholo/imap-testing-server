@@ -1,58 +1,85 @@
 #!/usr/bin/env python3
-"""Wipe all mail from vmail/ and restore config/users to the last committed state."""
+"""Explicitly destroy all local provider data, then restore Dovecot defaults."""
 
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
-from lib import ROOT_DIR, VMAIL_DIR, STALWART_DATA_DIR, USERS_FILE
+from typing import Sequence
+
+from lib import ROOT_DIR, STALWART_DATA_DIR, VMAIL_DIR
+from users_file import reset_defaults
 
 
-def main():
-    print("This will:")
-    print("  - Delete all mail under vmail/")
-    print("  - Delete Stalwart data under stalwart-data/")
-    print("  - Restore config/users to its last committed state (git checkout)")
-    print()
+DESTROY_FLAG = "--destroy-all-provider-data"
+CONFIRMATION = "destroy vmail/, stalwart-data/, config/users"
 
-    confirm = input("Are you sure? [y/N] ").strip().lower()
-    if confirm != "y":
-        print("Aborted.")
+
+class ResetError(RuntimeError):
+    pass
+
+
+def _clear_runtime_directory(directory: Path) -> None:
+    if not directory.exists() and not directory.is_symlink():
         return
+    metadata = directory.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ResetError(f"refusing unsafe runtime directory: {directory}")
+    for child in directory.iterdir():
+        if child.name == ".gitkeep":
+            continue
+        if child.is_symlink() or not child.is_dir():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
 
-    # Clear vmail contents but keep the directory and .gitkeep
-    if VMAIL_DIR.exists():
-        for child in VMAIL_DIR.iterdir():
-            if child.name == ".gitkeep":
-                continue
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
 
-    # Clear stalwart-data contents
-    if STALWART_DATA_DIR.exists():
-        for child in STALWART_DATA_DIR.iterdir():
-            if child.name == ".gitkeep":
-                continue
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-
-    # Restore the users file from git
-    result = subprocess.run(
-        ["git", "-C", str(ROOT_DIR), "checkout", "HEAD", "--", "config/users"],
-        capture_output=True,
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        DESTROY_FLAG,
+        action="store_true",
+        help="authorize deletion of vmail/, stalwart-data/, and replacement of config/users",
     )
-    if result.returncode == 0:
-        print("config/users restored from git.")
-    else:
-        print("Warning: could not restore config/users from git. File left as-is.")
+    return parser
 
-    print("Reset complete.")
-    print("Run 'docker compose restart dovecot' to apply the restored users file.")
-    print("Run 'python3 scripts/sync_stalwart_users.py' to re-provision Stalwart users.")
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if not args.destroy_all_provider_data:
+        print(f"Refusing reset without {DESTROY_FLAG}.", file=sys.stderr)
+        return 2
+
+    print("This permanently deletes vmail/ and stalwart-data/, then replaces config/users.")
+    answer = input(f"Type exactly '{CONFIRMATION}' to continue: ")
+    if answer != CONFIRMATION:
+        print("Aborted.")
+        return 1
+
+    _clear_runtime_directory(VMAIL_DIR)
+    _clear_runtime_directory(STALWART_DATA_DIR)
+
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(ROOT_DIR / "docker-compose.yml"),
+            "up",
+            "-d",
+            "oauth2-mock",
+            "dovecot",
+        ],
+        check=True,
+    )
+    reset_defaults()
+    print("Provider data destroyed; config/users defaults restored and fully verified.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

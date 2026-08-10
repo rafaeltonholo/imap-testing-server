@@ -14,7 +14,7 @@ description: Configure and manage the Stalwart JMAP server. Use when modifying J
 1. Review `stalwart/config.toml` before making changes.
 2. Make changes and restart: `docker-compose restart stalwart`.
 3. Verify with `docker compose logs stalwart` for startup errors.
-4. Sync users if needed: `python3 scripts/sync_stalwart_users.py`.
+4. Manage users through Stalwart's provider-specific admin flow; its authority is independent from Dovecot.
 5. Test JMAP endpoint at `http://localhost:8443/.well-known/jmap`.
 
 ## Guardrails

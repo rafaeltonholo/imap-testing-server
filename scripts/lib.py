@@ -35,13 +35,23 @@ DEFAULT_INJECTION_DELAY = 2.5
 
 def docker_exec(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
     """Run a command inside the Dovecot container."""
-    full_cmd = ["docker", "exec", "-i", DOCKER_CONTAINER] + cmd
+    full_cmd = [
+        "docker", "compose", "-f", str(ROOT_DIR / "docker-compose.yml"),
+        "exec", "-T", "dovecot",
+    ] + cmd
     return subprocess.run(full_cmd, check=check, capture_output=capture, text=True)
 
 
 def docker_cp(src: str, dest: str) -> None:
     """Copy a file into the container."""
-    subprocess.run(["docker", "cp", src, f"{DOCKER_CONTAINER}:{dest}"], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "docker", "compose", "-f", str(ROOT_DIR / "docker-compose.yml"),
+            "cp", src, f"dovecot:{dest}",
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def inject_mail(email: str, file_path: str | Path, mailbox: str = "INBOX", delay: float = 0) -> bool:
