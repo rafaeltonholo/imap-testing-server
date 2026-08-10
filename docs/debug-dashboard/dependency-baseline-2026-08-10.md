@@ -1,7 +1,7 @@
 # Dependency baseline revalidation — 2026-08-10
 
 All publisher metadata in this record was retrieved on 2026-08-10, with the
-final UTC checkpoint at `2026-08-10T19:01:07Z`. Versions described as stable
+final UTC checkpoint at `2026-08-10T19:08:53Z`. Versions described as stable
 exclude alpha, beta, milestone, release-candidate, development, and nightly
 channels. An OCI digest below is the multi-architecture image index digest,
 not a platform manifest digest.
@@ -25,7 +25,7 @@ not a platform manifest digest.
 | Angus Mail | `2.0.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/org/eclipse/angus/angus-mail/maven-metadata.xml) | Runtime-only provider owned exactly once by `dashboard-server`. |
 | Dovecot | `2.4.4` stable | [publisher registry tags](https://hub.docker.com/r/dovecot/dovecot/tags), `docker buildx imagetools inspect dovecot/dovecot:2.4.4` | `dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4`. |
 | Stalwart | `v0.16.16` stable final target | [publisher release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.16), `docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.16` | Final-target index digest `sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`; the normal service is intentionally not cut over in this task. |
-| Python | `3.14.6` stable | [Python downloads](https://www.python.org/downloads/), `docker buildx imagetools inspect python:3.14.6-slim-trixie` | `python:3.14.6-slim-trixie@sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144`; the tag's index was refreshed since the previous pin. |
+| Python | `3.14.7` stable | [Python 3.14.7 release](https://www.python.org/downloads/release/python-3147/), `docker buildx imagetools inspect python:3.14.7-slim-trixie` | `python:3.14.7-slim-trixie@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910`; Python.org published this seventh 3.14 maintenance release on 2026-08-05. |
 | Debian | `13.6` stable | [Debian stable release](https://www.debian.org/releases/stable/), `docker buildx imagetools inspect debian:13.6-slim` | `debian:13.6-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258`; the tag's index was refreshed since the previous pin. |
 
 ## Direct Debian packages
@@ -81,9 +81,11 @@ selections:
 - Compose Material3 `1.12.0-alpha01` through `1.12.0-alpha03` are prereleases
   and are not the Compose `1.11.1` mapping.
 - Jakarta Mail API `2.2.0-M1` and Angus Mail `2.1.0-M1` are milestone builds.
-- Python `3.15.0a1` through `3.15.0a8` and `3.15.0b1` through `3.15.0b4`
-  are preview releases; Python.org marks `3.15.0b4` as a beta preview rather
-  than a production release.
+- Python `3.15.0a1` through `3.15.0a8`, `3.15.0b1` through `3.15.0b4`, and
+  [`3.15.0rc1`](https://www.python.org/downloads/release/python-3150rc1/)
+  are preview releases. Python.org published `3.15.0rc1` on 2026-08-04 but
+  explicitly identifies it as a release-candidate preview not recommended for
+  production, so it does not displace stable `3.14.7`.
 - Skiko `0.148.1`, `0.148.2`, `0.150.0`, `0.150.1`, and upstream stable
   `0.151.0` are newer standalone artifacts. They are not selected because
   Compose `1.11.1` owns the runtime graph at `0.144.6`; forcing a newer Skiko

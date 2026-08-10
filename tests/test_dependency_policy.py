@@ -18,8 +18,8 @@ POSTFIX_MAIN_CF = REPOSITORY_ROOT / "postfix" / "main.cf"
 COMPOSE_FILE = REPOSITORY_ROOT / "docker-compose.yml"
 
 PYTHON_BASE = (
-    "FROM python:3.14.6-slim-trixie@"
-    "sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144"
+    "FROM python:3.14.7-slim-trixie@"
+    "sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910"
 )
 DEBIAN_BASE = (
     "FROM debian:13.6-slim@"
