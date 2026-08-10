@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import importlib
 import inspect
 import io
@@ -56,6 +57,20 @@ DEFAULT_ADDRESSES = [
     "inline_msg@local.test",
 ]
 DEFAULT_TEXT = "".join(f"{address}:{{PLAIN}}secret::::::\n" for address in DEFAULT_ADDRESSES)
+JOURNAL_PREFIX = "users-mutation-journal-v1"
+
+
+def _journal(before: bytes | None, after: bytes) -> str:
+    before_field = "absent" if before is None else f"sha256:{hashlib.sha256(before).hexdigest()}"
+    after_field = f"sha256:{hashlib.sha256(after).hexdigest()}"
+    return f"{JOURNAL_PREFIX} before={before_field} after={after_field}\n"
+
+
+def _write_journal(users_path: Path, state: str) -> Path:
+    lock_path = users_path.with_name("users.lock")
+    lock_path.write_text(state, encoding="ascii")
+    lock_path.chmod(0o600)
+    return lock_path
 
 
 def _hold_record_lock(lock_path: str, ready: multiprocessing.synchronize.Event,
@@ -79,6 +94,31 @@ class UsersFileExistenceTests(unittest.TestCase):
     def test_defaults_file_has_exact_canonical_records(self) -> None:
         self.assertTrue(DEFAULTS_PATH.is_file(), "config/users.defaults must exist")
         self.assertEqual(DEFAULT_TEXT, DEFAULTS_PATH.read_text(encoding="utf-8"))
+
+    def test_package_qualified_import_succeeds_without_scripts_path_injection(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", "import scripts.users_file"],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_module_and_direct_script_help_modes_both_succeed(self) -> None:
+        commands = (
+            [sys.executable, "-m", "scripts.users_file", "--help"],
+            [sys.executable, str(SCRIPT_PATH), "--help"],
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    command,
+                    cwd=REPOSITORY_ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("bootstrap-defaults", result.stdout)
 
 
 @unittest.skipIf(users_file is None, "users_file.py has not been implemented yet")
@@ -250,6 +290,13 @@ class MutationTests(unittest.TestCase):
 
         def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
+            if command == ["doveadm", "user", "*"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="other@local.test\n",
+                    stderr="",
+                )
             returncode = 1 if command == ["doveadm", "user", "dev@local.test"] else 0
             return subprocess.CompletedProcess(command, returncode, stdout="", stderr="unknown user")
 
@@ -349,6 +396,95 @@ class MutationTests(unittest.TestCase):
             users_file.upsert_user("dev@local.test", "new", self.users, runner=failing_runner)
         self.assertIn("{PLAIN}new", self.users.read_text())
 
+    def test_replace_failure_preserves_existing_authority_and_clears_journal(self) -> None:
+        original = b"dev@local.test:{PLAIN}old::::::\n"
+        self.users.write_bytes(original)
+        self.users.chmod(0o600)
+        with mock.patch.object(users_file.os, "replace", side_effect=OSError("replace failed")):
+            try:
+                users_file.upsert_user("dev@local.test", "new", self.users, runner=self.runner)
+            except Exception as exc:
+                self.assertIsInstance(exc, users_file.UsersFileError)
+                self.assertRegex(str(exc), "not applied|retry")
+            else:
+                self.fail("replace failure unexpectedly succeeded")
+
+        self.assertEqual(original, self.users.read_bytes())
+        self.assertFalse(users_file.verification_pending(self.users))
+        self.assertTrue(
+            users_file.upsert_user("dev@local.test", "new", self.users, runner=self.runner)
+        )
+
+    def test_pre_replace_failure_with_missing_authority_clears_journal(self) -> None:
+        with mock.patch.object(users_file.os, "replace", side_effect=OSError("replace failed")):
+            try:
+                users_file.upsert_user("new@local.test", "secret", self.users, runner=self.runner)
+            except Exception as exc:
+                self.assertIsInstance(exc, users_file.UsersFileError)
+                self.assertRegex(str(exc), "not applied|retry")
+            else:
+                self.fail("replace failure unexpectedly succeeded")
+
+        self.assertFalse(self.users.exists())
+        self.assertFalse(users_file.verification_pending(self.users))
+        self.assertTrue(
+            users_file.upsert_user("new@local.test", "secret", self.users, runner=self.runner)
+        )
+
+    def test_post_replace_failure_retains_recoverable_pending_journal(self) -> None:
+        original = b"dev@local.test:{PLAIN}old::::::\n"
+        updated = b"dev@local.test:{PLAIN}new::::::\n"
+        self.users.write_bytes(original)
+        self.users.chmod(0o600)
+        with mock.patch.object(
+            users_file,
+            "_fsync_directory",
+            side_effect=OSError("directory fsync failed"),
+        ):
+            try:
+                users_file.upsert_user("dev@local.test", "new", self.users, runner=self.runner)
+            except Exception as exc:
+                self.assertIsInstance(exc, users_file.UsersFileError)
+                self.assertRegex(str(exc), "durable|pending")
+            else:
+                self.fail("post-replace failure unexpectedly succeeded")
+
+        self.assertEqual(updated, self.users.read_bytes())
+        self.assertTrue(users_file.verification_pending(self.users))
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            stdout = "dev@local.test\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        users_file.verify_users(self.users, runner=runner)
+        self.assertFalse(users_file.verification_pending(self.users))
+
+    def test_atomic_write_failure_with_third_state_fails_closed(self) -> None:
+        original = b"dev@local.test:{PLAIN}old::::::\n"
+        third = b"third@local.test:{PLAIN}third::::::\n"
+        self.users.write_bytes(original)
+        self.users.chmod(0o600)
+        runner = mock.Mock(side_effect=AssertionError("provider must not be called"))
+
+        def leave_third_state(path: Path, content: bytes) -> None:
+            del content
+            path.write_bytes(third)
+            path.chmod(0o600)
+            raise OSError("write outcome is indeterminate")
+
+        with mock.patch.object(users_file, "_atomic_write", side_effect=leave_third_state):
+            try:
+                users_file.upsert_user("dev@local.test", "new", self.users, runner=runner)
+            except Exception as exc:
+                self.assertIsInstance(exc, users_file.UsersFileError)
+                self.assertRegex(str(exc), "indeterminate")
+            else:
+                self.fail("indeterminate write failure unexpectedly succeeded")
+
+        runner.assert_not_called()
+        self.assertEqual(third, self.users.read_bytes())
+        self.assertTrue(users_file.verification_pending(self.users))
+
     def test_all_public_mutations_delegate_to_one_locked_primitive(self) -> None:
         for mutation in (
             users_file.bootstrap_defaults,
@@ -426,11 +562,155 @@ class ProjectionAndDeferTests(unittest.TestCase):
         self.users.chmod(0o600)
 
         def falsely_present(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(command, 0, stdout="dev@local.test\n", stderr="")
+            stdout = "" if command[-1:] == ["*"] else "dev@local.test\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         with self.assertRaisesRegex(users_file.UsersFileError, "still projects"):
             users_file.delete_user("dev@local.test", self.users, runner=falsely_present)
         self.assertEqual("", self.users.read_text())
+
+    def test_delete_requires_exact_remaining_projection_before_negative_lookup(self) -> None:
+        self.users.write_text(
+            "dev@local.test:{PLAIN}secret::::::\n"
+            "other@local.test:{PLAIN}secret::::::\n",
+            encoding="utf-8",
+        )
+        self.users.chmod(0o600)
+        calls: list[list[str]] = []
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command == ["doveadm", "user", "*"]:
+                return subprocess.CompletedProcess(command, 0, stdout="other@local.test\n", stderr="")
+            if command == ["doveadm", "user", "dev@local.test"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unknown user")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        users_file.delete_user("dev@local.test", self.users, runner=runner)
+
+        wildcard = ["doveadm", "user", "*"]
+        deleted_lookup = ["doveadm", "user", "dev@local.test"]
+        self.assertIn(wildcard, calls)
+        self.assertIn(deleted_lookup, calls)
+        if wildcard in calls and deleted_lookup in calls:
+            self.assertLess(calls.index(wildcard), calls.index(deleted_lookup))
+        self.assertFalse(users_file.verification_pending(self.users))
+
+    def test_delete_of_final_user_requires_empty_wildcard_and_negative_lookup(self) -> None:
+        self.users.write_text("dev@local.test:{PLAIN}secret::::::\n", encoding="utf-8")
+        self.users.chmod(0o600)
+        calls: list[list[str]] = []
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command == ["doveadm", "user", "*"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command == ["doveadm", "user", "dev@local.test"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unknown user")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        users_file.delete_user("dev@local.test", self.users, runner=runner)
+
+        self.assertEqual(b"", self.users.read_bytes())
+        self.assertIn(["doveadm", "user", "*"], calls)
+        self.assertIn(["doveadm", "user", "dev@local.test"], calls)
+
+    def test_delete_wildcard_failure_keeps_pending_even_if_lookup_would_be_nonzero(self) -> None:
+        self.users.write_text("dev@local.test:{PLAIN}secret::::::\n", encoding="utf-8")
+        self.users.chmod(0o600)
+        calls: list[list[str]] = []
+
+        def failing_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command == ["doveadm", "user", "*"]:
+                return subprocess.CompletedProcess(command, 75, stdout="", stderr="provider failure")
+            if command == ["doveadm", "user", "dev@local.test"]:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unknown user")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with self.assertRaisesRegex(users_file.UsersFileError, "durable|provider failure"):
+            users_file.delete_user("dev@local.test", self.users, runner=failing_runner)
+
+        self.assertEqual(b"", self.users.read_bytes())
+        self.assertTrue(users_file.verification_pending(self.users))
+        self.assertNotIn(["doveadm", "user", "dev@local.test"], calls)
+
+    def test_verify_recovers_before_and_after_journal_states(self) -> None:
+        old = b"old@local.test:{PLAIN}old::::::\n"
+        new = b"new@local.test:{PLAIN}new::::::\n"
+
+        self.users.write_bytes(old)
+        self.users.chmod(0o600)
+        lock_path = _write_journal(self.users, _journal(old, new))
+        old_calls: list[list[str]] = []
+
+        def old_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            old_calls.append(command)
+            stdout = "old@local.test\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with self.assertRaisesRegex(users_file.UsersFileError, "not applied|retry"):
+            users_file.verify_users(self.users, runner=old_runner)
+        self.assertEqual("", lock_path.read_text(encoding="ascii"))
+        self.assertIn(["doveadm", "user", "old@local.test"], old_calls)
+
+        self.users.write_bytes(new)
+        self.users.chmod(0o600)
+        lock_path.write_text(_journal(old, new), encoding="ascii")
+        lock_path.chmod(0o600)
+
+        def new_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            stdout = "new@local.test\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        try:
+            users_file.verify_users(self.users, runner=new_runner)
+        except users_file.UsersFileError as exc:
+            self.fail(f"after-state journal did not recover: {exc}")
+        self.assertEqual("", lock_path.read_text(encoding="ascii"))
+
+    def test_verify_clears_absent_before_state_for_retry_without_provider_calls(self) -> None:
+        intended = b"new@local.test:{PLAIN}new::::::\n"
+        lock_path = _write_journal(self.users, _journal(None, intended))
+        runner = mock.Mock(side_effect=AssertionError("provider must not be called"))
+
+        with self.assertRaisesRegex(users_file.UsersFileError, "not applied|retry"):
+            users_file.verify_users(self.users, runner=runner)
+
+        runner.assert_not_called()
+        self.assertEqual("", lock_path.read_text(encoding="ascii"))
+
+    def test_verify_leaves_indeterminate_third_digest_pending(self) -> None:
+        old = b"old@local.test:{PLAIN}old::::::\n"
+        new = b"new@local.test:{PLAIN}new::::::\n"
+        third = b"third@local.test:{PLAIN}third::::::\n"
+        self.users.write_bytes(third)
+        self.users.chmod(0o600)
+        lock_path = _write_journal(self.users, _journal(old, new))
+        runner = mock.Mock(side_effect=AssertionError("provider must not be called"))
+
+        with self.assertRaisesRegex(users_file.UsersFileError, "indeterminate"):
+            users_file.verify_users(self.users, runner=runner)
+
+        runner.assert_not_called()
+        self.assertEqual(_journal(old, new), lock_path.read_text(encoding="ascii"))
+
+    def test_pending_journal_parser_rejects_every_noncanonical_encoding(self) -> None:
+        digest = "a" * 64
+        invalid_states = (
+            f"pending-verification sha256={digest}\n",
+            f"{JOURNAL_PREFIX} before=sha256:{digest[:-1]} after=sha256:{digest}\n",
+            f"{JOURNAL_PREFIX} before=sha256:{digest.upper()} after=sha256:{digest}\n",
+            f"{JOURNAL_PREFIX} before=sha256:{digest} after=sha256:{digest}\n",
+            f"{JOURNAL_PREFIX} before=absent after=absent\n",
+            f"{JOURNAL_PREFIX} before=absent after=sha256:{digest}\ntrailing",
+            f" {JOURNAL_PREFIX} before=absent after=sha256:{digest}\n",
+        )
+        for state in invalid_states:
+            with self.subTest(state=state):
+                _write_journal(self.users, state)
+                with self.assertRaisesRegex(users_file.UsersFileError, "invalid.*journal"):
+                    users_file.verification_pending(self.users)
 
     def test_bootstrap_defer_is_start_local_only_and_requires_later_verify(self) -> None:
         calls: list[list[str]] = []
@@ -532,6 +812,18 @@ class ResetScopeTests(unittest.TestCase):
                 self.assertNotIn("python3 scripts/reset.py   #", source)
                 self.assertIn("destroy vmail/, stalwart-data/, config/users", source)
 
+        readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("Add or edit users in [`config/users`]", readme)
+        for supported_command in (
+            "scripts/create_and_feed_account.py --email",
+            "scripts/users_file.py upsert",
+            "scripts/users_file.py delete",
+            "scripts/users_file.py reset-defaults",
+            "scripts/users_file.py verify",
+        ):
+            self.assertIn(supported_command, readme)
+        self.assertIn("Do not edit `config/users` directly", readme)
+
     def test_dashboard_reset_is_narrow_and_never_names_provider_data(self) -> None:
         self.assertTrue(DASHBOARD_RESET.is_file())
         source = DASHBOARD_RESET.read_text(encoding="utf-8")
@@ -549,6 +841,12 @@ class ResetScopeTests(unittest.TestCase):
         for name in ("vmail/", "stalwart-data/", "config/users"):
             self.assertIn(name, source)
         self.assertNotIn("git checkout", source)
+
+    def test_whole_reset_rejects_abbreviated_destructive_flag(self) -> None:
+        reset = importlib.import_module("reset")
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                reset.build_parser().parse_args(["--destroy-all"])
 
     def test_whole_reset_does_nothing_without_both_authorizations(self) -> None:
         reset = importlib.import_module("reset")

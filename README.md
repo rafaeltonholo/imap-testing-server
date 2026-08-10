@@ -132,7 +132,8 @@ This starts four services:
 
 ### 4. Test Accounts
 
-Default users are defined in [`config/users`](config/users):
+Default users originate from the tracked [`config/users.defaults`](config/users.defaults)
+template and are materialized into the runtime `config/users` authority:
 
 | Email                                      | Password |
 | ------------------------------------------ | -------- |
@@ -699,7 +700,12 @@ Dovecot has verbose auth logging enabled (`auth_verbose = yes`, `mail_debug = ye
 
 ## Customization
 
-- Add or edit users in [`config/users`](config/users)
+- Create and optionally seed an account with `python3 scripts/create_and_feed_account.py --email user@local.test`
+- Add or update only an auth record with `python3 scripts/users_file.py upsert user@local.test secret`
+- Remove only an auth record with `python3 scripts/users_file.py delete user@local.test`
+- Restore the tracked accounts with `python3 scripts/users_file.py reset-defaults`
+- Audit the complete active projection with `python3 scripts/users_file.py verify`
+- Do not edit `config/users` directly; supported mutations are locked, atomic, and verified against Dovecot
 - Place additional `.eml` files in [`mails/`](mails/) for injection
 - Adjust Dovecot settings in [`config/`](config/)
 - Adjust Postfix settings in [`postfix/main.cf`](postfix/main.cf)

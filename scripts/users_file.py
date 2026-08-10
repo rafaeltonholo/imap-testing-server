@@ -16,17 +16,25 @@ import sys
 import tempfile
 from typing import Callable, Iterator, Sequence
 
-from lib import ROOT_DIR, USERS_FILE, docker_exec
+if __package__:
+    from .lib import ROOT_DIR, USERS_FILE, docker_exec
+else:
+    from lib import ROOT_DIR, USERS_FILE, docker_exec
 
 
 DEFAULTS_FILE = ROOT_DIR / "config" / "users.defaults"
 START_LOCAL_LIFECYCLE = "dashboard-start-local"
-PENDING_PREFIX = "pending-verification sha256="
+JOURNAL_PREFIX = "users-mutation-journal-v1"
 Runner = Callable[..., object]
 
 _LOCAL_PART = r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
 _DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
 _ADDRESS = re.compile(rf"{_LOCAL_PART}@{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+")
+_JOURNAL = re.compile(
+    rf"{JOURNAL_PREFIX} "
+    r"before=(?P<before>absent|sha256:[0-9a-f]{64}) "
+    r"after=sha256:(?P<after>[0-9a-f]{64})\n"
+)
 
 
 class UsersFileError(RuntimeError):
@@ -37,6 +45,12 @@ class UsersFileError(RuntimeError):
 class UserRecord:
     address: str
     password_field: str
+
+
+@dataclass(frozen=True)
+class MutationJournal:
+    before_digest: str | None
+    after_digest: str
 
 
 def _validate_address(address: str) -> None:
@@ -167,7 +181,28 @@ def _read_lock_state(descriptor: int) -> str:
     try:
         return raw.decode("ascii")
     except UnicodeDecodeError as exc:
-        raise UsersFileError("users.lock contains invalid state") from exc
+        raise UsersFileError("users.lock contains invalid mutation journal") from exc
+
+
+def _digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _encode_journal(before: bytes | None, after: bytes) -> str:
+    before_field = "absent" if before is None else f"sha256:{_digest(before)}"
+    return f"{JOURNAL_PREFIX} before={before_field} after=sha256:{_digest(after)}\n"
+
+
+def _parse_journal(state: str) -> MutationJournal:
+    match = _JOURNAL.fullmatch(state)
+    if match is None:
+        raise UsersFileError("users.lock contains invalid mutation journal")
+    before_field = match.group("before")
+    before_digest = None if before_field == "absent" else before_field.removeprefix("sha256:")
+    after_digest = match.group("after")
+    if before_digest == after_digest:
+        raise UsersFileError("users.lock contains invalid mutation journal")
+    return MutationJournal(before_digest, after_digest)
 
 
 def _write_lock_state(descriptor: int, state: str) -> None:
@@ -198,8 +233,8 @@ def _locked(users_path: Path, *, allow_pending: bool = False) -> Iterator[int]:
         if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise UsersFileError(f"{lock_path} must be a regular file with mode 0600")
         state = _read_lock_state(descriptor)
-        if state and not state.startswith(PENDING_PREFIX):
-            raise UsersFileError("users.lock contains invalid state")
+        if state:
+            _parse_journal(state)
         if state and not allow_pending:
             raise UsersFileError("Dovecot verification is pending; run the verify command first")
         yield descriptor
@@ -244,6 +279,25 @@ def _atomic_write(users_path: Path, content: bytes) -> None:
             os.close(descriptor)
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _active_authority(users_path: Path) -> tuple[str | None, list[UserRecord] | None]:
+    if not users_path.exists() and not users_path.is_symlink():
+        return None, None
+    records, raw = _read_users(users_path)
+    return _digest(raw), records
+
+
+def _classify_active_authority(
+    users_path: Path,
+    journal: MutationJournal,
+) -> tuple[str, list[UserRecord] | None]:
+    active_digest, records = _active_authority(users_path)
+    if active_digest == journal.after_digest:
+        return "after", records
+    if active_digest == journal.before_digest:
+        return "before", records
+    return "indeterminate", records
 
 
 def _result_detail(result: object) -> str:
@@ -332,14 +386,40 @@ def _mutate_users(
         if destination_exists:
             records, original = _read_users(users_path)
         else:
-            records, original = [], b""
+            records, original = [], None
         updated = transform(list(records))
         rendered = serialize_records(updated).encode("utf-8")
-        changed = rendered != original
+        changed = rendered != (original if original is not None else b"")
         if changed:
-            digest = hashlib.sha256(rendered).hexdigest()
-            _write_lock_state(descriptor, f"{PENDING_PREFIX}{digest}\n")
-            _atomic_write(users_path, rendered)
+            journal = MutationJournal(
+                before_digest=None if original is None else _digest(original),
+                after_digest=_digest(rendered),
+            )
+            _write_lock_state(descriptor, _encode_journal(original, rendered))
+            try:
+                _atomic_write(users_path, rendered)
+            except Exception as exc:
+                try:
+                    position, _ = _classify_active_authority(users_path, journal)
+                except Exception as state_error:
+                    raise UsersFileError(
+                        "users authority write outcome is indeterminate; "
+                        "pending verification retained"
+                    ) from state_error
+                if position == "before":
+                    _write_lock_state(descriptor, "")
+                    raise UsersFileError(
+                        f"users authority mutation was not applied; safe to retry: {exc}"
+                    ) from exc
+                if position == "after":
+                    raise UsersFileError(
+                        "users authority mutation is durable; "
+                        f"provider verification is pending: {exc}"
+                    ) from exc
+                raise UsersFileError(
+                    "users authority write outcome is indeterminate; "
+                    "pending verification retained"
+                ) from exc
             if not defer_provider_verification:
                 _durable_projection(
                     updated,
@@ -360,6 +440,7 @@ def _mutate_users(
                 updated,
                 runner=runner,
                 deleted_address=deleted_address,
+                exact=exact,
                 reload=False,
             )
         return changed
@@ -452,6 +533,7 @@ def delete_user(
         lambda records: [record for record in records if record.address != address],
         runner=runner,
         deleted_address=address,
+        exact=True,
     )
 
 
@@ -461,14 +543,34 @@ def verification_pending(users_path: Path = USERS_FILE) -> bool:
 
 
 def verify_users(users_path: Path = USERS_FILE, *, runner: Runner = docker_exec) -> None:
-    """Verify the full projection and discharge any deferred-bootstrap marker."""
+    """Verify the full projection and recover or discharge a pending journal."""
     with _locked(users_path, allow_pending=True) as descriptor:
-        records, raw = _read_users(users_path)
         state = _read_lock_state(descriptor)
         if state:
-            expected_state = f"{PENDING_PREFIX}{hashlib.sha256(raw).hexdigest()}\n"
-            if state != expected_state:
-                raise UsersFileError("users file changed while Dovecot verification was pending")
+            journal = _parse_journal(state)
+            try:
+                position, records = _classify_active_authority(users_path, journal)
+            except Exception as exc:
+                raise UsersFileError(
+                    "users authority state is indeterminate; pending verification retained"
+                ) from exc
+            if position == "indeterminate":
+                raise UsersFileError(
+                    "users authority state is indeterminate; pending verification retained"
+                )
+            if position == "before":
+                if records is not None:
+                    reload_and_verify(records, runner=runner, exact=True)
+                _write_lock_state(descriptor, "")
+                raise UsersFileError(
+                    "users authority mutation was not applied; safe to retry"
+                )
+            if records is None:
+                raise UsersFileError(
+                    "users authority state is indeterminate; pending verification retained"
+                )
+        else:
+            records, _ = _read_users(users_path)
         reload_and_verify(records, runner=runner, exact=True)
         _write_lock_state(descriptor, "")
 
