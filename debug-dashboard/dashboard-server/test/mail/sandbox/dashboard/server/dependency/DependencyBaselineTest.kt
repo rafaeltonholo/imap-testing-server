@@ -15,11 +15,13 @@ class DependencyBaselineTest {
         "material3" to "1.11.0-alpha07",
         "ktor" to "3.5.2",
         "serialization" to "1.11.0",
-        "junit" to "6.1.2",
+        "junit" to "6.1.3",
         "skiko" to "0.144.6",
         "logback" to "1.6.1",
-        "selenium" to "4.46.0",
+        "selenium" to "4.47.0",
         "joda" to "3.2.0",
+        "jakartaMail" to "2.1.5",
+        "angusMail" to "2.0.5",
     )
 
     private val prohibitedVersions = setOf(
@@ -30,6 +32,8 @@ class DependencyBaselineTest {
         "6.0.3",
         "0.9.37.4",
         "1.5.18",
+        "6.1.2",
+        "4.46.0",
     )
 
     @Test
@@ -84,6 +88,8 @@ class DependencyBaselineTest {
               - ${'$'}ktor.client.core
               - ${'$'}ktor.client.cio
               - ${'$'}kotlin.serialization.json
+              - jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}
+              - org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}: runtime-only
               - org.jetbrains.skiko:skiko-js-wasm-runtime:${selected.getValue("skiko")}
               - org.webjars.npm:js-joda__core:${selected.getValue("joda")}
               - ch.qos.logback:logback-classic:${selected.getValue("logback")}
@@ -137,6 +143,18 @@ class DependencyBaselineTest {
         assertNoActiveKey(contract, "ktor")
         assertNoActiveKey(web, "serialization")
         assertNoActiveJUnitOwnership(web)
+        assertDependencyOwnership(
+            modules = modules,
+            expectedModule = "dashboard-server",
+            coordinate = "jakarta.mail:jakarta.mail-api",
+            dependency = "jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}",
+        )
+        assertDependencyOwnership(
+            modules = modules,
+            expectedModule = "dashboard-server",
+            coordinate = "org.eclipse.angus:angus-mail",
+            dependency = "org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}: runtime-only",
+        )
     }
 
     @Test
@@ -346,6 +364,27 @@ class DependencyBaselineTest {
                 "active JUnit declaration '${declaration.key ?: declaration.value}'"
         }
         assertEquals(emptyList(), findings, "The Wasm web module must not own JUnit")
+    }
+
+    private fun assertDependencyOwnership(
+        modules: Map<String, ModuleYaml>,
+        expectedModule: String,
+        coordinate: String,
+        dependency: String,
+    ) {
+        val declarations = modules.values.flatMap { module ->
+            scanActiveYamlValues(module.content)
+                .filter { declaration ->
+                    declaration.isListItem && declaration.value.startsWith("$coordinate:")
+                }
+                .map { declaration -> "${module.name}:${declaration.value}" }
+        }
+
+        assertEquals(
+            listOf("$expectedModule:$dependency"),
+            declarations,
+            "Dependency '$dependency' must be declared exactly once by $expectedModule",
+        )
     }
 
     private fun moduleYamls(): Map<String, ModuleYaml> {

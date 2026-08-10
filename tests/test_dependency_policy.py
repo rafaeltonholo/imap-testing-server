@@ -15,14 +15,23 @@ MESSAGE_LAB_PLAN = "2026-07-23-debug-dashboard-message-lab-observability.md"
 OAUTH2_DOCKERFILE = REPOSITORY_ROOT / "oauth2-mock" / "Dockerfile"
 POSTFIX_DOCKERFILE = REPOSITORY_ROOT / "postfix" / "Dockerfile"
 POSTFIX_MAIN_CF = REPOSITORY_ROOT / "postfix" / "main.cf"
+COMPOSE_FILE = REPOSITORY_ROOT / "docker-compose.yml"
 
 PYTHON_BASE = (
     "FROM python:3.14.6-slim-trixie@"
-    "sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
+    "sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144"
 )
 DEBIAN_BASE = (
     "FROM debian:13.6-slim@"
-    "sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd"
+    "sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258"
+)
+DOVECOT_IMAGE = (
+    "dovecot/dovecot:2.4.4@"
+    "sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4"
+)
+STALWART_LEGACY_HOLD = (
+    "stalwartlabs/stalwart:v0.15@"
+    "sha256:dcf575db2d53d9ef86d6ced8abe4ba491984659a0f8862cc6079ee7b41c3c568"
 )
 POSTFIX_PACKAGES = {
     "postfix": "3.10.12-0+deb13u2",
@@ -156,6 +165,39 @@ class FuturePlanDependencyPolicyTest(unittest.TestCase):
 
 
 class BaseStackDependencyPolicyTest(unittest.TestCase):
+    def compose_service(self, name: str) -> list[str]:
+        lines = COMPOSE_FILE.read_text(encoding="utf-8").splitlines()
+        header = f"  {name}:"
+        start = lines.index(header)
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(lines))
+                if lines[index].startswith("  ")
+                and not lines[index].startswith("    ")
+                and lines[index].strip()
+            ),
+            len(lines),
+        )
+        return lines[start:end]
+
+    def test_provider_images_use_exact_tags_and_index_digests(self) -> None:
+        for service in ("dovecot", "dovecot-operator"):
+            with self.subTest(service=service):
+                image_lines = [
+                    line.strip()
+                    for line in self.compose_service(service)
+                    if line.strip().startswith("image:")
+                ]
+                self.assertEqual([f"image: {DOVECOT_IMAGE}"], image_lines)
+
+        stalwart_images = [
+            line.strip()
+            for line in self.compose_service("stalwart")
+            if line.strip().startswith("image:")
+        ]
+        self.assertEqual([f"image: {STALWART_LEGACY_HOLD}"], stalwart_images)
+
     def test_oauth2_image_uses_exact_python_base_and_index_digest(self) -> None:
         lines = [
             line.strip()

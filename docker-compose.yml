@@ -79,7 +79,7 @@ services:
       start_period: 5s
 
   stalwart:
-    image: stalwartlabs/stalwart:latest
+    image: stalwartlabs/stalwart:v0.15@sha256:dcf575db2d53d9ef86d6ced8abe4ba491984659a0f8862cc6079ee7b41c3c568
     restart: unless-stopped
     ports:
       - "8443:8443"   # JMAP HTTP
