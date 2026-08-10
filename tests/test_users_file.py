@@ -669,6 +669,70 @@ class ProjectionAndDeferTests(unittest.TestCase):
             self.fail(f"after-state journal did not recover: {exc}")
         self.assertEqual("", lock_path.read_text(encoding="ascii"))
 
+    def test_after_state_recovery_fsyncs_directory_before_provider_verification(self) -> None:
+        old = b"old@local.test:{PLAIN}old::::::\n"
+        new = b"new@local.test:{PLAIN}new::::::\n"
+        self.users.write_bytes(new)
+        self.users.chmod(0o600)
+        lock_path = _write_journal(self.users, _journal(old, new))
+        events: list[tuple[str, object]] = []
+
+        def fsync_directory(path: Path) -> None:
+            events.append(("fsync", path))
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            events.append(("provider", command))
+            stdout = "new@local.test\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(
+            users_file,
+            "_fsync_directory",
+            side_effect=fsync_directory,
+        ):
+            users_file.verify_users(self.users, runner=runner)
+
+        self.assertEqual(("fsync", self.root), events[0])
+        self.assertEqual("", lock_path.read_text(encoding="ascii"))
+
+    def test_after_state_recovery_fsync_failure_stays_pending_and_retry_clears(self) -> None:
+        old = b"old@local.test:{PLAIN}old::::::\n"
+        new = b"new@local.test:{PLAIN}new::::::\n"
+        self.users.write_bytes(new)
+        self.users.chmod(0o600)
+        pending = _journal(old, new)
+        lock_path = _write_journal(self.users, pending)
+        calls: list[list[str]] = []
+
+        def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            stdout = "new@local.test\n" if command[-1:] == ["*"] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(
+            users_file,
+            "_fsync_directory",
+            side_effect=OSError("directory fsync failed"),
+        ):
+            try:
+                users_file.verify_users(self.users, runner=runner)
+            except Exception as exc:
+                self.assertIsInstance(exc, users_file.UsersFileError)
+                self.assertRegex(str(exc), "durability|pending")
+            else:
+                self.fail("recovery unexpectedly ignored directory fsync failure")
+
+        self.assertEqual([], calls)
+        self.assertEqual(pending.encode("ascii"), lock_path.read_bytes())
+        self.assertTrue(users_file.verification_pending(self.users))
+
+        with mock.patch.object(users_file, "_fsync_directory") as fsync_directory:
+            users_file.verify_users(self.users, runner=runner)
+
+        fsync_directory.assert_called_once_with(self.root)
+        self.assertNotEqual([], calls)
+        self.assertFalse(users_file.verification_pending(self.users))
+
     def test_verify_clears_absent_before_state_for_retry_without_provider_calls(self) -> None:
         intended = b"new@local.test:{PLAIN}new::::::\n"
         lock_path = _write_journal(self.users, _journal(None, intended))

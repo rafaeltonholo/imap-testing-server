@@ -569,6 +569,14 @@ def verify_users(users_path: Path = USERS_FILE, *, runner: Runner = docker_exec)
                 raise UsersFileError(
                     "users authority state is indeterminate; pending verification retained"
                 )
+            if position == "after":
+                try:
+                    _fsync_directory(users_path.parent)
+                except Exception as exc:
+                    raise UsersFileError(
+                        "users authority recovery durability is pending; "
+                        f"parent directory fsync failed: {exc}"
+                    ) from exc
         else:
             records, _ = _read_users(users_path)
         reload_and_verify(records, runner=runner, exact=True)
