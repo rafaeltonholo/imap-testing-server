@@ -42,6 +42,10 @@ internal class JvmDovecotCommandRunner(
     private val repositoryRoot: Path,
     private val processStarter: ((DovecotCommandRequest) -> Process)? = null,
 ) : DovecotCommandRunner {
+    init {
+        requireValidRepositoryRoot()
+    }
+
     override fun run(request: DovecotCommandRequest): DovecotCommandResult {
         requireApprovedRequest(request)
         val routedRequest = request.copy(argv = rootComposeCommand(request.argv))
@@ -101,21 +105,10 @@ internal class JvmDovecotCommandRunner(
     }
 
     private fun requireApprovedRequest(request: DovecotCommandRequest) {
+        requireValidRepositoryRoot()
         require(
-            repositoryRoot.isAbsolute &&
-                repositoryRoot.normalize() == repositoryRoot &&
-                !Files.isSymbolicLink(repositoryRoot) &&
-                Files.isDirectory(repositoryRoot, LinkOption.NOFOLLOW_LINKS) &&
-                Files.isRegularFile(
-                    repositoryRoot.resolve("docker-compose.yml"),
-                    LinkOption.NOFOLLOW_LINKS,
-                ),
-        ) {
-            "Dovecot command repository is invalid"
-        }
-        require(
-            request.argv.take(DOVEADM_PREFIX.size) == DOVEADM_PREFIX ||
-                isDovecotLogsCommand(request.argv),
+            request.argv.take(DOVEADM_PREFIX.size) == DOVEADM_PREFIX &&
+                request.argv.size > DOVEADM_PREFIX.size,
         ) {
             "Dovecot command is not approved"
         }
@@ -130,12 +123,20 @@ internal class JvmDovecotCommandRunner(
         }
     }
 
-    private fun isDovecotLogsCommand(argv: List<String>): Boolean =
-        argv.size == 7 &&
-            argv.take(4) == listOf("docker", "compose", "logs", "--no-color") &&
-            argv[4] == "--tail" &&
-            argv[5].toIntOrNull() in 1..MAXIMUM_LOG_LINES &&
-            argv[6] == "dovecot"
+    private fun requireValidRepositoryRoot() {
+        require(
+            repositoryRoot.isAbsolute &&
+                repositoryRoot.normalize() == repositoryRoot &&
+                !Files.isSymbolicLink(repositoryRoot) &&
+                Files.isDirectory(repositoryRoot, LinkOption.NOFOLLOW_LINKS) &&
+                Files.isRegularFile(
+                    repositoryRoot.resolve("docker-compose.yml"),
+                    LinkOption.NOFOLLOW_LINKS,
+                ),
+        ) {
+            "Dovecot command repository is invalid"
+        }
+    }
 
     private fun rootComposeCommand(argv: List<String>): List<String> = buildList {
         add("docker")
@@ -174,7 +175,6 @@ internal class JvmDovecotCommandRunner(
         val MAXIMUM_TIMEOUT: Duration = Duration.ofSeconds(60)
         const val MAXIMUM_CAPTURE_BYTES = 8 * 1024 * 1024
         const val MAXIMUM_STDIN_BYTES = 8 * 1024 * 1024
-        const val MAXIMUM_LOG_LINES = 2_000
         const val READ_BUFFER_BYTES = 8 * 1024
         const val OUTPUT_JOIN_SECONDS = 2L
         const val PROCESS_STOP_SECONDS = 2L

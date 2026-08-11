@@ -8,30 +8,15 @@ import java.nio.file.Path
 internal interface DovecotAccountRegistry {
     fun list(): List<String>
 
-    fun create(address: String, password: ByteArray)
+    fun create(address: String, password: ByteArray, verifyProjection: () -> Unit)
 
-    fun createVerified(address: String, password: ByteArray, verifyProjection: () -> Unit) {
-        create(address, password)
-        verifyProjection()
-    }
-
-    fun changePassword(address: String, password: ByteArray)
-
-    fun changePasswordVerified(
+    fun changePassword(
         address: String,
         password: ByteArray,
         verifyProjection: () -> Unit,
-    ) {
-        changePassword(address, password)
-        verifyProjection()
-    }
+    )
 
-    fun delete(address: String)
-
-    fun deleteVerified(address: String, verifyProjection: () -> Unit) {
-        delete(address)
-        verifyProjection()
-    }
+    fun delete(address: String, verifyProjection: () -> Unit)
 }
 
 /** Adapts dashboard account operations directly to the shared `config/users` authority. */
@@ -40,11 +25,7 @@ internal class UsersFileDovecotAccountRegistry(
 ) : DovecotAccountRegistry {
     override fun list(): List<String> = file.list().map(DovecotUserRecord::address)
 
-    override fun create(address: String, password: ByteArray) {
-        withUtf8Password(password) { decoded -> file.create(address, decoded) }
-    }
-
-    override fun createVerified(
+    override fun create(
         address: String,
         password: ByteArray,
         verifyProjection: () -> Unit,
@@ -54,11 +35,7 @@ internal class UsersFileDovecotAccountRegistry(
         }
     }
 
-    override fun changePassword(address: String, password: ByteArray) {
-        withUtf8Password(password) { decoded -> file.changePassword(address, decoded) }
-    }
-
-    override fun changePasswordVerified(
+    override fun changePassword(
         address: String,
         password: ByteArray,
         verifyProjection: () -> Unit,
@@ -68,11 +45,7 @@ internal class UsersFileDovecotAccountRegistry(
         }
     }
 
-    override fun delete(address: String) {
-        file.delete(address)
-    }
-
-    override fun deleteVerified(address: String, verifyProjection: () -> Unit) {
+    override fun delete(address: String, verifyProjection: () -> Unit) {
         file.delete(address, verifyProjection)
     }
 

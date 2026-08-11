@@ -57,7 +57,7 @@ internal class DovecotUsersFile(
     fun create(
         address: String,
         password: String,
-        verifyProjection: () -> Unit = {},
+        verifyProjection: () -> Unit,
     ) {
         val replacement = record(address, password)
         mutate(
@@ -74,7 +74,7 @@ internal class DovecotUsersFile(
     fun changePassword(
         address: String,
         password: String,
-        verifyProjection: () -> Unit = {},
+        verifyProjection: () -> Unit,
     ) {
         val replacement = record(address, password)
         mutate(
@@ -87,7 +87,7 @@ internal class DovecotUsersFile(
         )
     }
 
-    fun delete(address: String, verifyProjection: () -> Unit = {}) {
+    fun delete(address: String, verifyProjection: () -> Unit) {
         validateAddress(address)
         mutate(
             transform = { records ->

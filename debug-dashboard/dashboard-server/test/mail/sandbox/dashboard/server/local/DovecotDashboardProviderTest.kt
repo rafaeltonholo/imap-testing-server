@@ -220,11 +220,19 @@ class DovecotDashboardProviderTest {
 private object EmptyAccounts : DovecotAccountRegistry {
     override fun list(): List<String> = emptyList()
 
-    override fun create(address: String, password: ByteArray) = Unit
+    override fun create(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) = verifyProjection()
 
-    override fun changePassword(address: String, password: ByteArray) = Unit
+    override fun changePassword(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) = verifyProjection()
 
-    override fun delete(address: String) = Unit
+    override fun delete(address: String, verifyProjection: () -> Unit) = verifyProjection()
 }
 
 private object SingleAccount : DovecotAccountRegistry by EmptyAccounts {

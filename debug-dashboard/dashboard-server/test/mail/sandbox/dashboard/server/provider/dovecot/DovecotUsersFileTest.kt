@@ -44,19 +44,19 @@ class DovecotUsersFileTest {
         sentinel.writeText("preserve")
 
         val file = fixture.file()
-        file.create("new@local.test", "created")
+        file.create("new@local.test", "created") {}
         assertEquals(
             original + "new@local.test:{PLAIN}created::::::\n",
             fixture.users.readText(),
         )
 
-        file.changePassword("new@local.test", "changed")
+        file.changePassword("new@local.test", "changed") {}
         assertEquals(
             original + "new@local.test:{PLAIN}changed::::::\n",
             fixture.users.readText(),
         )
 
-        file.delete("new@local.test")
+        file.delete("new@local.test") {}
         assertEquals(original, fixture.users.readText())
         assertEquals("preserve", sentinel.readText())
         assertEquals("rw-------", fixture.mode(fixture.users))
@@ -65,7 +65,7 @@ class DovecotUsersFileTest {
 
     @Test
     fun createCanInitializeAnAbsentAuthorityWithCanonicalMode() = withFixture { fixture ->
-        fixture.file().create("first@local.test", "secret")
+        fixture.file().create("first@local.test", "secret") {}
 
         assertEquals(
             "first@local.test:{PLAIN}secret::::::\n",
@@ -80,13 +80,13 @@ class DovecotUsersFileTest {
         val file = fixture.file()
 
         assertFailsWith<DovecotUsersFileException> {
-            file.create("dev@local.test", "different")
+            file.create("dev@local.test", "different") {}
         }
         assertFailsWith<DovecotUsersFileException> {
-            file.changePassword("missing@local.test", "different")
+            file.changePassword("missing@local.test", "different") {}
         }
         assertFailsWith<DovecotUsersFileException> {
-            file.delete("missing@local.test")
+            file.delete("missing@local.test") {}
         }
 
         assertEquals("dev@local.test:{PLAIN}secret::::::\n", fixture.users.readText())
@@ -98,7 +98,7 @@ class DovecotUsersFileTest {
         fixture.writeUsers(malformed)
 
         assertFailsWith<DovecotUsersFileException> {
-            fixture.file().changePassword("dev@local.test", "new")
+            fixture.file().changePassword("dev@local.test", "new") {}
         }
 
         assertEquals(malformed, fixture.users.readText())
@@ -144,7 +144,7 @@ class DovecotUsersFileTest {
                 }
                 fixture.writeUsers("dev@local.test:{PLAIN}old::::::\n")
                 assertFailsWith<DovecotUsersFileException>("U+${boundary.code.toString(16)}") {
-                    fixture.file().changePassword("dev@local.test", password)
+                    fixture.file().changePassword("dev@local.test", password) {}
                 }
             }
         }
@@ -156,12 +156,12 @@ class DovecotUsersFileTest {
 
         listOf("Dev@local.test", "dev@localhost", "bad address@local.test").forEach { address ->
             assertFailsWith<DovecotUsersFileException>(address) {
-                file.create(address, "secret")
+                file.create(address, "secret") {}
             }
         }
         listOf("", "colon:value", "line\nvalue", "nul\u0000value").forEach { password ->
             assertFailsWith<DovecotUsersFileException>(password) {
-                file.changePassword("dev@local.test", password)
+                file.changePassword("dev@local.test", password) {}
             }
         }
 
@@ -176,7 +176,7 @@ class DovecotUsersFileTest {
         outside.writeText("dev@local.test:{PLAIN}outside::::::\n")
         Files.createSymbolicLink(fixture.users, outside)
         assertFailsWith<DovecotUsersFileException> {
-            file.changePassword("dev@local.test", "changed")
+            file.changePassword("dev@local.test", "changed") {}
         }
         assertEquals("dev@local.test:{PLAIN}outside::::::\n", outside.readText())
     }
@@ -191,7 +191,7 @@ class DovecotUsersFileTest {
             assertEquals("rw-------", fixture.mode(temporary))
         }
 
-        file.changePassword("dev@local.test", "new")
+        file.changePassword("dev@local.test", "new") {}
 
         assertEquals(1, observations.size)
         assertEquals(fixture.users, observations.single().second)
@@ -216,7 +216,7 @@ class DovecotUsersFileTest {
         )
 
         assertFailsWith<DovecotUsersFileException> {
-            fixture.file().changePassword("dev@local.test", "new")
+            fixture.file().changePassword("dev@local.test", "new") {}
         }
 
         assertEquals("dev@local.test:{PLAIN}old::::::\n", fixture.users.readText())
@@ -251,7 +251,7 @@ class DovecotUsersFileTest {
         assertEquals("dev@local.test:{PLAIN}new::::::\n", fixture.users.readText())
         assertTrue(fixture.lock.readText().matches(JOURNAL_PATTERN))
         assertFailsWith<DovecotUsersFileException> {
-            fixture.file().changePassword("dev@local.test", "another")
+            fixture.file().changePassword("dev@local.test", "another") {}
         }
     }
 
@@ -279,7 +279,7 @@ class DovecotUsersFileTest {
             assertEquals("locked", ready.get(5, TimeUnit.SECONDS))
 
             val mutation = mutators.submit<Unit> {
-                fixture.file().changePassword("dev@local.test", "new")
+                fixture.file().changePassword("dev@local.test", "new") {}
             }
             Thread.sleep(200)
             assertFalse(mutation.isDone, "Kotlin writer must wait for Python's users.lock")

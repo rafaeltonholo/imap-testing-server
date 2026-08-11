@@ -69,7 +69,7 @@ internal class DovecotProductAdapter(
     fun createAccount(address: String, password: ByteArray): DovecotAccount {
         val validatedAddress = requireLocalAddress(address)
         requirePassword(password)
-        accounts.createVerified(validatedAddress, password) {
+        accounts.create(validatedAddress, password) {
             verifyAccountPresent(validatedAddress)
         }
         try {
@@ -88,7 +88,7 @@ internal class DovecotProductAdapter(
             }
         } catch (failure: Exception) {
             runCatching {
-                accounts.deleteVerified(validatedAddress) {
+                accounts.delete(validatedAddress) {
                     verifyAccountAbsent(validatedAddress)
                 }
             }
@@ -100,32 +100,16 @@ internal class DovecotProductAdapter(
     fun changePassword(address: String, password: ByteArray) {
         val validatedAddress = requireLocalAddress(address)
         requirePassword(password)
-        accounts.changePasswordVerified(validatedAddress, password) {
+        accounts.changePassword(validatedAddress, password) {
             verifyAccountPresent(validatedAddress)
         }
     }
 
     fun deleteAccount(address: String) {
         val validatedAddress = requireLocalAddress(address)
-        accounts.deleteVerified(validatedAddress) {
+        accounts.delete(validatedAddress) {
             verifyAccountAbsent(validatedAddress)
         }
-    }
-
-    fun logs(lines: Int = 200): List<String> {
-        require(lines in 1..MAXIMUM_LOG_LINES) { "Log line count is invalid" }
-        return execute(
-            listOf(
-                "docker", "compose", "logs", "--no-color", "--tail", lines.toString(),
-                "dovecot",
-            ),
-            maximumOutputBytes = LOG_OUTPUT_BYTES,
-        ).decodeUtf8().lineSequence().filter(String::isNotEmpty).toList()
-    }
-
-    fun logsForAccount(address: String, lines: Int = 200): List<String> {
-        val validatedAddress = requireLocalAddress(address)
-        return logs(lines).filter { line -> validatedAddress in line }
     }
 
     fun listFolders(address: String): List<DovecotFolder> = execute(
@@ -596,13 +580,11 @@ internal class DovecotProductAdapter(
             "INBOX.Drafts",
             TRASH_MAILBOX,
         )
-        private const val MAXIMUM_LOG_LINES = 2_000
         private const val MAXIMUM_MAILBOX_LENGTH = 255
         private const val MAXIMUM_MAILBOX_SEGMENT_LENGTH = 64
         private const val MAXIMUM_PASSWORD_BYTES = 4 * 1024
         private const val MAXIMUM_EML_BYTES = 5 * 1024 * 1024
         private const val COMMAND_OUTPUT_BYTES = 256 * 1024
-        private const val LOG_OUTPUT_BYTES = 2 * 1024 * 1024
         private const val MESSAGE_LIST_OUTPUT_BYTES = 4 * 1024 * 1024
         private const val RAW_MESSAGE_OUTPUT_BYTES = 8 * 1024 * 1024
         private const val MAXIMUM_ERROR_CHARACTERS = 512

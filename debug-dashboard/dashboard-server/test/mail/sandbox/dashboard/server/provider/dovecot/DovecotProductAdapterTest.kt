@@ -171,49 +171,6 @@ class DovecotProductAdapterTest {
     }
 
     @Test
-    fun logsUseTheFixedDovecotComposeServiceAndParseLines() {
-        val runner = RecordingRunner(
-            DovecotCommandResult.success("one\ntwo\n"),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertEquals(listOf("one", "two"), adapter.logs(75))
-        assertEquals(
-            listOf(
-                "docker", "compose", "logs", "--no-color", "--tail", "75", "dovecot",
-            ),
-            runner.singleRequest().argv,
-        )
-        assertContentEquals(ByteArray(0), runner.singleRequest().stdin)
-    }
-
-    @Test
-    fun accountLogsFilterTheBoundedLocalLogSnapshotWithoutShellCommands() {
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(
-                "imap: user=<alice@local.test> login\n" +
-                    "imap: user=<bob@local.test> login\n" +
-                    "lmtp(alice@local.test): saved\n",
-            ),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertEquals(
-            listOf(
-                "imap: user=<alice@local.test> login",
-                "lmtp(alice@local.test): saved",
-            ),
-            adapter.logsForAccount("alice@local.test", 120),
-        )
-        assertEquals(
-            listOf(
-                "docker", "compose", "logs", "--no-color", "--tail", "120", "dovecot",
-            ),
-            runner.singleRequest().argv,
-        )
-    }
-
-    @Test
     fun folderOperationsUseExactDoveadmCommandsAndDeterministicOutput() {
         val runner = RecordingRunner(
             DovecotCommandResult.success("INBOX.Archive\nINBOX\nINBOX.Trash\n"),
@@ -524,25 +481,29 @@ class DovecotProductAdapterTest {
             val mailbox = root.resolve("vmail/alice@local.test/Maildir").createDirectories()
             val sentinel = mailbox.resolve("message").also { it.writeText("preserve") }
             val registry = UsersFileDovecotAccountRegistry(DovecotUsersFile(users))
+            var verifications = 0
 
-            registry.create("alice@local.test", "first".toByteArray())
-            registry.changePassword("alice@local.test", "second".toByteArray())
+            registry.create("alice@local.test", "first".toByteArray()) { verifications++ }
+            registry.changePassword("alice@local.test", "second".toByteArray()) {
+                verifications++
+            }
             assertEquals(listOf("alice@local.test"), registry.list())
             assertEquals(
                 "alice@local.test:{PLAIN}second::::::\n",
                 users.toFile().readText(),
             )
-            registry.delete("alice@local.test")
+            registry.delete("alice@local.test") { verifications++ }
 
             assertEquals(emptyList(), registry.list())
             assertEquals("preserve", sentinel.toFile().readText())
+            assertEquals(3, verifications)
         } finally {
             root.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun jvmRunnerRoutesDoveadmAndLogsThroughOnlyTheRootComposeFile() {
+    fun jvmRunnerRoutesOnlyDoveadmThroughTheRootComposeFile() {
         val root = createTempDirectory("dovecot-root-routing").toRealPath()
         try {
             root.resolve("docker-compose.yml").writeText("services: {}\n")
@@ -553,14 +514,16 @@ class DovecotProductAdapterTest {
             }
 
             runner.run(DovecotCommandRequest(doveadm("user", "*")))
-            runner.run(
-                DovecotCommandRequest(
-                    listOf(
-                        "docker", "compose", "logs", "--no-color", "--tail", "20",
-                        "dovecot",
+            assertFailsWith<IllegalArgumentException> {
+                runner.run(
+                    DovecotCommandRequest(
+                        listOf(
+                            "docker", "compose", "logs", "--no-color", "--tail", "20",
+                            "dovecot",
+                        ),
                     ),
-                ),
-            )
+                )
+            }
 
             val compose = root.resolve("docker-compose.yml").toString()
             assertEquals(
@@ -570,18 +533,24 @@ class DovecotProductAdapterTest {
                 ),
                 captured[0].argv,
             )
-            assertEquals(
-                listOf(
-                    "docker", "compose", "-f", compose,
-                    "logs", "--no-color", "--tail", "20", "dovecot",
-                ),
-                captured[1].argv,
-            )
+            assertEquals(1, captured.size)
             captured.flatMap(DovecotCommandRequest::argv).forEach { argument ->
                 assertTrue("mail-sandbox-dashboard" !in argument)
                 assertTrue("docker-compose.local-providers.yml" !in argument)
                 assertTrue("dovecot-operator" !in argument)
                 assertTrue("eligibility" !in argument)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun jvmRunnerRejectsAnInvalidRepositoryAtConstruction() {
+        val root = createTempDirectory("dovecot-invalid-root").toRealPath()
+        try {
+            assertFailsWith<IllegalArgumentException> {
+                JvmDovecotCommandRunner(root.resolve("missing"))
             }
         } finally {
             root.toFile().deleteRecursively()
@@ -649,18 +618,29 @@ private class RecordingAccountRegistry : DovecotAccountRegistry {
 
     override fun list(): List<String> = accounts.toList()
 
-    override fun create(address: String, password: ByteArray) {
+    override fun create(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) {
         calls += AccountCall.Create(address, password.toList())
         accounts += address
+        verifyProjection()
     }
 
-    override fun changePassword(address: String, password: ByteArray) {
+    override fun changePassword(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) {
         calls += AccountCall.ChangePassword(address, password.toList())
+        verifyProjection()
     }
 
-    override fun delete(address: String) {
+    override fun delete(address: String, verifyProjection: () -> Unit) {
         calls += AccountCall.Delete(address)
         accounts -= address
+        verifyProjection()
     }
 }
 
