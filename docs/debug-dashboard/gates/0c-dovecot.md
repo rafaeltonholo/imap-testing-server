@@ -84,6 +84,11 @@ dovecot/dovecot:2.4.1@sha256:1296e0f1029cdd95e6849fb82f5d142a6e2a46218451773316c
 
 The reviewed ordinary host publications are:
 
+> Superseded for the normal developer runtime on 2026-08-11: ordinary mail
+> protocols and OAuth HTTP are now also published for LAN test devices. This
+> table remains the historical Gate 0C isolation record; the current topology
+> is maintained in `.ai/skills/docker-compose/references/service-map.md`.
+
 | Protocol | Host publication | Container port |
 |---|---:|---:|
 | IMAP STARTTLS | `127.0.0.1:1143` | `31143` |

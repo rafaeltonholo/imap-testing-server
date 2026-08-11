@@ -75,7 +75,7 @@ class LocalDashboardScriptsTest {
         assertTrue("--lifecycle dashboard-start-local" in source)
         assertTrue("stalwart-status.sh" in source)
         assertTrue("initialize-fresh" in source)
-        assertTrue("up -d oauth2-mock dovecot postfix" in source)
+        assertTrue("up -d --build oauth2-mock dovecot postfix" in source)
         assertFalse("up -d --wait" in source)
         assertTrue("python3 \"\$dashboard_users_script\" verify" in source)
         assertTrue("DASHBOARD_STALWART_RUNTIME_STATE" in source)
@@ -106,7 +106,7 @@ class LocalDashboardScriptsTest {
                     "--lifecycle dashboard-start-local",
                 "python|stalwart_runtime_state.py classify --repository ${fixture.root}",
                 "docker|compose -f ${fixture.root}/docker-compose.yml " +
-                    "up -d oauth2-mock dovecot postfix",
+                    "up -d --build oauth2-mock dovecot postfix",
                 "python|users_file.py verify",
                 "python|bootstrap_stalwart_v016.py initialize-fresh --repository ${fixture.root}",
                 "python|stalwart_runtime_state.py classify --repository ${fixture.root}",

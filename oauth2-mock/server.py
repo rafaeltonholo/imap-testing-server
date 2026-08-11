@@ -95,6 +95,10 @@ class InvalidFormRequest(ValueError):
     pass
 
 
+class InvalidHostAuthority(ValueError):
+    pass
+
+
 class InvalidNetstring(ValueError):
     pass
 
@@ -762,17 +766,73 @@ def _make_refresh_token(username, client_id, scope="imap smtp"):
 
 # ─── Discovery ────────────────────────────────────────────────────────────────
 
-DISCOVERY = {
-    "issuer": BASE_URL,
-    "authorization_endpoint": f"{BASE_URL}/authorize",
-    "token_endpoint": f"{BASE_URL}/token",
-    "introspection_endpoint": f"{BASE_URL}/introspect",
-    "response_types_supported": ["code"],
-    "grant_types_supported": ["authorization_code", "refresh_token"],
-    "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
-    "scopes_supported": ["imap", "smtp", "imap smtp"],
-    "subject_types_supported": ["public"],
-}
+
+def _request_origin(headers):
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        authorities = get_all("Host", [])
+    else:
+        authority = headers.get("Host")
+        authorities = [] if authority is None else [authority]
+    if len(authorities) != 1:
+        raise InvalidHostAuthority()
+
+    authority = authorities[0]
+    if not isinstance(authority, str) or authority != authority.strip():
+        raise InvalidHostAuthority()
+    try:
+        parsed = urlparse(f"//{authority}")
+        port = parsed.port
+    except ValueError:
+        raise InvalidHostAuthority() from None
+    if (
+        not authority
+        or parsed.netloc != authority
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or not _valid_discovery_host(parsed.hostname)
+        or port is None
+        or not 1 <= port <= 65535
+    ):
+        raise InvalidHostAuthority()
+    return f"http://{authority}"
+
+
+def _valid_discovery_host(host):
+    if not host:
+        return False
+    if ":" in host:
+        return bool(re.fullmatch(r"[0-9a-fA-F:.]+", host))
+    if len(host) > 253:
+        return False
+    labels = host.rstrip(".").split(".")
+    return all(
+        label
+        and len(label) <= 63
+        and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+        for label in labels
+    )
+
+
+def _discovery_document(origin):
+    return {
+        "issuer": origin,
+        "authorization_endpoint": f"{origin}/authorize",
+        "token_endpoint": f"{origin}/token",
+        "introspection_endpoint": f"{origin}/introspect",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": [
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        "scopes_supported": ["imap", "smtp", "imap smtp"],
+        "subject_types_supported": ["public"],
+    }
 
 # ─── Authorization page HTML ──────────────────────────────────────────────────
 
@@ -851,7 +911,12 @@ class OAuthHandler(BaseHTTPRequestHandler):
             _json_response(self, {"status": "ok"})
 
         elif parsed.path == "/.well-known/oauth-authorization-server":
-            _json_response(self, DISCOVERY)
+            try:
+                origin = _request_origin(self.headers)
+            except InvalidHostAuthority:
+                _json_response(self, {"error": "invalid_request"}, 400)
+                return
+            _json_response(self, _discovery_document(origin))
 
         elif parsed.path == "/authorize":
             if _apply_test_knobs(self):

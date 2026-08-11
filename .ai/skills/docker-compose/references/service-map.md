@@ -7,15 +7,21 @@ Compose generates project-scoped container names.
 
 | Service | Selection | Host → container | Protocol |
 |---------|-----------|------------------|----------|
-| `dovecot` | Default | `127.0.0.1:1143` → `31143` | IMAP STARTTLS |
-| `dovecot` | Default | `127.0.0.1:1993` → `31993` | IMAPS |
-| `dovecot` | Default | `127.0.0.1:1110` → `31110` | POP3 STARTTLS |
-| `dovecot` | Default | `127.0.0.1:1995` → `31995` | POP3S |
+| `dovecot` | Default | `0.0.0.0:143` → `31143` | LAN IMAP STARTTLS |
+| `dovecot` | Default | `0.0.0.0:993` → `31993` | LAN IMAPS |
+| `dovecot` | Default | `0.0.0.0:110` → `31110` | LAN POP3 STARTTLS |
+| `dovecot` | Default | `0.0.0.0:995` → `31995` | LAN POP3S |
+| `dovecot` | Default | `127.0.0.1:1143` → `31143` | Dashboard IMAP STARTTLS alias |
+| `dovecot` | Default | `127.0.0.1:1993` → `31993` | Dashboard IMAPS alias |
+| `dovecot` | Default | `127.0.0.1:1110` → `31110` | Dashboard POP3 STARTTLS alias |
+| `dovecot` | Default | `127.0.0.1:1995` → `31995` | Dashboard POP3S alias |
 | `dovecot-operator` | Explicit profile only | None | Container-loopback IMAPS through fixed Docker-exec/stdio |
-| `postfix` | Default | `127.0.0.1:1025` → `25` | SMTP |
-| `postfix` | Default | `127.0.0.1:1465` → `465` | SMTPS |
-| `postfix` | Default | `127.0.0.1:1587` → `587` | SMTP submission |
-| `oauth2-mock` | Default | `127.0.0.1:8080` → `8080` | OAuth2 mock HTTP |
+| `postfix` | Default | `0.0.0.0:1025` → `25` | LAN SMTP |
+| `postfix` | Default | `0.0.0.0:465` → `465` | LAN SMTPS |
+| `postfix` | Default | `0.0.0.0:587` → `587` | LAN SMTP submission |
+| `postfix` | Default | `127.0.0.1:1465` → `465` | Dashboard SMTPS alias |
+| `postfix` | Default | `127.0.0.1:1587` → `587` | Dashboard SMTP submission alias |
+| `oauth2-mock` | Default | `0.0.0.0:8080` → `8080` | OAuth2 mock HTTP for local and LAN test clients |
 | `stalwart` | Default | `0.0.0.0:8443` → `8443` | JMAP HTTP |
 
 `dovecot-operator` is absent from the default resolved model. Select it only

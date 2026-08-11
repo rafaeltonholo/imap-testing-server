@@ -53,7 +53,7 @@ class DovecotBaselineConfigAuditTest {
                     "127.0.0.1:1587:587",
                 ),
                 "oauth2-mock" to listOf(
-                    "127.0.0.1:8080:8080",
+                    "0.0.0.0:8080:8080",
                 ),
             ),
             listOf("dovecot", "postfix", "oauth2-mock").associateWith { service ->

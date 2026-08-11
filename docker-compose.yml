@@ -77,7 +77,7 @@ services:
     build: ./oauth2-mock
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"   # OAuth2 introspection endpoint
+      - "0.0.0.0:8080:8080"   # OAuth2 endpoint for local and LAN test clients
     volumes:
       - ./config:/etc/mail-sandbox-config:ro
     healthcheck:

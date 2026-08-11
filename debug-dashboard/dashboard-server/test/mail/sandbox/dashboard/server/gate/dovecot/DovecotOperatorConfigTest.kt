@@ -551,14 +551,20 @@ class DovecotOperatorConfigTest {
         val auth = Files.readString(authReferencePath)
 
         listOf(
+            "`0.0.0.0:143` → `31143`",
+            "`0.0.0.0:993` → `31993`",
+            "`0.0.0.0:110` → `31110`",
+            "`0.0.0.0:995` → `31995`",
             "`127.0.0.1:1143` → `31143`",
             "`127.0.0.1:1993` → `31993`",
             "`127.0.0.1:1110` → `31110`",
             "`127.0.0.1:1995` → `31995`",
-            "`127.0.0.1:1025` → `25`",
+            "`0.0.0.0:1025` → `25`",
+            "`0.0.0.0:465` → `465`",
+            "`0.0.0.0:587` → `587`",
             "`127.0.0.1:1465` → `465`",
             "`127.0.0.1:1587` → `587`",
-            "`127.0.0.1:8080` → `8080`",
+            "`0.0.0.0:8080` → `8080`",
             "`0.0.0.0:8443` → `8443`",
         ).forEach { mapping ->
             assertTrue(mapping in serviceMap, "missing service mapping: $mapping")
@@ -1361,18 +1367,24 @@ class DovecotOperatorConfigTest {
         assertEquals(
             mapOf(
                 "dovecot" to listOf(
+                    PortPublication("0.0.0.0", "143", 31143, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "993", 31993, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "110", 31110, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "995", 31995, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1143", 31143, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1993", 31993, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1110", 31110, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1995", 31995, "tcp", "ingress"),
                 ),
                 "postfix" to listOf(
-                    PortPublication("127.0.0.1", "1025", 25, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "1025", 25, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "465", 465, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "587", 587, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1465", 465, "tcp", "ingress"),
                     PortPublication("127.0.0.1", "1587", 587, "tcp", "ingress"),
                 ),
                 "oauth2-mock" to listOf(
-                    PortPublication("127.0.0.1", "8080", 8080, "tcp", "ingress"),
+                    PortPublication("0.0.0.0", "8080", 8080, "tcp", "ingress"),
                 ),
             ),
             ordinary.mapValues { (_, service) ->

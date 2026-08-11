@@ -104,7 +104,7 @@ python3 scripts/setup.py
 ### 2. Start the Services
 
 ```sh
-docker-compose up -d
+docker compose up -d --build
 ```
 
 This starts four services:
@@ -204,6 +204,8 @@ Any email client or app that supports custom OAuth2 providers needs the followin
 | Discovery URL     | `http://<host>:8080/.well-known/oauth-authorization-server` |
 
 Replace `<host>` with `localhost` when the client runs on the same machine, or with your machine's LAN IP (e.g. `192.168.1.50`) when connecting from a phone or another device.
+The discovery response advertises the same validated host that the client used
+for the discovery request, so LAN clients do not receive `localhost` endpoints.
 
 > The mock accepts **any** `client_id` and `client_secret` values — no registration needed.
 

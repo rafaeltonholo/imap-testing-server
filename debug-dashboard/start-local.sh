@@ -93,7 +93,7 @@ else
 fi
 
 if test "$dashboard_tls_ready" -eq 1 && test "$dashboard_users_ready" -eq 1; then
-  if docker compose -f "$dashboard_compose_file" up -d oauth2-mock dovecot postfix; then
+  if docker compose -f "$dashboard_compose_file" up -d --build oauth2-mock dovecot postfix; then
     if ! dashboard_wait_for_dovecot; then
       printf '%s\n' 'Dovecot verification failed; continuing in degraded mode' >&2
     fi

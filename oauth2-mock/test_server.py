@@ -3,6 +3,7 @@ import io
 import importlib.util
 import json
 import os
+from email.message import Message
 from pathlib import Path
 import socket
 import subprocess
@@ -81,6 +82,67 @@ class OAuthServerTest(unittest.TestCase):
         server.auth_codes.clear()
         server.refresh_tokens.clear()
         server.access_tokens.clear()
+
+    def test_discovery_uses_the_request_host_for_lan_clients(self):
+        response = self.get(
+            "/.well-known/oauth-authorization-server",
+            host="192.168.86.36:8080",
+        )
+
+        self.assertEqual(200, response.status)
+        metadata = response.json()
+        self.assertEqual("http://192.168.86.36:8080", metadata["issuer"])
+        self.assertEqual(
+            "http://192.168.86.36:8080/authorize",
+            metadata["authorization_endpoint"],
+        )
+        self.assertEqual(
+            "http://192.168.86.36:8080/token",
+            metadata["token_endpoint"],
+        )
+        self.assertEqual(
+            "http://192.168.86.36:8080/introspect",
+            metadata["introspection_endpoint"],
+        )
+
+    def test_discovery_keeps_localhost_endpoints_for_local_clients(self):
+        response = self.get(
+            "/.well-known/oauth-authorization-server",
+            host="localhost:8080",
+        )
+
+        self.assertEqual(200, response.status)
+        self.assertEqual("http://localhost:8080", response.json()["issuer"])
+
+    def test_discovery_rejects_malformed_or_duplicate_host_headers(self):
+        malformed = self.get(
+            "/.well-known/oauth-authorization-server",
+            host="192.168.86.36:not-a-port",
+        )
+        missing_port = self.get(
+            "/.well-known/oauth-authorization-server",
+            host="192.168.86.36",
+        )
+        empty_port = self.get(
+            "/.well-known/oauth-authorization-server",
+            host="localhost:",
+        )
+        duplicate_headers = Message()
+        duplicate_headers["Host"] = "localhost:8080"
+        duplicate_headers["Host"] = "192.168.86.36:8080"
+        duplicate = self.get(
+            "/.well-known/oauth-authorization-server",
+            headers=duplicate_headers,
+        )
+
+        self.assertEqual(400, malformed.status)
+        self.assertEqual("invalid_request", malformed.json()["error"])
+        self.assertEqual(400, missing_port.status)
+        self.assertEqual("invalid_request", missing_port.json()["error"])
+        self.assertEqual(400, empty_port.status)
+        self.assertEqual("invalid_request", empty_port.json()["error"])
+        self.assertEqual(400, duplicate.status)
+        self.assertEqual("invalid_request", duplicate.json()["error"])
 
     def test_authorization_rejects_noneligible_username(self):
         response = self.post(
@@ -408,6 +470,35 @@ class OAuthServerTest(unittest.TestCase):
         handler.send_header = types.MethodType(send_header, handler)
         handler.end_headers = types.MethodType(end_headers, handler)
         handler.do_POST()
+        return HttpResponse(
+            handler.response_status,
+            handler.response_headers,
+            handler.wfile.getvalue().decode("utf-8"),
+        )
+
+    def get(self, path, host=None, headers=None):
+        if headers is None:
+            headers = {"Host": host or "localhost:8080"}
+        handler = self.handler_class.__new__(self.handler_class)
+        handler.path = path
+        handler.headers = headers
+        handler.wfile = io.BytesIO()
+        handler.response_status = None
+        handler.response_headers = {}
+
+        def send_response(instance, status):
+            instance.response_status = status
+
+        def send_header(instance, name, value):
+            instance.response_headers[name] = value
+
+        def end_headers(instance):
+            return None
+
+        handler.send_response = types.MethodType(send_response, handler)
+        handler.send_header = types.MethodType(send_header, handler)
+        handler.end_headers = types.MethodType(end_headers, handler)
+        handler.do_GET()
         return HttpResponse(
             handler.response_status,
             handler.response_headers,

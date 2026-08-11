@@ -1,6 +1,9 @@
 # OAuth2 Mock Endpoints
 
-Base URL: `http://localhost:8080`
+Base URL: `http://<host>:8080`, where `<host>` is `localhost` for clients on
+the development machine or that machine's LAN address for another test device.
+The discovery document derives its absolute endpoint URLs from the validated
+HTTP `Host` authority used for the request.
 
 | Endpoint       | Method | Purpose                                |
 |----------------|--------|----------------------------------------|
