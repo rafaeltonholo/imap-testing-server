@@ -2125,7 +2125,9 @@ private fun CreateAccountDialog(
                     label = { Text("Email address") },
                     supportingText = { Text("Use a local.test address, for example repro@local.test") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Email address" },
                 )
                 OutlinedTextField(
                     value = password,
@@ -2133,7 +2135,9 @@ private fun CreateAccountDialog(
                     label = { Text("Account password") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Account password" },
                 )
                 Text("Client protocol profile", fontWeight = FontWeight.SemiBold)
                 when (provider) {
@@ -2283,6 +2287,13 @@ private fun PasswordDialog(
                     },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
+                    modifier = Modifier.semantics {
+                        contentDescription = if (mode == PasswordActionMode.VERIFY) {
+                            "Existing password"
+                        } else {
+                            "New password"
+                        }
+                    },
                 )
             }
         },
@@ -2427,7 +2438,15 @@ private fun AuthenticationProbePane(
                             },
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics {
+                                    contentDescription = if (selectedProtocol?.requiresOverride() == true) {
+                                        "OAuth token override"
+                                    } else {
+                                        "Password override"
+                                    }
+                                },
                         )
                     }
                     Button(
