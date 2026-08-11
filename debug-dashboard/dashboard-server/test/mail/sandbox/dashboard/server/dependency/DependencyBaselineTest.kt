@@ -90,7 +90,7 @@ class DependencyBaselineTest {
               - ${'$'}ktor.client.cio
               - ${'$'}kotlin.serialization.json
               - jakarta.mail:jakarta.mail-api:${selected.getValue("jakartaMail")}
-              - org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}: runtime-only
+              - org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}
               - org.jetbrains.skiko:skiko-js-wasm-runtime:${selected.getValue("skiko")}
               - org.webjars.npm:js-joda__core:${selected.getValue("joda")}
               - ch.qos.logback:logback-classic:${selected.getValue("logback")}
@@ -154,7 +154,7 @@ class DependencyBaselineTest {
             modules = modules,
             expectedModule = "dashboard-server",
             coordinate = "org.eclipse.angus:angus-mail",
-            dependency = "org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}: runtime-only",
+            dependency = "org.eclipse.angus:angus-mail:${selected.getValue("angusMail")}",
         )
     }
 

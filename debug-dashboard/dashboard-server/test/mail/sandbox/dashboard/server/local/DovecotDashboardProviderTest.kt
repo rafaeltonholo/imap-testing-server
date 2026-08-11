@@ -4,18 +4,246 @@ import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
 import mail.sandbox.dashboard.contract.MailProtocol
+import mail.sandbox.dashboard.contract.MessageAction
 import mail.sandbox.dashboard.contract.MessageDeliveryMode
 import mail.sandbox.dashboard.contract.MessageSourceType
+import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.server.provider.AccountCredentials
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotAccountRegistry
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandRequest
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandResult
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandRunner
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotFolder
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotMailboxClient
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotMailboxState
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotMessageCommand
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotMessageSummary
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotProductAdapter
 
 class DovecotDashboardProviderTest {
+    @Test
+    fun activePlainPasswordBeatsTheStaleCatalogForMailboxWork() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-authority").toRealPath()
+        try {
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            catalog.put(
+                LocalAccountRecord(
+                    Provider.DOVECOT,
+                    "alice@local.test",
+                    "stale-catalog-password",
+                    ALL_PROTOCOLS,
+                ),
+            )
+            val registry = MutablePlainAccountRegistry("authority-password")
+            val runner = QueueRunner()
+            val mailbox = RecordingMailboxClient()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(registry, runner),
+                catalog = catalog,
+                mailboxClient = mailbox,
+            )
+
+            provider.listFolders("alice@local.test")
+
+            assertTrue(mailbox.credentials.isNotEmpty())
+            assertTrue(mailbox.credentials.all { it.password == "authority-password" })
+            assertTrue(mailbox.credentials.none { it.password == "stale-catalog-password" })
+            assertTrue(runner.requests.isEmpty())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun createRequiresTheExactServerWideCapabilitiesAndBootstrapsFoldersAsTheUser() =
+        runBlocking {
+            val directory = createTempDirectory("dovecot-dashboard-create-imap").toRealPath()
+            try {
+                val registry = MutablePlainAccountRegistry()
+                val runner = QueueRunner(DovecotCommandResult.success())
+                val mailbox = RecordingMailboxClient(folders = mutableListOf(DovecotFolder("INBOX")))
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(registry, runner),
+                    catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                    mailboxClient = mailbox,
+                )
+
+                assertFailsWith<IllegalArgumentException> {
+                    provider.createAccount(
+                        CreateAccountRequest(
+                            "subset@local.test",
+                            "password",
+                            Provider.DOVECOT,
+                            listOf(MailProtocol.IMAP, MailProtocol.SMTP),
+                        ),
+                    )
+                }
+                val account = provider.createAccount(
+                    CreateAccountRequest(
+                        "alice@local.test",
+                        "new-password",
+                        Provider.DOVECOT,
+                        ALL_PROTOCOLS,
+                    ),
+                )
+
+                assertEquals(ALL_PROTOCOLS, account.protocols)
+                assertEquals(
+                    listOf("INBOX.Drafts", "INBOX.Sent", "INBOX.Trash"),
+                    mailbox.created.sorted(),
+                )
+                assertTrue(mailbox.credentials.all {
+                    it == AccountCredentials("alice@local.test", "new-password")
+                })
+                assertTrue(runner.requests.all { "mailbox" !in it.argv })
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun passwordChangeMustLogInAsTheUserWithTheChangedPassword() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-password-imap").toRealPath()
+        try {
+            val registry = MutablePlainAccountRegistry("old-password")
+            val runner = QueueRunner(DovecotCommandResult.success())
+            val mailbox = RecordingMailboxClient()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(registry, runner),
+                catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = mailbox,
+            )
+
+            provider.changePassword("alice@local.test", "changed-password")
+
+            assertEquals(
+                AccountCredentials("alice@local.test", "changed-password"),
+                mailbox.probed.single(),
+            )
+            assertTrue(runner.requests.all { "mailbox" !in it.argv })
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun passwordChangeDoesNotReportSuccessWhenOrdinaryAuthenticationFails() = runBlocking {
+        listOf<AuthenticationOutcome>(
+            AuthenticationOutcome.WrongPassword("authentication failed"),
+            AuthenticationOutcome.Unavailable("provider unavailable"),
+        ).forEachIndexed { index, outcome ->
+            val directory = createTempDirectory("dovecot-dashboard-password-failure-$index")
+                .toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                catalog.put(
+                    LocalAccountRecord(
+                        Provider.DOVECOT,
+                        "alice@local.test",
+                        "old-password",
+                        ALL_PROTOCOLS,
+                    ),
+                )
+                val registry = MutablePlainAccountRegistry("old-password")
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(
+                        registry,
+                        QueueRunner(DovecotCommandResult.success()),
+                    ),
+                    catalog = catalog,
+                    mailboxClient = RecordingMailboxClient(probeOutcome = outcome),
+                )
+
+                assertFailsWith<IllegalStateException> {
+                    provider.changePassword("alice@local.test", "changed-password")
+                }
+
+                assertEquals("changed-password", registry.plainPassword("alice@local.test"))
+                assertEquals(
+                    "old-password",
+                    catalog.find(Provider.DOVECOT, "alice@local.test")?.password,
+                )
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun liveDovecotCapabilitiesIgnoreAStaleCatalogSubset() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-fixed-capabilities").toRealPath()
+        try {
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            catalog.put(
+                LocalAccountRecord(
+                    Provider.DOVECOT,
+                    "alice@local.test",
+                    "password",
+                    listOf(MailProtocol.IMAP),
+                ),
+            )
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    MutablePlainAccountRegistry("password"),
+                    QueueRunner(),
+                ),
+                catalog = catalog,
+                mailboxClient = RecordingMailboxClient(),
+            )
+
+            assertEquals(ALL_PROTOCOLS, provider.listAccounts().single().protocols)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun userFacingMailboxOperationsNeverInvokeDoveadm() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-mailbox-boundary").toRealPath()
+        try {
+            val runner = QueueRunner()
+            val mailbox = RecordingMailboxClient()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    MutablePlainAccountRegistry("authority-password"),
+                    runner,
+                ),
+                catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = mailbox,
+            )
+
+            provider.listFolders("alice@local.test")
+            provider.createFolder("alice@local.test", "Archive")
+            provider.deleteFolder("alice@local.test", "INBOX.Archive")
+            provider.listMessages("alice@local.test", "INBOX")
+            provider.readMessage("alice@local.test", "7", "INBOX")
+            provider.mutateMessages(
+                "alice@local.test",
+                MutateMessagesRequest(
+                    account = "alice@local.test",
+                    provider = Provider.DOVECOT,
+                    messageIds = listOf("7"),
+                    mutationStates = mapOf("7" to TEST_MAILBOX_STATE.encode()),
+                    action = MessageAction.MARK_READ,
+                    sourceFolderId = "INBOX",
+                ),
+            )
+
+            assertTrue(runner.requests.isEmpty())
+            assertTrue(mailbox.credentials.all { it.password == "authority-password" })
+            assertEquals(1, mailbox.commands.size)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun logSelectorResolvesTheRegisteredCanonicalAddress() = runBlocking {
         val directory = createTempDirectory("dovecot-dashboard-log-selector").toRealPath()
@@ -55,24 +283,28 @@ class DovecotDashboardProviderTest {
             "<p>readable=20html</p>",
             "--body--",
         )
-        val runner = QueueRunner(
-            DovecotCommandResult.success(
-                lines(
-                    "uid: 42",
-                    "flags: \\Seen",
-                    "hdr.message-id: <message-42@example.net>",
-                    "hdr.subject: Provider reproduction",
-                    "hdr.from: Sender <sender@example.net>",
-                    "hdr.date: Wed, 05 Aug 2026 12:00:00 +0000",
+        val mailbox = RecordingMailboxClient(
+            messageSnapshots = listOf(
+                listOf(
+                    fixtureSummary(
+                        uid = 42,
+                        messageId = "<message-42@example.net>",
+                        subject = "Provider reproduction",
+                        flags = setOf("\\Seen"),
+                    ),
                 ),
             ),
-            DovecotCommandResult.success("text: $raw"),
+            rawMessage = raw,
         )
         val directory = createTempDirectory("dovecot-dashboard-read").toRealPath()
         try {
             val provider = DovecotDashboardProvider(
-                adapter = DovecotProductAdapter(EmptyAccounts, runner),
+                adapter = DovecotProductAdapter(
+                    MutablePlainAccountRegistry("password"),
+                    QueueRunner(),
+                ),
                 catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = mailbox,
             )
 
             val detail = provider.readMessage("alice@local.test", "42", "INBOX")
@@ -97,42 +329,29 @@ class DovecotDashboardProviderTest {
             "",
             "body",
         )
-        val runner = QueueRunner(
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(
-                lines(
-                    "uid: 52",
-                    "flags:",
-                    "hdr.message-id: <unrelated-concurrent@local.test>",
-                    "hdr.subject: Concurrent delivery",
-                    "hdr.from: sender@local.test",
-                    "hdr.date: Wed, 05 Aug 2026 12:00:01 +0000",
-                ),
-            ),
-            DovecotCommandResult.success(
-                lines(
-                    "uid: 51",
-                    "flags:",
-                    "hdr.message-id: <dashboard-correlated@local.test>",
-                    "hdr.subject: Correlated fixture",
-                    "hdr.from: sender@local.test",
-                    "hdr.date: Wed, 05 Aug 2026 12:00:00 +0000",
-                    "\u000c",
-                    "uid: 52",
-                    "flags:",
-                    "hdr.message-id: <unrelated-concurrent@local.test>",
-                    "hdr.subject: Concurrent delivery",
-                    "hdr.from: sender@local.test",
-                    "hdr.date: Wed, 05 Aug 2026 12:00:01 +0000",
-                ),
-            ),
+        val runner = QueueRunner(DovecotCommandResult.success())
+        val unrelated = fixtureSummary(
+            uid = 52,
+            messageId = "<unrelated-concurrent@local.test>",
+            subject = "Concurrent delivery",
+        )
+        val correlated = fixtureSummary(
+            uid = 51,
+            messageId = "<dashboard-correlated@local.test>",
+            subject = "Correlated fixture",
+        )
+        val mailbox = RecordingMailboxClient(
+            messageSnapshots = listOf(emptyList(), listOf(unrelated), listOf(correlated, unrelated)),
         )
         val directory = createTempDirectory("dovecot-dashboard-inject").toRealPath()
         try {
             val provider = DovecotDashboardProvider(
-                adapter = DovecotProductAdapter(EmptyAccounts, runner),
+                adapter = DovecotProductAdapter(
+                    MutablePlainAccountRegistry("password"),
+                    runner,
+                ),
                 catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = mailbox,
             )
 
             val ids = provider.injectMessages(
@@ -162,16 +381,15 @@ class DovecotDashboardProviderTest {
             "",
             "body",
         )
-        val runner = QueueRunner(
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(
-                lines(
-                    "uid: 61",
-                    "flags:",
-                    "hdr.message-id: <smtp-correlated@local.test>",
-                    "hdr.subject: SMTP fixture",
-                    "hdr.from: sender@local.test",
-                    "hdr.date: Wed, 05 Aug 2026 12:00:00 +0000",
+        val mailbox = RecordingMailboxClient(
+            messageSnapshots = listOf(
+                emptyList(),
+                listOf(
+                    fixtureSummary(
+                        uid = 61,
+                        messageId = "<smtp-correlated@local.test>",
+                        subject = "SMTP fixture",
+                    ),
                 ),
             ),
         )
@@ -188,8 +406,9 @@ class DovecotDashboardProviderTest {
                 ),
             )
             val provider = DovecotDashboardProvider(
-                adapter = DovecotProductAdapter(SingleAccount, runner),
+                adapter = DovecotProductAdapter(SingleAccount, QueueRunner()),
                 catalog = catalog,
+                mailboxClient = mailbox,
                 smtpSender = smtp,
             )
 
@@ -215,7 +434,13 @@ class DovecotDashboardProviderTest {
     }
 
     private fun lines(vararg values: String): String = values.joinToString("\r\n")
+
+    companion object {
+        val ALL_PROTOCOLS = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP)
+    }
 }
+
+private val TEST_MAILBOX_STATE = DovecotMailboxState(uidValidity = 4_242)
 
 private object EmptyAccounts : DovecotAccountRegistry {
     override fun list(): List<String> = emptyList()
@@ -238,6 +463,130 @@ private object EmptyAccounts : DovecotAccountRegistry {
 private object SingleAccount : DovecotAccountRegistry by EmptyAccounts {
     override fun list(): List<String> = listOf("alice@local.test")
 }
+
+private class MutablePlainAccountRegistry(
+    initialPassword: String? = null,
+) : DovecotAccountRegistry {
+    private val passwords = linkedMapOf<String, String>().apply {
+        if (initialPassword != null) put("alice@local.test", initialPassword)
+    }
+
+    override fun list(): List<String> = passwords.keys.toList()
+
+    override fun plainPassword(address: String): String? = passwords[address]
+
+    override fun create(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) {
+        passwords[address] = password.decodeToString()
+        verifyProjection()
+    }
+
+    override fun changePassword(
+        address: String,
+        password: ByteArray,
+        verifyProjection: () -> Unit,
+    ) {
+        passwords[address] = password.decodeToString()
+        verifyProjection()
+    }
+
+    override fun delete(address: String, verifyProjection: () -> Unit) {
+        passwords.remove(address)
+        verifyProjection()
+    }
+}
+
+private class RecordingMailboxClient(
+    val folders: MutableList<DovecotFolder> = mutableListOf(DovecotFolder("INBOX")),
+    messageSnapshots: List<List<DovecotMessageSummary>> = emptyList(),
+    private val rawMessage: String = fixtureRawMessage(),
+    private val probeOutcome: AuthenticationOutcome =
+        AuthenticationOutcome.Authenticated("authenticated"),
+) : DovecotMailboxClient {
+    private val messageSnapshots = ArrayDeque(messageSnapshots)
+    private var lastMessageSnapshot: List<DovecotMessageSummary>? = null
+    val credentials = mutableListOf<AccountCredentials>()
+    val probed = mutableListOf<AccountCredentials>()
+    val created = mutableListOf<String>()
+    val commands = mutableListOf<DovecotMessageCommand>()
+
+    override fun probe(credentials: AccountCredentials): AuthenticationOutcome {
+        this.credentials += credentials
+        probed += credentials
+        return probeOutcome
+    }
+
+    override fun listFolders(credentials: AccountCredentials): List<DovecotFolder> {
+        this.credentials += credentials
+        return folders.toList()
+    }
+
+    override fun createFolder(
+        credentials: AccountCredentials,
+        name: String,
+    ): DovecotFolder {
+        this.credentials += credentials
+        created += name
+        return DovecotFolder(name).also(folders::add)
+    }
+
+    override fun deleteFolder(credentials: AccountCredentials, id: String) {
+        this.credentials += credentials
+        folders.removeAll { it.name == id }
+    }
+
+    override fun listMessages(
+        credentials: AccountCredentials,
+        folder: String,
+    ): List<DovecotMessageSummary> {
+        this.credentials += credentials
+        val next = messageSnapshots.removeFirstOrNull()
+        if (next != null) lastMessageSnapshot = next
+        return next ?: lastMessageSnapshot ?: listOf(fixtureSummary())
+    }
+
+    override fun readMessage(
+        credentials: AccountCredentials,
+        folder: String,
+        uid: Long,
+    ): String {
+        this.credentials += credentials
+        return rawMessage
+    }
+
+    override fun mutate(credentials: AccountCredentials, command: DovecotMessageCommand) {
+        this.credentials += credentials
+        commands += command
+    }
+}
+
+private fun fixtureSummary(
+    uid: Long = 7,
+    messageId: String = "<fixture@local.test>",
+    subject: String = "Fixture",
+    flags: Set<String> = emptySet(),
+): DovecotMessageSummary = DovecotMessageSummary(
+    uid = uid,
+    mailboxState = TEST_MAILBOX_STATE,
+    messageId = messageId,
+    subject = subject,
+    from = "sender@local.test",
+    date = "Tue, 11 Aug 2026 10:00:00 +0000",
+    flags = flags,
+)
+
+private fun fixtureRawMessage(): String = listOf(
+    "From: sender@local.test",
+    "To: alice@local.test",
+    "Date: Tue, 11 Aug 2026 10:00:00 +0000",
+    "Subject: Fixture",
+    "Message-ID: <fixture@local.test>",
+    "",
+    "body",
+).joinToString("\r\n")
 
 private data class SmtpCall(
     val envelopeFrom: String,
@@ -264,8 +613,10 @@ private class QueueRunner(
     vararg results: DovecotCommandResult,
 ) : DovecotCommandRunner {
     private val results = ArrayDeque(results.toList())
+    val requests = mutableListOf<DovecotCommandRequest>()
 
     override fun run(request: DovecotCommandRequest): DovecotCommandResult {
+        requests += request.copy(stdin = request.stdin.copyOf())
         if ("status" in request.argv) {
             return DovecotCommandResult.success(
                 "mailbox: INBOX\n" +

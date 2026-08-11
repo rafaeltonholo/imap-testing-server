@@ -23,7 +23,7 @@ dependencies:
   - $ktor.client.cio
   - $kotlin.serialization.json
   - jakarta.mail:jakarta.mail-api:2.1.5
-  - org.eclipse.angus:angus-mail:2.0.5: runtime-only
+  - org.eclipse.angus:angus-mail:2.0.5
   - org.jetbrains.skiko:skiko-js-wasm-runtime:0.144.6
   - org.webjars.npm:js-joda__core:3.2.0
   - ch.qos.logback:logback-classic:1.6.1

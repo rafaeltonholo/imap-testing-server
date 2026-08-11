@@ -8,6 +8,9 @@ import java.nio.file.Path
 internal interface DovecotAccountRegistry {
     fun list(): List<String>
 
+    /** Returns the active ordinary-account password only when the authority uses `{PLAIN}`. */
+    fun plainPassword(address: String): String? = null
+
     fun create(address: String, password: ByteArray, verifyProjection: () -> Unit)
 
     fun changePassword(
@@ -24,6 +27,10 @@ internal class UsersFileDovecotAccountRegistry(
     private val file: DovecotUsersFile,
 ) : DovecotAccountRegistry {
     override fun list(): List<String> = file.list().map(DovecotUserRecord::address)
+
+    override fun plainPassword(address: String): String? = file.list()
+        .firstOrNull { record -> record.address == address }
+        ?.plainPasswordOrNull()
 
     override fun create(
         address: String,

@@ -108,7 +108,8 @@ internal class JvmDovecotCommandRunner(
         requireValidRepositoryRoot()
         require(
             request.argv.take(DOVEADM_PREFIX.size) == DOVEADM_PREFIX &&
-                request.argv.size > DOVEADM_PREFIX.size,
+                request.argv.size > DOVEADM_PREFIX.size &&
+                request.isApprovedDoveadmOperation(),
         ) {
             "Dovecot command is not approved"
         }
@@ -120,6 +121,18 @@ internal class JvmDovecotCommandRunner(
                 request.stdin.size <= MAXIMUM_STDIN_BYTES,
         ) {
             "Dovecot command bounds are invalid"
+        }
+    }
+
+    private fun DovecotCommandRequest.isApprovedDoveadmOperation(): Boolean {
+        val arguments = argv.drop(DOVEADM_PREFIX.size)
+        return when {
+            arguments.size == 2 && arguments.first() == "user" -> stdin.isEmpty()
+            arguments.size == 5 &&
+                arguments[0] == "save" &&
+                arguments[1] == "-u" &&
+                arguments[3] == "-m" -> stdin.isNotEmpty()
+            else -> false
         }
     }
 

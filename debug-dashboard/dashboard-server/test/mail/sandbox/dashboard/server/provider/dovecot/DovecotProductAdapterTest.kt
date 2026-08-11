@@ -22,8 +22,6 @@ class DovecotProductAdapterTest {
         val runner = RecordingRunner(
             DovecotCommandResult.success(),
             DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
             missingUser(),
         )
         val adapter = DovecotProductAdapter(registry, runner)
@@ -34,7 +32,7 @@ class DovecotProductAdapterTest {
         assertEquals(
             DovecotAccount(
                 "alice@local.test",
-                setOf(DovecotProtocol.Imap, DovecotProtocol.Pop3),
+                setOf(DovecotProtocol.Imap, DovecotProtocol.Pop3, DovecotProtocol.Smtp),
             ),
             adapter.createAccount("alice@local.test", firstPassword),
         )
@@ -52,101 +50,38 @@ class DovecotProductAdapterTest {
         assertEquals(
             listOf(
                 doveadm("user", "alice@local.test"),
-                doveadm("mailbox", "list", "-u", "alice@local.test"),
-                doveadm(
-                    "mailbox",
-                    "create",
-                    "-u",
-                    "alice@local.test",
-                    "INBOX",
-                    "INBOX.Sent",
-                    "INBOX.Drafts",
-                    "INBOX.Trash",
-                ),
                 doveadm("user", "alice@local.test"),
                 doveadm("user", "alice@local.test"),
             ),
             runner.requests.map(DovecotCommandRequest::argv),
         )
-        assertTrue(runner.requests.none { "reload" in it.argv })
+        assertTrue(runner.requests.none { "reload" in it.argv || "mailbox" in it.argv })
     }
 
     @Test
-    fun failedMailboxBootstrapRollsBackTheNewCanonicalAccount() {
+    fun accountCreationNeverBootstrapsMailboxesThroughDoveadm() {
         val registry = RecordingAccountRegistry()
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
-            DovecotCommandResult(
-                exitCode = 75,
-                timedOut = false,
-                stdout = ByteArray(0),
-                stderr = "mail home unavailable".toByteArray(),
-            ),
-            missingUser(),
-        )
+        val runner = RecordingRunner(DovecotCommandResult.success())
         val adapter = DovecotProductAdapter(registry, runner)
 
-        assertFailsWith<DovecotCommandException> {
-            adapter.createAccount("alice@local.test", "password".toByteArray())
+        adapter.createAccount("alice@local.test", "password".toByteArray())
+
+        val expectedCalls: List<AccountCall> = listOf(
+            AccountCall.Create("alice@local.test", "password".toByteArray().toList()),
+        )
+        assertEquals(expectedCalls, registry.calls)
+        assertEquals(listOf(doveadm("user", "alice@local.test")), runner.requests.map { it.argv })
+    }
+
+    @Test
+    fun activePlainPasswordIsExposedWithoutUsingAStaleSecondaryValue() {
+        val registry = RecordingAccountRegistry().apply {
+            create("alice@local.test", "authority-password".toByteArray()) {}
         }
+        val adapter = DovecotProductAdapter(registry, RecordingRunner())
 
-        assertEquals(
-            listOf(
-                AccountCall.Create("alice@local.test", "password".toByteArray().toList()),
-                AccountCall.Delete("alice@local.test"),
-            ),
-            registry.calls,
-        )
-    }
-
-    @Test
-    fun deleteThenRecreateReusesRetainedDefaultMailboxesIdempotently() {
-        val registry = RecordingAccountRegistry()
-        val retained = "INBOX\nINBOX.Sent\nINBOX.Drafts\nINBOX.Trash\n"
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
-            missingUser(),
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(retained),
-        )
-        val adapter = DovecotProductAdapter(registry, runner)
-
-        adapter.createAccount("alice@local.test", "first".toByteArray())
-        adapter.deleteAccount("alice@local.test")
-        adapter.createAccount("alice@local.test", "second".toByteArray())
-
-        assertEquals(
-            listOf(
-                AccountCall.Create("alice@local.test", "first".toByteArray().toList()),
-                AccountCall.Delete("alice@local.test"),
-                AccountCall.Create("alice@local.test", "second".toByteArray().toList()),
-            ),
-            registry.calls,
-        )
-        assertEquals(6, runner.requests.size)
-        assertEquals(
-            listOf(
-                doveadm("user", "alice@local.test"),
-                doveadm("mailbox", "list", "-u", "alice@local.test"),
-                doveadm(
-                    "mailbox",
-                    "create",
-                    "-u",
-                    "alice@local.test",
-                    "INBOX",
-                    "INBOX.Sent",
-                    "INBOX.Drafts",
-                    "INBOX.Trash",
-                ),
-                doveadm("user", "alice@local.test"),
-                doveadm("user", "alice@local.test"),
-                doveadm("mailbox", "list", "-u", "alice@local.test"),
-            ),
-            runner.requests.map { it.argv },
-        )
+        assertEquals("authority-password", adapter.plainPassword("alice@local.test"))
+        assertEquals(null, adapter.plainPassword("missing@local.test"))
     }
 
     @Test
@@ -171,38 +106,28 @@ class DovecotProductAdapterTest {
     }
 
     @Test
-    fun folderOperationsUseExactDoveadmCommandsAndDeterministicOutput() {
-        val runner = RecordingRunner(
-            DovecotCommandResult.success("INBOX.Archive\nINBOX\nINBOX.Trash\n"),
-            DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
+    fun productAdapterExposesNoUserFacingMailboxCommandMethods() {
+        val forbidden = setOf(
+            "listFolders",
+            "createFolder",
+            "deleteFolder",
+            "listMessages",
+            "readRawMessage",
+            "markRead",
+            "setFlagged",
+            "copyMessages",
+            "moveMessages",
+            "trashMessages",
+            "deleteMessages",
         )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
 
-        assertEquals(
-            listOf("INBOX", "INBOX.Archive", "INBOX.Trash").map(::DovecotFolder),
-            adapter.listFolders("alice@local.test"),
-        )
-        adapter.createFolder("alice@local.test", "INBOX.Bug Repro")
-        adapter.deleteFolder("alice@local.test", "INBOX.Bug Repro")
-
-        assertEquals(
-            listOf(
-                doveadm("mailbox", "list", "-u", "alice@local.test"),
-                doveadm(
-                    "mailbox", "create", "-u", "alice@local.test", "INBOX.Bug Repro",
-                ),
-                doveadm(
-                    "mailbox", "delete", "-s", "-u", "alice@local.test",
-                    "INBOX.Bug Repro",
-                ),
-            ),
-            runner.requests.map(DovecotCommandRequest::argv),
-        )
+        assertTrue(DovecotProductAdapter::class.java.declaredMethods.none {
+            it.name in forbidden
+        })
     }
 
     @Test
-    fun rawEmlIsSavedThroughStdinWithoutAContainerFile() {
+    fun rawEmlIsTheOnlyMailOperationAndUsesDoveadmSaveStdin() {
         val runner = RecordingRunner(DovecotCommandResult.success())
         val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
         val eml = validEml().toByteArray(StandardCharsets.UTF_8)
@@ -210,9 +135,7 @@ class DovecotProductAdapterTest {
         adapter.saveRawEmail("alice@local.test", "INBOX.Bug Repro", eml)
 
         assertEquals(
-            doveadm(
-                "save", "-u", "alice@local.test", "-m", "INBOX.Bug Repro",
-            ),
+            doveadm("save", "-u", "alice@local.test", "-m", "INBOX.Bug Repro"),
             runner.singleRequest().argv,
         )
         assertContentEquals(eml, runner.singleRequest().stdin)
@@ -235,245 +158,7 @@ class DovecotProductAdapterTest {
     }
 
     @Test
-    fun rawEmlAcceptsRealisticExternalEnvelopeHeaders() {
-        val runner = RecordingRunner(DovecotCommandResult.success())
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-        val eml = """
-            From: External Sender <sender@example.net>
-            To: External QA <qa@example.org>
-            Date: Tue, 04 Aug 2026 10:00:00 +0000
-            Subject: External reproduction
-            Message-ID: <upstream-42@example.net>
-            Received: from edge-one.example.net
-            Received: from edge-two.example.net
-
-            Realistic provider input.
-        """.trimIndent().toByteArray()
-
-        adapter.saveRawEmail("alice@local.test", "INBOX", eml)
-
-        assertContentEquals(eml, runner.singleRequest().stdin)
-    }
-
-    @Test
-    fun messageListParsesPagerRecordsIncludingFoldedValues() {
-        val output = """
-            uid: 9
-            flags: \Seen \Flagged
-            hdr.message-id: <nine@local.test>
-            hdr.subject: First line
-             second line
-            hdr.from: Sender <sender@local.test>
-            hdr.date: Tue, 04 Aug 2026 10:00:00 +0000
-            
-            uid: 12
-            flags:
-            hdr.message-id: <twelve@local.test>
-            hdr.subject: Plain
-            hdr.from: sender@local.test
-            hdr.date: Tue, 04 Aug 2026 10:01:00 +0000
-        """.trimIndent()
-        val mailboxState = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(mailboxStatus(mailboxState)),
-            DovecotCommandResult.success(output),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertEquals(
-            listOf(
-                DovecotMessageSummary(
-                    uid = 9,
-                    mailboxState = mailboxState,
-                    messageId = "<nine@local.test>",
-                    subject = "First line\n second line",
-                    from = "Sender <sender@local.test>",
-                    date = "Tue, 04 Aug 2026 10:00:00 +0000",
-                    flags = setOf("\\Flagged", "\\Seen"),
-                ),
-                DovecotMessageSummary(
-                    uid = 12,
-                    mailboxState = mailboxState,
-                    messageId = "<twelve@local.test>",
-                    subject = "Plain",
-                    from = "sender@local.test",
-                    date = "Tue, 04 Aug 2026 10:01:00 +0000",
-                    flags = emptySet(),
-                ),
-            ),
-            adapter.listMessages("alice@local.test", "INBOX"),
-        )
-        assertEquals(
-            doveadm(
-                "-f", "pager", "fetch", "-u", "alice@local.test",
-                "uid flags hdr.message-id hdr.subject hdr.from hdr.date",
-                "mailbox-guid", mailboxState.mailboxGuid, "all",
-            ),
-            runner.requests[1].argv,
-        )
-        assertEquals(
-            doveadm(
-                "-f", "pager", "mailbox", "status", "-u", "alice@local.test",
-                "guid uidvalidity", "INBOX",
-            ),
-            runner.requests.first().argv,
-        )
-    }
-
-    @Test
-    fun rawMessageReadStripsOnlyThePagerFieldPrefix() {
-        val raw = validEml(lineEnding = "\r\n")
-        val mailboxState = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(mailboxStatus(mailboxState)),
-            DovecotCommandResult.success("text: $raw"),
-            DovecotCommandResult.success(mailboxStatus(mailboxState)),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertEquals(
-            raw,
-            adapter.readRawMessage("alice@local.test", "INBOX", 44, mailboxState),
-        )
-        assertEquals(
-            doveadm(
-                "-f", "pager", "fetch", "-u", "alice@local.test", "text",
-                "mailbox-guid", mailboxState.mailboxGuid, "uid", "44",
-            ),
-            runner.requests[1].argv,
-        )
-    }
-
-    @Test
-    fun flagReadMoveCopyTrashAndDeleteUseUidScopedQueries() {
-        val mailboxState = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val runner = RecordingRunner(
-            *Array(16) { index ->
-                if (index % 2 == 0) {
-                    DovecotCommandResult.success(mailboxStatus(mailboxState))
-                } else {
-                    DovecotCommandResult.success()
-                }
-            },
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        adapter.markRead("alice@local.test", "INBOX", listOf(7), mailboxState, true)
-        adapter.markRead("alice@local.test", "INBOX", listOf(7), mailboxState, false)
-        adapter.setFlagged("alice@local.test", "INBOX", listOf(7), mailboxState, true)
-        adapter.setFlagged("alice@local.test", "INBOX", listOf(7), mailboxState, false)
-        adapter.copyMessages("alice@local.test", "INBOX", listOf(7), mailboxState, "INBOX.Copy")
-        adapter.moveMessages("alice@local.test", "INBOX", listOf(7), mailboxState, "INBOX.Archive")
-        adapter.trashMessages("alice@local.test", "INBOX", listOf(7), mailboxState)
-        adapter.deleteMessages("alice@local.test", "INBOX.Trash", listOf(7), mailboxState)
-
-        assertEquals(
-            listOf(
-                doveadm("flags", "add", "-u", "alice@local.test", "\\Seen", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("flags", "remove", "-u", "alice@local.test", "\\Seen", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("flags", "add", "-u", "alice@local.test", "\\Flagged", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("flags", "remove", "-u", "alice@local.test", "\\Flagged", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("copy", "-u", "alice@local.test", "INBOX.Copy", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("move", "-u", "alice@local.test", "INBOX.Archive", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("move", "-u", "alice@local.test", "INBOX.Trash", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-                doveadm("expunge", "-u", "alice@local.test", "mailbox-guid", mailboxState.mailboxGuid, "uid", "7"),
-            ),
-            runner.requests.map(DovecotCommandRequest::argv).filterNot { argv ->
-                argv.contains("status")
-            },
-        )
-    }
-
-    @Test
-    fun changedUidValidityRejectsMutationBeforeTheUidCommand() {
-        val expected = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val changed = expected.copy(uidValidity = 1_235)
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(mailboxStatus(changed)),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertFailsWith<DovecotCommandException> {
-            adapter.deleteMessages("alice@local.test", "INBOX", listOf(7), expected)
-        }
-
-        assertEquals(1, runner.requests.size)
-        assertTrue(runner.requests.single().argv.contains("status"))
-    }
-
-    @Test
-    fun changedUidValidityRejectsRawReadBeforeTheUidFetch() {
-        val expected = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(mailboxStatus(expected.copy(uidValidity = 1_235))),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertFailsWith<DovecotCommandException> {
-            adapter.readRawMessage("alice@local.test", "INBOX", 7, expected)
-        }
-
-        assertEquals(1, runner.requests.size)
-        assertTrue(runner.requests.single().argv.contains("status"))
-    }
-
-    @Test
-    fun uidValidityRolloverDuringRawReadRejectsTheFetchedBody() {
-        val expected = DovecotMailboxState(
-            uidValidity = 1_234,
-            mailboxGuid = "0123456789abcdef0123456789abcdef",
-        )
-        val runner = RecordingRunner(
-            DovecotCommandResult.success(mailboxStatus(expected)),
-            DovecotCommandResult.success("text: old body"),
-            DovecotCommandResult.success(mailboxStatus(expected.copy(uidValidity = 1_235))),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        assertFailsWith<DovecotCommandException> {
-            adapter.readRawMessage("alice@local.test", "INBOX", 7, expected)
-        }
-
-        assertEquals(3, runner.requests.size)
-    }
-
-    @Test
-    fun failedOrTimedOutCommandsAreReportedWithoutLeakingStdin() {
-        val runner = RecordingRunner(
-            DovecotCommandResult(
-                exitCode = 23,
-                timedOut = false,
-                stdout = ByteArray(0),
-                stderr = "mailbox missing".toByteArray(),
-            ),
-        )
-        val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
-
-        val failure = assertFailsWith<DovecotCommandException> {
-            adapter.listFolders("alice@local.test")
-        }
-
-        assertTrue(failure.message.orEmpty().contains("mailbox missing"))
-        assertTrue(!failure.message.orEmpty().contains("alice@local.test"))
-    }
-
-    @Test
-    fun usersFileRegistryStoresPlainPasswordsAndRemovesOnlyAuthentication() {
+    fun usersFileRegistryReturnsPlainPasswordsAndRemovesOnlyAuthentication() {
         val root = createTempDirectory("dovecot-product-accounts").toRealPath()
         try {
             val users = root.resolve("config/users")
@@ -487,14 +172,14 @@ class DovecotProductAdapterTest {
             registry.changePassword("alice@local.test", "second".toByteArray()) {
                 verifications++
             }
-            assertEquals(listOf("alice@local.test"), registry.list())
+            assertEquals("second", registry.plainPassword("alice@local.test"))
             assertEquals(
                 "alice@local.test:{PLAIN}second::::::\n",
                 users.toFile().readText(),
             )
             registry.delete("alice@local.test") { verifications++ }
 
-            assertEquals(emptyList(), registry.list())
+            assertEquals(null, registry.plainPassword("alice@local.test"))
             assertEquals("preserve", sentinel.toFile().readText())
             assertEquals(3, verifications)
         } finally {
@@ -503,7 +188,7 @@ class DovecotProductAdapterTest {
     }
 
     @Test
-    fun jvmRunnerRoutesOnlyDoveadmThroughTheRootComposeFile() {
+    fun jvmRunnerRoutesOnlyAccountControlAndDirectAppendThroughRootCompose() {
         val root = createTempDirectory("dovecot-root-routing").toRealPath()
         try {
             root.resolve("docker-compose.yml").writeText("services: {}\n")
@@ -514,13 +199,41 @@ class DovecotProductAdapterTest {
             }
 
             runner.run(DovecotCommandRequest(doveadm("user", "*")))
+            runner.run(
+                DovecotCommandRequest(
+                    doveadm("save", "-u", "alice@local.test", "-m", "INBOX"),
+                    stdin = validEml().toByteArray(),
+                ),
+            )
+            listOf(
+                arrayOf("mailbox", "list", "-u", "alice@local.test"),
+                arrayOf("fetch", "-u", "alice@local.test", "text", "all"),
+                arrayOf("flags", "add", "-u", "alice@local.test", "\\Seen", "all"),
+                arrayOf("copy", "-u", "alice@local.test", "INBOX.Archive", "all"),
+                arrayOf("move", "-u", "alice@local.test", "INBOX.Trash", "all"),
+                arrayOf("expunge", "-u", "alice@local.test", "all"),
+                arrayOf("batch", "user", "*"),
+                arrayOf("exec", "imap", "alice@local.test"),
+                arrayOf("-f", "pager", "user", "*"),
+                arrayOf("user", "alice@local.test", "unexpected"),
+                arrayOf("save", "-u", "alice@local.test", "-m", "INBOX", "unexpected"),
+            ).forEach { arguments ->
+                assertFailsWith<IllegalArgumentException> {
+                    runner.run(DovecotCommandRequest(doveadm(*arguments)))
+                }
+            }
             assertFailsWith<IllegalArgumentException> {
                 runner.run(
                     DovecotCommandRequest(
-                        listOf(
-                            "docker", "compose", "logs", "--no-color", "--tail", "20",
-                            "dovecot",
-                        ),
+                        doveadm("user", "alice@local.test"),
+                        stdin = "unexpected".toByteArray(),
+                    ),
+                )
+            }
+            assertFailsWith<IllegalArgumentException> {
+                runner.run(
+                    DovecotCommandRequest(
+                        doveadm("save", "-u", "alice@local.test", "-m", "INBOX"),
                     ),
                 )
             }
@@ -533,7 +246,7 @@ class DovecotProductAdapterTest {
                 ),
                 captured[0].argv,
             )
-            assertEquals(1, captured.size)
+            assertEquals(2, captured.size)
             captured.flatMap(DovecotCommandRequest::argv).forEach { argument ->
                 assertTrue("mail-sandbox-dashboard" !in argument)
                 assertTrue("docker-compose.local-providers.yml" !in argument)
@@ -567,42 +280,30 @@ class DovecotProductAdapterTest {
         stderr = "user doesn't exist".toByteArray(),
     )
 
-    private fun mailboxStatus(state: DovecotMailboxState): String =
-        "mailbox: INBOX\nguid: ${state.mailboxGuid}\nuidvalidity: ${state.uidValidity}\n"
-
-    private fun validEml(lineEnding: String = "\n"): String = listOf(
+    private fun validEml(): String = listOf(
         "From: sender@local.test",
         "To: alice@local.test",
-        "Date: Tue, 04 Aug 2026 10:00:00 +0000",
+        "Date: Tue, 11 Aug 2026 10:00:00 +0000",
         "Subject: Reproduction",
         "Message-ID: <reproduction@local.test>",
         "MIME-Version: 1.0",
         "Content-Type: text/plain; charset=UTF-8",
         "",
         "Hello",
-    ).joinToString(lineEnding)
-
+    ).joinToString("\r\n")
 }
 
 private class CompletedProcess : Process() {
     private val stdin = ByteArrayOutputStream()
 
     override fun getOutputStream(): OutputStream = stdin
-
     override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
-
     override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
-
     override fun waitFor(): Int = 0
-
     override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = true
-
     override fun exitValue(): Int = 0
-
     override fun destroy() = Unit
-
     override fun destroyForcibly(): Process = this
-
     override fun isAlive(): Boolean = false
 }
 
@@ -614,9 +315,11 @@ private sealed interface AccountCall {
 
 private class RecordingAccountRegistry : DovecotAccountRegistry {
     val calls = mutableListOf<AccountCall>()
-    private val accounts = linkedSetOf<String>()
+    private val passwords = linkedMapOf<String, String>()
 
-    override fun list(): List<String> = accounts.toList()
+    override fun list(): List<String> = passwords.keys.toList()
+
+    override fun plainPassword(address: String): String? = passwords[address]
 
     override fun create(
         address: String,
@@ -624,7 +327,7 @@ private class RecordingAccountRegistry : DovecotAccountRegistry {
         verifyProjection: () -> Unit,
     ) {
         calls += AccountCall.Create(address, password.toList())
-        accounts += address
+        passwords[address] = password.decodeToString()
         verifyProjection()
     }
 
@@ -634,12 +337,13 @@ private class RecordingAccountRegistry : DovecotAccountRegistry {
         verifyProjection: () -> Unit,
     ) {
         calls += AccountCall.ChangePassword(address, password.toList())
+        passwords[address] = password.decodeToString()
         verifyProjection()
     }
 
     override fun delete(address: String, verifyProjection: () -> Unit) {
         calls += AccountCall.Delete(address)
-        accounts -= address
+        passwords -= address
         verifyProjection()
     }
 }
