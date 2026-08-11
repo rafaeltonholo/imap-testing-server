@@ -26,7 +26,11 @@ import mail.sandbox.dashboard.server.provider.dovecot.DovecotProductAdapter
 internal class DovecotDashboardProvider(
     private val adapter: DovecotProductAdapter,
     private val catalog: LocalAccountCatalog,
-    private val mailboxClient: DovecotMailboxClient = DovecotImapClient(),
+    private val mailboxClient: DovecotMailboxClient = DovecotImapClient(
+        accountExists = { address ->
+            adapter.listAccounts().any { account -> account.address == address }
+        },
+    ),
     private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.POSTFIX),
 ) : LocalProviderOperations {
     override val provider: Provider = Provider.DOVECOT

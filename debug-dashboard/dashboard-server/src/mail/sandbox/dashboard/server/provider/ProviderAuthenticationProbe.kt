@@ -192,7 +192,7 @@ internal fun interface ProviderAuthenticationConnectionFactory {
 
 internal class JakartaProviderAuthenticationConnector(
     private val connectionFactory: ProviderAuthenticationConnectionFactory =
-        JakartaProviderAuthenticationConnectionFactory,
+        JakartaProviderAuthenticationConnectionFactory(),
 ) : ProviderAuthenticationConnector {
     override fun authenticate(
         attempt: ProviderAuthenticationAttempt,
@@ -222,8 +222,22 @@ internal class JakartaProviderAuthenticationConnector(
     }
 }
 
-private object JakartaProviderAuthenticationConnectionFactory :
-    ProviderAuthenticationConnectionFactory {
+internal fun interface JakartaAuthenticationStoreFactory {
+    fun create(session: Session, protocol: ProviderAuthenticationProtocol): Store
+}
+
+internal fun interface JakartaAuthenticationTransportFactory {
+    fun create(session: Session): Transport
+}
+
+internal class JakartaProviderAuthenticationConnectionFactory(
+    private val storeFactory: JakartaAuthenticationStoreFactory =
+        JakartaAuthenticationStoreFactory { session, protocol ->
+            session.getStore(protocol.propertyPrefix)
+        },
+    private val transportFactory: JakartaAuthenticationTransportFactory =
+        JakartaAuthenticationTransportFactory { session -> session.getTransport("smtp") },
+) : ProviderAuthenticationConnectionFactory {
     override fun create(
         attempt: ProviderAuthenticationAttempt,
         properties: Properties,
@@ -236,11 +250,11 @@ private object JakartaProviderAuthenticationConnectionFactory :
             ProviderAuthenticationProtocol.IMAP,
             ProviderAuthenticationProtocol.POP3,
             -> StoreAuthenticationConnection(
-                store = session.getStore(attempt.protocol.propertyPrefix),
+                store = storeFactory.create(session, attempt.protocol),
                 attempt = attempt,
             )
             ProviderAuthenticationProtocol.SMTP -> TransportAuthenticationConnection(
-                transport = session.getTransport("smtp"),
+                transport = transportFactory.create(session),
                 attempt = attempt,
             )
         }

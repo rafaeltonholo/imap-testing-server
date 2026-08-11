@@ -1,7 +1,14 @@
 package mail.sandbox.dashboard.server.provider
 
 import jakarta.mail.AuthenticationFailedException
+import jakarta.mail.Address
+import jakarta.mail.Folder
+import jakarta.mail.Message
 import jakarta.mail.MessagingException
+import jakarta.mail.Session
+import jakarta.mail.Store
+import jakarta.mail.Transport
+import jakarta.mail.URLName
 import java.net.SocketTimeoutException
 import java.util.Properties
 import javax.security.auth.callback.NameCallback
@@ -233,6 +240,98 @@ class ProviderAuthenticationProbeTest {
     }
 
     @Test
+    fun injectedJakartaStoreReceivesTheExactOrdinaryAccountAndIsClosed() {
+        lateinit var store: RecordingJakartaStore
+        val connector = JakartaProviderAuthenticationConnector(
+            JakartaProviderAuthenticationConnectionFactory(
+                storeFactory = JakartaAuthenticationStoreFactory { session, protocol ->
+                    assertEquals(ProviderAuthenticationProtocol.IMAP, protocol)
+                    RecordingJakartaStore(session).also { store = it }
+                },
+                transportFactory = JakartaAuthenticationTransportFactory {
+                    error("SMTP transport must not be created for an IMAP probe")
+                },
+            ),
+        )
+
+        assertIs<ProviderAuthenticationTransportOutcome.Authenticated>(
+            connector.authenticate(passwordAttempt()),
+        )
+
+        assertEquals(
+            JakartaConnectCall("127.0.0.1", 1143, "alice@local.test", "password"),
+            store.connectCall,
+        )
+        assertEquals("true", store.sessionProperty("mail.imap.starttls.required"))
+        assertEquals("10000", store.sessionProperty("mail.imap.connectiontimeout"))
+        assertEquals(1, store.closeCount)
+    }
+
+    @Test
+    fun injectedJakartaSmtpTransportAuthenticatesWithoutSendingAndIsClosed() {
+        lateinit var transport: RecordingJakartaTransport
+        val connector = JakartaProviderAuthenticationConnector(
+            JakartaProviderAuthenticationConnectionFactory(
+                storeFactory = JakartaAuthenticationStoreFactory { _, _ ->
+                    error("Mail store must not be created for an SMTP probe")
+                },
+                transportFactory = JakartaAuthenticationTransportFactory { session ->
+                    RecordingJakartaTransport(session).also { transport = it }
+                },
+            ),
+        )
+        val attempt = ProviderAuthenticationAttempt(
+            protocol = ProviderAuthenticationProtocol.SMTP,
+            mechanism = ProviderAuthenticationMechanism.PASSWORD,
+            endpoint = ProviderAuthenticationEndpoint("127.0.0.1", 1587, startTls = true),
+            address = "alice@local.test",
+            secret = "password",
+            authenticateOnly = true,
+        )
+
+        assertIs<ProviderAuthenticationTransportOutcome.Authenticated>(
+            connector.authenticate(attempt),
+        )
+
+        assertEquals(
+            JakartaConnectCall("127.0.0.1", 1587, "alice@local.test", "password"),
+            transport.connectCall,
+        )
+        assertEquals("true", transport.sessionProperty("mail.smtp.starttls.required"))
+        assertEquals(0, transport.sendCount)
+        assertEquals(1, transport.closeCount)
+    }
+
+    @Test
+    fun failuresRaisedByAnInjectedJakartaStoreAreTypedAndTheStoreIsClosed() {
+        listOf(
+            AuthenticationFailedException("authentication failed") to
+                ProviderAuthenticationTransportOutcome.WrongPassword::class,
+            SocketTimeoutException("read timed out") to
+                ProviderAuthenticationTransportOutcome.TimedOut::class,
+            MessagingException("connection refused") to
+                ProviderAuthenticationTransportOutcome.Unavailable::class,
+        ).forEach { (failure, expectedType) ->
+            lateinit var store: RecordingJakartaStore
+            val connector = JakartaProviderAuthenticationConnector(
+                JakartaProviderAuthenticationConnectionFactory(
+                    storeFactory = JakartaAuthenticationStoreFactory { session, _ ->
+                        RecordingJakartaStore(session, failure).also { store = it }
+                    },
+                    transportFactory = JakartaAuthenticationTransportFactory {
+                        error("SMTP transport must not be created for an IMAP probe")
+                    },
+                ),
+            )
+
+            val outcome = connector.authenticate(passwordAttempt())
+
+            assertTrue(expectedType.isInstance(outcome))
+            assertEquals(1, store.closeCount)
+        }
+    }
+
+    @Test
     fun oauthBearerSaslClientUsesOnlyTheRequestScopedAddressAndToken() {
         val client = OAuthBearerSaslClientFactory().createSaslClient(
             mechanisms = arrayOf("OAUTHBEARER"),
@@ -304,5 +403,73 @@ private class RecordingConnection(
 
     override fun close() {
         closeCount++
+    }
+}
+
+private data class JakartaConnectCall(
+    val host: String?,
+    val port: Int,
+    val user: String?,
+    val secret: String?,
+)
+
+private class RecordingJakartaStore(
+    session: Session,
+    private val failure: Exception? = null,
+) : Store(session, URLName("imap", null, -1, null, null, null)) {
+    var connectCall: JakartaConnectCall? = null
+    var closeCount: Int = 0
+
+    fun sessionProperty(name: String): String? = session.getProperty(name)
+
+    override fun protocolConnect(
+        host: String?,
+        port: Int,
+        user: String?,
+        password: String?,
+    ): Boolean {
+        connectCall = JakartaConnectCall(host, port, user, password)
+        failure?.let { throw it }
+        return true
+    }
+
+    override fun getDefaultFolder(): Folder = error("Not used by an authentication probe")
+
+    override fun getFolder(name: String): Folder = error("Not used by an authentication probe")
+
+    override fun getFolder(url: URLName): Folder = error("Not used by an authentication probe")
+
+    override fun close() {
+        closeCount++
+        setConnected(false)
+    }
+}
+
+private class RecordingJakartaTransport(
+    session: Session,
+) : Transport(session, URLName("smtp", null, -1, null, null, null)) {
+    var connectCall: JakartaConnectCall? = null
+    var closeCount: Int = 0
+    var sendCount: Int = 0
+
+    fun sessionProperty(name: String): String? = session.getProperty(name)
+
+    override fun protocolConnect(
+        host: String?,
+        port: Int,
+        user: String?,
+        password: String?,
+    ): Boolean {
+        connectCall = JakartaConnectCall(host, port, user, password)
+        return true
+    }
+
+    override fun sendMessage(message: Message, addresses: Array<out Address>) {
+        sendCount++
+    }
+
+    override fun close() {
+        closeCount++
+        setConnected(false)
     }
 }

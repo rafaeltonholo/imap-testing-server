@@ -217,6 +217,38 @@ class DovecotImapClientTest {
     }
 
     @Test
+    fun genericAuthenticationFailureForAnUnregisteredAddressIsMissingAccount() {
+        var probeCount = 0
+        val client = DovecotImapClient(
+            storeFactory = RecordingStoreFactory(RecordingMailboxState()),
+            authenticationProbe = {
+                probeCount++
+                AuthenticationOutcome.WrongPassword("generic authentication failure")
+            },
+            accountExists = { address -> address == "registered@local.test" },
+        )
+
+        val outcome = client.probe(credentials())
+
+        assertIs<AuthenticationOutcome.MissingAccount>(outcome)
+        assertEquals("generic authentication failure", outcome.diagnostic)
+        assertEquals(1, probeCount)
+    }
+
+    @Test
+    fun genericAuthenticationFailureForARegisteredAddressRemainsWrongPassword() {
+        val client = DovecotImapClient(
+            storeFactory = RecordingStoreFactory(RecordingMailboxState()),
+            authenticationProbe = {
+                AuthenticationOutcome.WrongPassword("generic authentication failure")
+            },
+            accountExists = { address -> address == "alice@local.test" },
+        )
+
+        assertIs<AuthenticationOutcome.WrongPassword>(client.probe(credentials()))
+    }
+
+    @Test
     fun loopbackImapSettingsRequireStartTlsTrustAndBoundEveryTimeout() {
         val properties = DovecotImapConnectionSettings().sessionProperties()
 

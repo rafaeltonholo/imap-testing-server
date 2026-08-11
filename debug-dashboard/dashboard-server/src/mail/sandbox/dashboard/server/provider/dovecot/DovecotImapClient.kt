@@ -174,9 +174,19 @@ internal class DovecotImapClient(
     private val storeFactory: DovecotImapStoreFactory = JakartaDovecotImapStoreFactory(),
     private val authenticationProbe: (AccountCredentials) -> AuthenticationOutcome =
         DefaultDovecotImapAuthenticationProbe()::probe,
+    private val accountExists: ((String) -> Boolean)? = null,
 ) : DovecotMailboxClient {
-    override fun probe(credentials: AccountCredentials): AuthenticationOutcome =
-        authenticationProbe(credentials)
+    override fun probe(credentials: AccountCredentials): AuthenticationOutcome {
+        val outcome = authenticationProbe(credentials)
+        return if (
+            outcome is AuthenticationOutcome.WrongPassword &&
+            accountExists?.invoke(credentials.address) == false
+        ) {
+            AuthenticationOutcome.MissingAccount(outcome.diagnostic)
+        } else {
+            outcome
+        }
+    }
 
     override fun listFolders(credentials: AccountCredentials): List<DovecotFolder> =
         withStore(credentials) { store ->
