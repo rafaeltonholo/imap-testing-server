@@ -341,6 +341,7 @@ class DovecotDashboardProviderTest {
             assertEquals("Provider reproduction", detail.subject)
             assertEquals("readable plain", detail.textBody)
             assertEquals("<p>readable html</p>", detail.htmlBody)
+            assertEquals(listOf(TEST_MAILBOX_STATE), mailbox.readStates)
         } finally {
             directory.toFile().deleteRecursively()
         }
@@ -541,6 +542,7 @@ private class RecordingMailboxClient(
     val probed = mutableListOf<AccountCredentials>()
     val created = mutableListOf<String>()
     val commands = mutableListOf<DovecotMessageCommand>()
+    val readStates = mutableListOf<DovecotMailboxState>()
 
     override fun probe(credentials: AccountCredentials): AuthenticationOutcome {
         this.credentials += credentials
@@ -581,8 +583,10 @@ private class RecordingMailboxClient(
         credentials: AccountCredentials,
         folder: String,
         uid: Long,
+        expectedState: DovecotMailboxState,
     ): String {
         this.credentials += credentials
+        readStates += expectedState
         return rawMessage
     }
 

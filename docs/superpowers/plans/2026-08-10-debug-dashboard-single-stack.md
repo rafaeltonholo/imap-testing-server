@@ -86,7 +86,7 @@ private val mailDependencies = mapOf(
 
 These are the current reviewed candidates, not permission to skip Step 1. If the official stable metadata has advanced, first change these expected values to the newly verified stable versions and keep the test RED until the module follows.
 
-Assert that `dashboard-server/module.yaml` owns the Jakarta API as a compile dependency and Angus Mail as a `runtime-only` implementation exactly once, and that no other dashboard module declares them. Update the existing exact version constants only when Step 1 proves a newer stable.
+Assert that `dashboard-server/module.yaml` owns both the Jakarta API and Angus Mail as compile dependencies exactly once, and that no other dashboard module declares them. Task 5 requires the public Angus `IMAPStore`/`IMAPFolder` APIs for native MOVE and targeted UIDPLUS expunge, which the Jakarta API does not expose; Kotlin Toolchain does not expose `runtime-only` dependencies to compilation. Update the existing exact version constants only when Step 1 proves a newer stable.
 
 - [ ] **Step 3: Run the focused tests and verify RED**
 
@@ -107,7 +107,7 @@ Add to `dashboard-server/module.yaml`:
 ```yaml
 dependencies:
   - jakarta.mail:jakarta.mail-api:2.1.5
-  - org.eclipse.angus:angus-mail:2.0.5: runtime-only
+  - org.eclipse.angus:angus-mail:2.0.5
 ```
 
 If Step 1 advanced either stable release, use the updated exact value established in Step 2 rather than the displayed reviewed candidate.

@@ -151,7 +151,12 @@ internal class DovecotDashboardProvider(
         val credentials = credentials(address)
         val summary = mailboxClient.listMessages(credentials, mailbox).firstOrNull { it.uid == uid }
             ?: throw DashboardNotFoundException("Dovecot message was not found")
-        val raw = mailboxClient.readMessage(credentials, mailbox, uid)
+        val raw = mailboxClient.readMessage(
+            credentials,
+            mailbox,
+            uid,
+            summary.mailboxState,
+        )
         val parsed = parseEml(raw)
         return MessageDetail(
             id = messageId,

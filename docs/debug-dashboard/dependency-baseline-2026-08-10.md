@@ -22,7 +22,7 @@ not a platform manifest digest.
 | Selenium | `4.47.0` stable | [Selenium release](https://github.com/SeleniumHQ/selenium/releases/tag/selenium-4.47.0), [artifact metadata](https://repo1.maven.org/maven2/org/seleniumhq/selenium/selenium-java/maven-metadata.xml) | Replaces `4.46.0`; `4.47.0` was published during this revalidation on 2026-08-10. |
 | js-joda WebJar | `3.2.0` stable | [WebJar artifact metadata](https://repo1.maven.org/maven2/org/webjars/npm/js-joda__core/maven-metadata.xml) | Latest published version of the selected direct coordinate. |
 | Jakarta Mail API | `2.1.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/jakarta/mail/jakarta.mail-api/maven-metadata.xml) | Compile dependency owned exactly once by `dashboard-server`. |
-| Angus Mail | `2.0.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/org/eclipse/angus/angus-mail/maven-metadata.xml) | Runtime-only provider owned exactly once by `dashboard-server`. |
+| Angus Mail | `2.0.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/org/eclipse/angus/angus-mail/maven-metadata.xml) | Compile-scoped provider owned exactly once by `dashboard-server`; Task 5 requires its typed IMAP MOVE and UIDPLUS APIs. |
 | Dovecot | `2.4.4` stable | [publisher registry tags](https://hub.docker.com/r/dovecot/dovecot/tags), `docker buildx imagetools inspect dovecot/dovecot:2.4.4` | `dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4`. |
 | Stalwart | `v0.16.16` stable final target | [publisher release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.16), `docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.16` | Final-target index digest `sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`; the normal service is intentionally not cut over in this task. |
 | Python | `3.14.7` stable | [Python 3.14.7 release](https://www.python.org/downloads/release/python-3147/), `docker buildx imagetools inspect python:3.14.7-slim-trixie` | `python:3.14.7-slim-trixie@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910`; Python.org published this seventh 3.14 maintenance release on 2026-08-05. |
@@ -46,6 +46,18 @@ were compared. The security repository supersedes main's Postfix
 
 These are distribution-managed binary versions; upstream project versions are
 not forced over the versions published for Debian 13.6.
+
+## Angus compile-scope decision
+
+Task 5 proved that Jakarta Mail's provider-neutral API does not expose native
+IMAP MOVE or targeted UIDPLUS expunge. The dashboard therefore uses the public
+Angus `IMAPStore` and `IMAPFolder` types for those required operations. Kotlin
+Toolchain does not put a `runtime-only` dependency on the compilation
+classpath, so Angus is compile-scoped and still owned exactly once by
+`dashboard-server`. Keeping it runtime-only would require reflective calls to
+provider internals and would remove compile-time verification of the UID-safe
+operations. The selected version remains `2.0.5`, the newest stable release;
+`2.1.0-M1` remains excluded as a milestone build.
 
 ## Temporary live Stalwart migration hold
 

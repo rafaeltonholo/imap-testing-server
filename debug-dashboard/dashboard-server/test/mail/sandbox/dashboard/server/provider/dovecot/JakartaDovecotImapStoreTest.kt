@@ -92,6 +92,8 @@ class JakartaDovecotImapStoreTest {
         assertTrue(state.fetchProfiles.single().contains(FetchProfile.Item.FLAGS))
         assertTrue(state.fetchProfiles.single().contains(FetchProfile.Item.SIZE))
         assertTrue(state.fetchProfiles.single().contains(UIDFolder.FetchProfileItem.UID))
+        assertTrue(state.fetchProfiles.single().contains("Date"))
+        assertTrue(state.fetchProfiles.single().contains("Message-ID"))
         assertEquals(listOf("*", "*"), state.listPatterns)
         assertEquals(listOf(Folder.HOLDS_MESSAGES), state.createTypes)
         assertEquals(
@@ -109,6 +111,31 @@ class JakartaDovecotImapStoreTest {
         )
         assertTrue("expunge-all" !in state.operations)
         assertEquals(listOf(false), state.closeExpungeArguments)
+    }
+
+    @Test
+    fun concreteAngusStoreSkipsNoselectHierarchyParents() {
+        val settings = DovecotImapConnectionSettings()
+        val session = Session.getInstance(settings.sessionProperties())
+        val state = RecordingAngusState(
+            mailboxes = linkedMapOf(
+                "INBOX" to mutableListOf(),
+                "INBOX.Parent" to mutableListOf(),
+                "INBOX.Parent.Child" to mutableListOf(),
+            ),
+            mailboxTypes = mapOf(
+                "INBOX.Parent" to Folder.HOLDS_FOLDERS,
+            ),
+        )
+        val adapter = JakartaDovecotImapStore(RecordingAngusStore(session, state), settings)
+        adapter.connect(AccountCredentials("alice@local.test", "alice-password"))
+
+        assertEquals(
+            listOf("INBOX", "INBOX.Parent.Child"),
+            adapter.listFolders(10).map(DovecotFolder::name),
+        )
+
+        adapter.close()
     }
 
     @Test
@@ -208,6 +235,7 @@ private data class RecordingAngusState(
     val mailboxes: LinkedHashMap<String, MutableList<AngusStoredMessage>> = linkedMapOf(
         "INBOX" to mutableListOf(),
     ),
+    val mailboxTypes: Map<String, Int> = emptyMap(),
     var connected: Boolean = false,
     var connectCall: AngusConnectCall? = null,
     var storeCloseCount: Int = 0,
@@ -306,6 +334,8 @@ private class RecordingAngusFolder(
     override fun isOpen(): Boolean = open
 
     override fun getUIDValidity(): Long = 4_242
+
+    override fun getType(): Int = state.mailboxTypes[mailbox] ?: Folder.HOLDS_MESSAGES
 
     override fun getMessageCount(): Int = messages().size
 

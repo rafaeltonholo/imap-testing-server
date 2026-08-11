@@ -36,7 +36,15 @@ class DovecotImapClientTest {
         )
         client.deleteFolder(credentials, "INBOX.Archive")
         assertEquals(listOf(7L), client.listMessages(credentials, "INBOX").map { it.uid })
-        assertEquals("Subject: fixture\r\n\r\nbody", client.readMessage(credentials, "INBOX", 7))
+        assertEquals(
+            "Subject: fixture\r\n\r\nbody",
+            client.readMessage(
+                credentials,
+                "INBOX",
+                7,
+                DovecotMailboxState(uidValidity = state.uidValidity),
+            ),
+        )
 
         assertTrue(factory.credentials.all { it == credentials })
         assertTrue(factory.credentials.none { it.address.startsWith("dashboard-") })
@@ -121,6 +129,24 @@ class DovecotImapClientTest {
     }
 
     @Test
+    fun readRejectsAChangedUidValidityBeforeResolvingTheUid() {
+        val state = RecordingMailboxState(uidValidity = 4_243)
+
+        assertFailsWith<DovecotMailboxChangedException> {
+            client(state).readMessage(
+                credentials(),
+                "INBOX",
+                7,
+                DovecotMailboxState(uidValidity = 4_242),
+            )
+        }
+
+        assertEquals(0, state.readCount)
+        assertEquals(1, state.storeCloseCount)
+        assertEquals(1, state.folderCloseCount)
+    }
+
+    @Test
     fun nativeMoveDoesNotCopyOrMarkMessagesDeleted() {
         val state = RecordingMailboxState(nativeMoveSupported = true)
         val client = client(state)
@@ -193,6 +219,30 @@ class DovecotImapClientTest {
 
         assertTrue(state.operations.isEmpty())
         assertEquals(0, state.storeCloseCount)
+    }
+
+    @Test
+    fun messageListingDoesNotSilentlyDropMessagesBeyondOneThousand() {
+        val state = RecordingMailboxState(
+            storedMessages = (1L..1_001L).map(::storedMessage),
+        )
+
+        val messages = client(state).listMessages(credentials(), "INBOX")
+
+        assertEquals(1_001, messages.size)
+        assertEquals(1L, messages.first().uid)
+        assertEquals(1_001L, messages.last().uid)
+    }
+
+    @Test
+    fun folderListingDoesNotSilentlyDropFoldersBeyondOneThousand() {
+        val state = RecordingMailboxState(
+            folders = (1..1_001).map { index -> DovecotFolder("INBOX.Folder $index") },
+        )
+
+        val folders = client(state).listFolders(credentials())
+
+        assertEquals(1_001, folders.size)
     }
 
     @Test
@@ -277,6 +327,7 @@ class DovecotImapClientTest {
                 AccountCredentials("alice@local.test", "alice-password"),
                 "INBOX",
                 7,
+                DovecotMailboxState(uidValidity = state.uidValidity),
             )
         }
 
@@ -350,7 +401,7 @@ private class RecordingStore(
     }
 
     override fun listFolders(maximumFolders: Int): List<DovecotFolder> =
-        listOf(DovecotFolder("INBOX"), DovecotFolder("INBOX.Trash"))
+        state.folders.take(maximumFolders)
 
     override fun createFolder(name: String): DovecotFolder = DovecotFolder(name)
 
@@ -373,20 +424,13 @@ private class RecordingFolder(
     override val supportsTargetedExpunge: Boolean
         get() = state.supportsTargetedExpunge
 
-    override fun listMessages(maximumMessages: Int): List<DovecotStoredMessage> = listOf(
-        DovecotStoredMessage(
-            uid = 7,
-            messageId = "<fixture@local.test>",
-            subject = "fixture",
-            from = "sender@local.test",
-            date = "Tue, 11 Aug 2026 10:00:00 +0000",
-            flags = emptySet(),
-        ),
-    )
+    override fun listMessages(maximumMessages: Int): List<DovecotStoredMessage> =
+        state.storedMessages.takeLast(maximumMessages)
 
     override fun readMessage(uid: Long, maximumBytes: Int): String {
         state.readFailure?.let { throw it }
         require(uid == 7L)
+        state.readCount++
         return "Subject: fixture\r\n\r\nbody"
     }
 
@@ -427,8 +471,23 @@ private data class RecordingMailboxState(
     val nativeMoveSupported: Boolean = false,
     val supportsTargetedExpunge: Boolean = true,
     val existingUids: Set<Long> = setOf(7, 8),
+    val folders: List<DovecotFolder> = listOf(
+        DovecotFolder("INBOX"),
+        DovecotFolder("INBOX.Trash"),
+    ),
+    val storedMessages: List<DovecotStoredMessage> = listOf(storedMessage()),
     val operations: MutableList<String> = mutableListOf(),
     var storeCloseCount: Int = 0,
     var folderCloseCount: Int = 0,
+    var readCount: Int = 0,
     val folderCloseExpungeArguments: MutableList<Boolean> = mutableListOf(),
+)
+
+private fun storedMessage(uid: Long = 7): DovecotStoredMessage = DovecotStoredMessage(
+    uid = uid,
+    messageId = "<fixture-$uid@local.test>",
+    subject = "fixture $uid",
+    from = "sender@local.test",
+    date = "Tue, 11 Aug 2026 10:00:00 +0000",
+    flags = emptySet(),
 )

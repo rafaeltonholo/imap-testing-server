@@ -37,6 +37,7 @@ internal interface DovecotMailboxClient {
         credentials: AccountCredentials,
         folder: String,
         uid: Long,
+        expectedState: DovecotMailboxState,
     ): String
 
     fun mutate(credentials: AccountCredentials, command: DovecotMessageCommand)
@@ -190,10 +191,10 @@ internal class DovecotImapClient(
 
     override fun listFolders(credentials: AccountCredentials): List<DovecotFolder> =
         withStore(credentials) { store ->
-            store.listFolders(MAXIMUM_FOLDERS)
+            // The dashboard contract is unpaginated, so a silent cap would hide real mailboxes.
+            store.listFolders(Int.MAX_VALUE)
                 .distinctBy(DovecotFolder::name)
                 .sortedBy(DovecotFolder::name)
-                .take(MAXIMUM_FOLDERS)
         }
 
     override fun createFolder(
@@ -218,7 +219,8 @@ internal class DovecotImapClient(
         writable = false,
     ) { selected ->
         val state = DovecotMailboxState(uidValidity = selected.uidValidity)
-        selected.listMessages(MAXIMUM_MESSAGES).map { message ->
+        // The dashboard contract is unpaginated, so a silent cap would corrupt counts and UIDs.
+        selected.listMessages(Int.MAX_VALUE).map { message ->
             require(message.uid > 0) { "Dovecot returned an invalid message UID" }
             DovecotMessageSummary(
                 uid = message.uid,
@@ -236,11 +238,15 @@ internal class DovecotImapClient(
         credentials: AccountCredentials,
         folder: String,
         uid: Long,
+        expectedState: DovecotMailboxState,
     ): String = withFolder(
         credentials = credentials,
         mailbox = requireMailbox(folder),
         writable = false,
     ) { selected ->
+        if (selected.uidValidity != expectedState.uidValidity) {
+            throw DovecotMailboxChangedException()
+        }
         val validatedUid = requireUid(uid)
         if (!selected.contains(validatedUid)) throw DovecotMessageMissingException(validatedUid)
         selected.readMessage(validatedUid, MAXIMUM_RAW_MESSAGE_BYTES)
@@ -356,8 +362,6 @@ internal class DovecotImapClient(
     }
 
     private companion object {
-        const val MAXIMUM_FOLDERS = 1_000
-        const val MAXIMUM_MESSAGES = 1_000
         const val MAXIMUM_MUTATION_UIDS = 500
         const val MAXIMUM_RAW_MESSAGE_BYTES = 8 * 1024 * 1024
         const val MAXIMUM_MAILBOX_LENGTH = 255
@@ -406,6 +410,7 @@ internal class JakartaDovecotImapStore(
     override fun listFolders(maximumFolders: Int): List<DovecotFolder> =
         store.defaultFolder.list("*")
             .asSequence()
+            .filter { folder -> folder.type and Folder.HOLDS_MESSAGES != 0 }
             .take(maximumFolders)
             .map { folder -> DovecotFolder(folder.fullName) }
             .toList()
@@ -459,6 +464,8 @@ private class JakartaDovecotImapFolder(
                 add(FetchProfile.Item.FLAGS)
                 add(FetchProfile.Item.SIZE)
                 add(UIDFolder.FetchProfileItem.UID)
+                add("Date")
+                add("Message-ID")
             },
         )
         return messages.map(::storedMessage)

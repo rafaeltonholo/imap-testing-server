@@ -15,6 +15,7 @@ import javax.security.auth.callback.NameCallback
 import javax.security.auth.callback.PasswordCallback
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -386,7 +387,17 @@ class ProviderAuthenticationProbeTest {
         assertTrue(initialResponse.startsWith("n,a=alice@local.test,"))
         assertTrue("auth=Bearer request-token" in initialResponse)
         assertTrue("password" !in initialResponse)
-        assertEquals(listOf(1.toByte()), client.evaluateChallenge("error".toByteArray()).toList())
+        assertFalse(
+            client.isComplete(),
+            "Angus skips evaluateChallenge when isComplete is already true",
+        )
+        val errorResponse = if (client.isComplete()) {
+            ByteArray(0)
+        } else {
+            client.evaluateChallenge("error".toByteArray())
+        }
+        assertEquals(listOf(1.toByte()), errorResponse.toList())
+        assertTrue(client.isComplete())
     }
 
     private fun passwordAttempt(): ProviderAuthenticationAttempt =

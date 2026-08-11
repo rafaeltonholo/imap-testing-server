@@ -291,6 +291,7 @@ private class OAuthBearerSaslClient(
     private val callbackHandler: CallbackHandler,
 ) : SaslClient {
     private var sentInitialResponse = false
+    private var acknowledgedErrorChallenge = false
     private var disposed = false
 
     override fun getMechanismName(): String = OAUTH_BEARER_MECHANISM
@@ -301,6 +302,10 @@ private class OAuthBearerSaslClient(
         check(!disposed) { "OAUTHBEARER SASL client is disposed" }
         if (sentInitialResponse) {
             // RFC 7628 requires a single 0x01 response to an authentication error challenge.
+            check(!acknowledgedErrorChallenge) {
+                "OAUTHBEARER error challenge was already acknowledged"
+            }
+            acknowledgedErrorChallenge = true
             return byteArrayOf(1)
         }
         val name = NameCallback("Account address")
@@ -338,7 +343,9 @@ private class OAuthBearerSaslClient(
         }
     }
 
-    override fun isComplete(): Boolean = sentInitialResponse
+    // Angus checks this before forwarding an IMAP continuation or SMTP 334 challenge.
+    // Remaining incomplete after the client-first response lets RFC 7628's error exchange run.
+    override fun isComplete(): Boolean = acknowledgedErrorChallenge
 
     override fun unwrap(incoming: ByteArray, offset: Int, length: Int): ByteArray =
         throw SaslException("OAUTHBEARER does not provide a security layer")
