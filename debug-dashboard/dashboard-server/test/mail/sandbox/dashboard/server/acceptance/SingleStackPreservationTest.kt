@@ -16,7 +16,9 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.FolderInfo
 import mail.sandbox.dashboard.contract.MailProtocol
+import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.server.local.LocalDashboardBackend
@@ -228,6 +230,43 @@ class SingleStackPreservationTest {
     }
 
     @Test
+    fun generatedMessagesResolveOpaqueLocalizedFoldersByIdentityAndSubject() {
+        val inbox = FolderInfo("opaque-inbox-id", "Boîte de réception", 3, 3)
+        val copyTarget = FolderInfo("opaque-copy-id", "Acceptance copy", 1, 1)
+        val trash = FolderInfo("opaque-trash-id", "Deleted Items", 1, 1)
+        val eml = message("eml-id", inbox.id, "acceptance EML")
+        val text = message("text-id", inbox.id, "acceptance text")
+        val random = message("random-id", inbox.id, "acceptance random")
+        val copied = message("shared-message-id", copyTarget.id, "acceptance random")
+        val trashed = message("shared-message-id", trash.id, "acceptance random")
+        val initial = listOf(
+            inbox to listOf(eml, text, random),
+            trash to emptyList(),
+        )
+        val afterTrash = listOf(
+            inbox to listOf(eml, text),
+            copyTarget to listOf(copied),
+            trash to listOf(trashed),
+        )
+
+        assertEquals(
+            inbox,
+            requireSingleFolderContainingMessageIds(
+                initial,
+                setOf(eml.id, text.id, random.id),
+            ),
+        )
+        assertEquals(
+            trash to trashed,
+            requireUniqueMessageBySubject(
+                afterTrash,
+                "acceptance random",
+                excludedFolderIds = setOf(copyTarget.id),
+            ),
+        )
+    }
+
+    @Test
     fun liveRunnerIsOptInSelectsOnlyTheLiveClassAndNeverStartsCompose() {
         val repositoryRoot = generateSequence(
             Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize(),
@@ -357,5 +396,16 @@ class SingleStackPreservationTest {
 
         fun canonicalUsers(address: String, password: String): ByteArray =
             "$address:{PLAIN}$password::::::\n".toByteArray()
+
+        fun message(id: String, folderId: String, subject: String) = MessageSummary(
+            id = id,
+            folderId = folderId,
+            mutationState = "state-$id",
+            subject = subject,
+            fromAddress = "acceptance-sender@local.test",
+            receivedAt = "2026-08-11T12:00:00Z",
+            isRead = false,
+            isFlagged = false,
+        )
     }
 }

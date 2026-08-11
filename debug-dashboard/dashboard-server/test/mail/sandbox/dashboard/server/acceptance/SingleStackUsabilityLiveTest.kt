@@ -192,8 +192,6 @@ private class LiveDashboardApi(private val client: HttpClient) {
             val folders = listFolders(account)
             assertTrue(folders.any { it.id == folderA.id && it.name == folderA.name })
             assertTrue(folders.any { it.id == folderB.id && it.name == folderB.name })
-            val inbox = folders.requireRoleFolder("inbox")
-            val trash = folders.requireRoleFolder("trash")
 
             val emlSubject = "${environment.run.prefix} EML"
             val emlBody = "Exact EML body for ${environment.run.prefix}."
@@ -234,7 +232,15 @@ private class LiveDashboardApi(private val client: HttpClient) {
                 seed = RANDOM_SEED,
             ).messageIds.single()
 
-            val inboxMessages = listMessages(account, inbox.id)
+            val generatedMessageIds = setOf(emlId, textId, randomId)
+            val generatedFolderMessages = listFolderMessages(account)
+            val inbox = requireSingleFolderContainingMessageIds(
+                generatedFolderMessages,
+                generatedMessageIds,
+            )
+            val inboxMessages = generatedFolderMessages.single { (folder) ->
+                folder.id == inbox.id
+            }.second
             assertTrue(listOf(emlId, textId, randomId).all { generatedId ->
                 inboxMessages.any { it.id == generatedId }
             })
@@ -289,15 +295,28 @@ private class LiveDashboardApi(private val client: HttpClient) {
             val moved = listMessages(account, folderA.id).single { it.subject == randomSubject }
             mutate(account, moved.id, folderA.id, MessageAction.COPY, folderB.id)
             val copied = listMessages(account, folderB.id).single { it.subject == randomSubject }
-            mutate(account, copied.id, folderB.id, MessageAction.DELETE)
-            assertFalse(listMessages(account, folderB.id).any { it.id == copied.id })
-
+            assertEquals(folderB.id, copied.folderId)
             val stillMoved = listMessages(account, folderA.id).single { it.subject == randomSubject }
             mutate(account, stillMoved.id, folderA.id, MessageAction.TRASH)
             assertFalse(listMessages(account, folderA.id).any { it.id == stillMoved.id })
-            val trashed = listMessages(account, trash.id).single { it.subject == randomSubject }
-            mutate(account, trashed.id, trash.id, MessageAction.DELETE)
-            assertFalse(listMessages(account, trash.id).any { it.id == trashed.id })
+            val (trashFolder, trashed) = requireUniqueMessageBySubject(
+                listFolderMessages(account),
+                randomSubject,
+                excludedFolderIds = setOf(folderB.id),
+            )
+            mutate(account, trashed.id, trashFolder.id, MessageAction.DELETE)
+            val copiedAfterPermanentDelete = listFolderMessages(account).flatMap { (folder, messages) ->
+                messages.filter { it.subject == randomSubject }.map { folder to it }
+            }
+            assertTrue(copiedAfterPermanentDelete.all { (folder) -> folder.id == folderB.id })
+            copiedAfterPermanentDelete.forEach { (folder, message) ->
+                mutate(account, message.id, folder.id, MessageAction.DELETE)
+            }
+            assertTrue(
+                listFolderMessages(account).all { (_, messages) ->
+                    messages.none { it.subject == randomSubject }
+                },
+            )
 
             generatedFolders.values.toList().asReversed().forEach { folder ->
                 deleteFolder(environment, account, folder)
@@ -510,6 +529,12 @@ private class LiveDashboardApi(private val client: HttpClient) {
             ),
         ).decode<MessageListResponse>(HttpStatusCode.OK).messages
 
+    private suspend fun listFolderMessages(
+        account: AccountInfo,
+    ): List<Pair<FolderInfo, List<MessageSummary>>> = listFolders(account).map { folder ->
+        folder to listMessages(account, folder.id)
+    }
+
     private suspend fun readMessage(
         account: AccountInfo,
         messageId: String,
@@ -597,12 +622,27 @@ private fun AccountInfo.primaryProtocol(): AuthenticationProtocol = when (provid
     Provider.STALWART -> AuthenticationProtocol.JMAP
 }
 
-private fun List<FolderInfo>.requireRoleFolder(role: String): FolderInfo =
-    firstOrNull { folder ->
-        folder.name.equals(role, ignoreCase = true) ||
-            folder.id.equals(role, ignoreCase = true) ||
-            folder.id.endsWith(".$role", ignoreCase = true)
-    } ?: error("Account has no $role folder")
+internal fun requireSingleFolderContainingMessageIds(
+    folderMessages: List<Pair<FolderInfo, List<MessageSummary>>>,
+    expectedMessageIds: Set<String>,
+): FolderInfo {
+    require(expectedMessageIds.isNotEmpty()) { "Generated message IDs are absent" }
+    return folderMessages.single { (_, messages) ->
+        messages.mapTo(hashSetOf(), MessageSummary::id).containsAll(expectedMessageIds)
+    }.first
+}
+
+internal fun requireUniqueMessageBySubject(
+    folderMessages: List<Pair<FolderInfo, List<MessageSummary>>>,
+    subject: String,
+    excludedFolderIds: Set<String> = emptySet(),
+): Pair<FolderInfo, MessageSummary> = folderMessages
+    .asSequence()
+    .filterNot { (folder) -> folder.id in excludedFolderIds }
+    .flatMap { (folder, messages) ->
+        messages.asSequence().filter { it.subject == subject }.map { folder to it }
+    }
+    .single()
 
 private fun AccountInfo.sameIdentity(other: AccountInfo): Boolean =
     provider == other.provider &&
