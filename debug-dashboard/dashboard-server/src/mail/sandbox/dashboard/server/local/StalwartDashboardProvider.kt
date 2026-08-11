@@ -1,12 +1,12 @@
 package mail.sandbox.dashboard.server.local
 
 import java.net.URI
-import java.nio.file.Path
 import kotlinx.coroutines.delay
 import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
 import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
@@ -23,44 +23,81 @@ import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.server.api.DashboardNotFoundException
 import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
-import mail.sandbox.dashboard.server.gate.stalwart.StalwartGateSecretFiles
+import mail.sandbox.dashboard.server.gate.stalwart.GateHttpTransport
+import mail.sandbox.dashboard.server.gate.stalwart.KtorGateHttpTransport
+import mail.sandbox.dashboard.server.provider.AccountCredentials
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationEndpoint
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationMechanism
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProbe
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationRequest
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartAccountCredentialCatalog
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartAccountLogin
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartCreateAccount
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartManagementCredentialProvider
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAdapter
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductGateway
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAccount
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductProtocol
 
+internal fun interface StalwartSmtpAuthenticationProbe {
+    fun probe(address: String, password: String): AuthenticationOutcome
+}
+
+private class DefaultStalwartSmtpAuthenticationProbe(
+    private val delegate: ProviderAuthenticationProbe = ProviderAuthenticationProbe(),
+) : StalwartSmtpAuthenticationProbe {
+    override fun probe(address: String, password: String): AuthenticationOutcome = delegate.probe(
+        ProviderAuthenticationRequest(
+            protocol = ProviderAuthenticationProtocol.SMTP,
+            mechanism = ProviderAuthenticationMechanism.PASSWORD,
+            credentials = AccountCredentials(address, password),
+            endpointOverride = ProviderAuthenticationEndpoint(
+                host = "127.0.0.1",
+                port = 8587,
+                startTls = true,
+            ),
+        ),
+    )
+}
+
 internal class StalwartDashboardProvider(
-    private val adapter: StalwartProductAdapter,
+    private val adapter: StalwartProductGateway,
     private val catalog: LocalAccountCatalog,
     private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.STALWART),
+    private val smtpAuthenticationProbe: StalwartSmtpAuthenticationProbe =
+        DefaultStalwartSmtpAuthenticationProbe(),
 ) : LocalProviderOperations, AutoCloseable {
     override val provider: Provider = Provider.STALWART
 
     override fun providerStatus(): ProviderStatus = ProviderStatus(
         provider = provider,
-        availability = ProviderAvailability.DEGRADED,
-        message = TEMPORARY_UNAVAILABLE_MESSAGE,
+        availability = ProviderAvailability.READY,
     )
 
     override suspend fun listAccounts(): List<AccountInfo> {
         val accounts = adapter.listAccounts()
         return accounts.map { account ->
-            AccountInfo(
-                address = account.address,
-                provider = provider,
-                protocols = account.enabledProtocols.mapNotNull {
-                    when (it) {
-                        StalwartProductProtocol.JMAP -> MailProtocol.JMAP
-                        StalwartProductProtocol.SMTP -> MailProtocol.SMTP
-                        StalwartProductProtocol.IMAP -> null
-                    }
-                }.sortedBy(MailProtocol::ordinal),
-                credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
-                providerAccountId = account.id,
-                readinessMessage = TEMPORARY_UNAVAILABLE_MESSAGE,
-            )
+            val password = catalog.findByProviderAccountId(provider, account.id)?.password
+            if (password == null) {
+                accountInfo(account, CredentialReadiness.PASSWORD_REQUIRED)
+            } else {
+                val outcome = adapter.probeOrdinaryLogin(
+                    account.id,
+                    account.address,
+                    password,
+                )
+                val info = accountInfo(
+                    account = account,
+                    readiness = outcome.readiness(),
+                    readinessMessage = safeDiagnostic(outcome.diagnostic, password),
+                )
+                if (outcome is AuthenticationOutcome.Authenticated) {
+                    catalog.rememberVerifiedPassword(info, password)
+                }
+                info
+            }
         }
     }
 
@@ -82,28 +119,26 @@ internal class StalwartDashboardProvider(
                 enabledProtocols = protocols,
             ),
         )
+        val liveProtocols = account.protocols()
         catalog.put(
             candidate.copy(
                 address = account.address,
                 password = null,
-                protocols = account.enabledProtocols.mapNotNull { protocol ->
-                    when (protocol) {
-                        StalwartProductProtocol.JMAP -> MailProtocol.JMAP
-                        StalwartProductProtocol.SMTP -> MailProtocol.SMTP
-                        StalwartProductProtocol.IMAP -> null
-                    }
-                }.sortedBy(MailProtocol::ordinal),
+                protocols = liveProtocols,
                 providerAccountId = account.id,
             ),
         )
-        return AccountInfo(
-            address = account.address,
-            provider = provider,
-            protocols = candidate.protocols,
-            credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
-            providerAccountId = account.id,
-            readinessMessage = TEMPORARY_UNAVAILABLE_MESSAGE,
+        val password = requireNotNull(candidate.password)
+        val outcome = adapter.probeOrdinaryLogin(account.id, account.address, password)
+        val info = accountInfo(
+            account = account,
+            readiness = outcome.readiness(),
+            readinessMessage = safeDiagnostic(outcome.diagnostic, password),
         )
+        if (outcome is AuthenticationOutcome.Authenticated) {
+            catalog.rememberVerifiedPassword(info, password)
+        }
+        return info
     }
 
     override suspend fun dashboardLogAccount(
@@ -116,8 +151,8 @@ internal class StalwartDashboardProvider(
 
     override suspend fun deleteAccount(address: String, providerAccountId: String?) {
         val account = account(address, providerAccountId)
-        adapter.deleteAccount(account.first)
-        catalog.removeByProviderAccountId(provider, account.first)
+        adapter.deleteAccount(account.id)
+        catalog.removeByProviderAccountId(provider, account.id)
     }
 
     override suspend fun adoptPassword(
@@ -126,7 +161,25 @@ internal class StalwartDashboardProvider(
         providerAccountId: String?,
     ): CredentialUpdateResponse {
         val account = account(address, providerAccountId)
-        return unavailableCredentialUpdate(account.second, "verify")
+        val outcome = adapter.probeOrdinaryLogin(
+            account.id,
+            account.address,
+            request.password,
+        )
+        val successful = outcome is AuthenticationOutcome.Authenticated
+        if (successful) {
+            catalog.rememberVerifiedPassword(
+                accountInfo(account, CredentialReadiness.READY),
+                request.password,
+            )
+        }
+        return credentialUpdate(
+            account = account,
+            outcome = outcome,
+            successMessage = "Stalwart password verified through ordinary JMAP authentication",
+            failurePrefix = "Stalwart password verification failed",
+            secret = request.password,
+        )
     }
 
     override suspend fun changePassword(
@@ -135,22 +188,67 @@ internal class StalwartDashboardProvider(
         providerAccountId: String?,
     ): CredentialUpdateResponse {
         val account = account(address, providerAccountId)
-        return unavailableCredentialUpdate(account.second, "change")
+        adapter.changePassword(account.id, newPassword)
+        catalog.forgetPassword(accountInfo(account, CredentialReadiness.PASSWORD_REQUIRED))
+        val outcome = adapter.probeOrdinaryLogin(account.id, account.address, newPassword)
+        val successful = outcome is AuthenticationOutcome.Authenticated
+        if (successful) {
+            catalog.rememberVerifiedPassword(
+                accountInfo(account, CredentialReadiness.READY),
+                newPassword,
+            )
+        }
+        return credentialUpdate(
+            account = account,
+            outcome = outcome,
+            successMessage =
+                "Password changed on Stalwart and ordinary JMAP authentication succeeded",
+            failurePrefix = "Stalwart changed the password but post-change authentication failed",
+            secret = newPassword,
+        )
     }
 
     override suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
     ): LocalAuthenticationProbeResult {
+        require(request.provider == provider) {
+            "Authentication provider does not match Stalwart"
+        }
         val account = account(request.address, request.providerAccountId)
+        val password = request.credentialOverride
+            ?: catalog.findByProviderAccountId(provider, account.id)?.password
+        val outcome = if (password == null) {
+            AuthenticationOutcome.MissingCredentials("Credentials are required")
+        } else {
+            when (request.protocol) {
+                AuthenticationProtocol.JMAP -> adapter.probeOrdinaryLogin(
+                    account.id,
+                    account.address,
+                    password,
+                )
+                AuthenticationProtocol.SMTP -> smtpAuthenticationProbe.probe(
+                    account.address,
+                    password,
+                )
+                AuthenticationProtocol.IMAP,
+                AuthenticationProtocol.POP3,
+                AuthenticationProtocol.OAUTH_IMAP,
+                AuthenticationProtocol.OAUTH_SMTP,
+                -> throw IllegalArgumentException(
+                    "Stalwart supports JMAP and SMTP password probes in this dashboard stack",
+                )
+            }
+        }
         return LocalAuthenticationProbeResult(
             response = AuthenticationProbeResponse(
-                address = account.second,
+                address = account.address,
                 provider = provider,
                 protocol = request.protocol,
-                success = false,
-                providerResponse = TEMPORARY_UNAVAILABLE_MESSAGE,
+                success = outcome is AuthenticationOutcome.Authenticated,
+                providerResponse = safeDiagnostic(outcome.diagnostic, password),
                 correlatedLogs = emptyList(),
             ),
+            secretsToRedact = listOfNotNull(password).filter(String::isNotEmpty),
         )
     }
 
@@ -158,7 +256,7 @@ internal class StalwartDashboardProvider(
         address: String,
         providerAccountId: String?,
     ): List<FolderInfo> {
-        val accountId = account(address, providerAccountId).first
+        val accountId = mailAccount(address, providerAccountId).id
         return adapter.listFolders(accountId).map { folder ->
             FolderInfo(
                 id = folder.id,
@@ -174,7 +272,7 @@ internal class StalwartDashboardProvider(
         name: String,
         providerAccountId: String?,
     ): FolderInfo {
-        val folder = adapter.createFolder(account(address, providerAccountId).first, name)
+        val folder = adapter.createFolder(mailAccount(address, providerAccountId).id, name)
         return FolderInfo(folder.id, folder.name, 0, 0)
     }
 
@@ -183,7 +281,7 @@ internal class StalwartDashboardProvider(
         folderId: String,
         providerAccountId: String?,
     ) {
-        adapter.deleteFolder(account(address, providerAccountId).first, folderId)
+        adapter.deleteFolder(mailAccount(address, providerAccountId).id, folderId)
     }
 
     override suspend fun listMessages(
@@ -191,7 +289,7 @@ internal class StalwartDashboardProvider(
         folderId: String?,
         providerAccountId: String?,
     ): List<MessageSummary> {
-        val accountId = account(address, providerAccountId).first
+        val accountId = mailAccount(address, providerAccountId).id
         return adapter.listMessages(accountId, folderId).map { message ->
             MessageSummary(
                 id = message.id,
@@ -213,7 +311,7 @@ internal class StalwartDashboardProvider(
         providerAccountId: String?,
     ): MessageDetail {
         val message = adapter.readMessage(
-            account(address, providerAccountId).first,
+            mailAccount(address, providerAccountId).id,
             messageId,
         )
         return MessageDetail(
@@ -235,7 +333,7 @@ internal class StalwartDashboardProvider(
         address: String,
         request: MutateMessagesRequest,
     ): OperationResponse {
-        val accountId = account(address, request.providerAccountId).first
+        val accountId = mailAccount(address, request.providerAccountId).id
         val expectedState = request.singleMutationState()
         when (request.action) {
             MessageAction.MARK_READ -> adapter.setSeen(
@@ -301,7 +399,7 @@ internal class StalwartDashboardProvider(
         request: GenerateMessageRequest,
         messages: List<GeneratedMessage>,
     ): List<String> {
-        val accountId = account(request.targetAccount, request.providerAccountId).first
+        val accountId = mailAccount(request.targetAccount, request.providerAccountId).id
         val mailboxId = request.folderId ?: adapter.listFolders(accountId)
             .firstOrNull { it.role == "inbox" }
             ?.id
@@ -316,7 +414,7 @@ internal class StalwartDashboardProvider(
         messages: List<GeneratedMessage>,
     ): List<String> {
         require(request.folderId == null) { "SMTP delivery always targets the Inbox" }
-        val (accountId, canonicalAddress) = account(
+        val (accountId, canonicalAddress) = mailAccount(
             request.targetAccount,
             request.providerAccountId,
         )
@@ -372,7 +470,7 @@ internal class StalwartDashboardProvider(
     private suspend fun account(
         address: String,
         expectedProviderAccountId: String?,
-    ): Pair<String, String> {
+    ): StalwartProductAccount {
         val expectedId = expectedProviderAccountId
             ?: throw DashboardNotFoundException(
                 "Stalwart provider Account ID is required; refresh the account list",
@@ -383,7 +481,90 @@ internal class StalwartDashboardProvider(
         } ?: throw DashboardNotFoundException(
             "Stalwart Account identity changed; refresh the account list",
         )
-        return account.id to account.address
+        return account
+    }
+
+    private suspend fun mailAccount(
+        address: String,
+        expectedProviderAccountId: String?,
+    ): StalwartProductAccount {
+        val expectedId = expectedProviderAccountId
+            ?: throw DashboardNotFoundException(
+                "Stalwart provider Account ID is required; refresh the account list",
+            )
+        val login = catalog.findByProviderAccountId(provider, expectedId)
+        if (login?.password == null) {
+            throw IllegalStateException(
+                "A verified password is required for Stalwart mail operations",
+            )
+        }
+        return account(address, expectedId)
+    }
+
+    private fun accountInfo(
+        account: StalwartProductAccount,
+        readiness: CredentialReadiness,
+        readinessMessage: String? = null,
+    ): AccountInfo = AccountInfo(
+        address = account.address,
+        provider = provider,
+        protocols = account.protocols(),
+        credentialReadiness = readiness,
+        providerAccountId = account.id,
+        readinessMessage = readinessMessage,
+    )
+
+    private fun StalwartProductAccount.protocols(): List<MailProtocol> =
+        enabledProtocols.mapNotNull { protocol ->
+            when (protocol) {
+                StalwartProductProtocol.JMAP -> MailProtocol.JMAP
+                StalwartProductProtocol.SMTP -> MailProtocol.SMTP
+                StalwartProductProtocol.IMAP -> null
+            }
+        }.sortedBy(MailProtocol::ordinal)
+
+    private fun AuthenticationOutcome.readiness(): CredentialReadiness = when (this) {
+        is AuthenticationOutcome.Authenticated -> CredentialReadiness.READY
+        is AuthenticationOutcome.MissingCredentials -> CredentialReadiness.PASSWORD_REQUIRED
+        is AuthenticationOutcome.WrongPassword,
+        is AuthenticationOutcome.MissingAccount,
+        -> CredentialReadiness.AUTHENTICATION_FAILED
+        is AuthenticationOutcome.Unavailable,
+        is AuthenticationOutcome.TimedOut,
+        -> CredentialReadiness.PROVIDER_UNAVAILABLE
+    }
+
+    private fun credentialUpdate(
+        account: StalwartProductAccount,
+        outcome: AuthenticationOutcome,
+        successMessage: String,
+        failurePrefix: String,
+        secret: String,
+    ): CredentialUpdateResponse {
+        val successful = outcome is AuthenticationOutcome.Authenticated
+        val diagnostic = safeDiagnostic(outcome.diagnostic, secret)
+        return CredentialUpdateResponse(
+            address = account.address,
+            provider = provider,
+            readiness = outcome.readiness(),
+            operation = OperationResponse(
+                success = successful,
+                message = if (successful) successMessage else "$failurePrefix: $diagnostic",
+            ),
+        )
+    }
+
+    private fun safeDiagnostic(value: String, secret: String?): String {
+        val redacted = secret
+            ?.takeIf(String::isNotEmpty)
+            ?.let { value.replace(it, "[redacted]") }
+            ?: value
+        return redacted
+            .map { character -> if (character.isISOControl()) ' ' else character }
+            .joinToString("")
+            .trim()
+            .take(MAXIMUM_DIAGNOSTIC_CHARACTERS)
+            .ifEmpty { "Stalwart authentication failed" }
     }
 
     private fun productProtocols(protocols: List<MailProtocol>): Set<StalwartProductProtocol> {
@@ -404,22 +585,8 @@ internal class StalwartDashboardProvider(
         val ALLOWED_PROTOCOLS = DEFAULT_PROTOCOLS.toSet()
         const val MESSAGE_ARRIVAL_ATTEMPTS = 40
         const val MESSAGE_ARRIVAL_DELAY_MILLIS = 100L
-        const val TEMPORARY_UNAVAILABLE_MESSAGE =
-            "Stalwart ordinary authentication is unavailable until the normal provider adapter is active"
+        const val MAXIMUM_DIAGNOSTIC_CHARACTERS = 512
     }
-
-    private fun unavailableCredentialUpdate(
-        address: String,
-        action: String,
-    ): CredentialUpdateResponse = CredentialUpdateResponse(
-        address = address,
-        provider = provider,
-        readiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
-        operation = OperationResponse(
-            success = false,
-            message = "Stalwart password $action is unavailable: $TEMPORARY_UNAVAILABLE_MESSAGE",
-        ),
-    )
 }
 
 internal class LocalStalwartCredentialCatalog(
@@ -450,45 +617,28 @@ internal class LocalStalwartCredentialCatalog(
     }
 }
 
-internal class GateFixtureManagementCredentialProvider(
-    private val dashboardRoot: Path,
-    private val fixtureSecrets: Path,
-) : StalwartManagementCredentialProvider {
-    override fun openCredential(): GateCredential =
-        readFixtureSecrets().use { secrets ->
-            GateCredential.bearer(secrets.managementApiKey)
-        }
-
-    private fun readFixtureSecrets() = StalwartGateSecretFiles.readFixtureSecrets(
-        projectRoot = dashboardRoot,
-        environment = mapOf(
-            "STALWART_GATE_FIXTURE_SECRETS_FILE" to fixtureSecrets.toString(),
-        ),
+internal object LocalStalwartManagementCredentialProvider :
+    StalwartManagementCredentialProvider {
+    override fun openCredential(): GateCredential = GateCredential.basic(
+        MANAGEMENT_ADDRESS,
+        MANAGEMENT_PASSWORD.toCharArray(),
     )
+
+    private const val MANAGEMENT_ADDRESS = "dashboard-management@local.test"
+    private const val MANAGEMENT_PASSWORD = "secret"
 }
 
 internal fun createStalwartDashboardProvider(
-    repositoryRoot: Path,
     catalog: LocalAccountCatalog,
-    environment: Map<String, String> = System.getenv(),
+    transport: GateHttpTransport = KtorGateHttpTransport(),
 ): StalwartDashboardProvider {
-    val dashboardRoot = repositoryRoot.resolve("debug-dashboard").toAbsolutePath().normalize()
-    val fixtureSecrets = Path.of(
-        environment["DASHBOARD_STALWART_FIXTURE_SECRETS"]
-            ?: dashboardRoot.resolve(".runtime/stalwart-gate0b/fixture-secrets").toString(),
-    ).toAbsolutePath().normalize()
-    val baseUri = URI(
-        environment["DASHBOARD_STALWART_BASE_URL"] ?: "http://127.0.0.1:18443",
-    )
     val credentials = LocalStalwartCredentialCatalog(catalog)
     return StalwartDashboardProvider(
         adapter = StalwartProductAdapter(
-            baseUri = baseUri,
-            managementCredentialProvider = GateFixtureManagementCredentialProvider(
-                dashboardRoot,
-                fixtureSecrets,
-            ),
+            baseUri = URI("http://127.0.0.1:8443"),
+            managementCredentialProvider = LocalStalwartManagementCredentialProvider,
             accountCredentialCatalog = credentials,
+            transport = transport,
         ),
         catalog = catalog,
     )

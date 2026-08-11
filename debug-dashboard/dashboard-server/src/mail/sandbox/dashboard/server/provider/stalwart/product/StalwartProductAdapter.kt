@@ -2,6 +2,7 @@ package mail.sandbox.dashboard.server.provider.stalwart.product
 
 import java.net.URI
 import java.time.Instant
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -18,12 +19,107 @@ import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpTransport
 import mail.sandbox.dashboard.server.gate.stalwart.GateJmapCapability
 import mail.sandbox.dashboard.server.gate.stalwart.GateJmapClient
+import mail.sandbox.dashboard.server.gate.stalwart.GateJmapException
+import mail.sandbox.dashboard.server.gate.stalwart.GateJmapFailure
 import mail.sandbox.dashboard.server.gate.stalwart.KtorGateHttpTransport
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
 
 private data class FetchedEmails(
     val state: String,
     val emails: List<JsonObject>,
 )
+
+private fun safeAuthenticationDiagnostic(message: String?, secret: String): String = message
+    .orEmpty()
+    .replace(secret, "[redacted]")
+    .map { character -> if (character.isISOControl()) ' ' else character }
+    .joinToString("")
+    .trim()
+    .take(512)
+    .ifEmpty { "Stalwart JMAP authentication failed" }
+
+internal interface StalwartProductGateway : AutoCloseable {
+    suspend fun listAccounts(): List<StalwartProductAccount>
+
+    suspend fun createAccount(request: StalwartCreateAccount): StalwartProductAccount
+
+    suspend fun probeOrdinaryLogin(
+        accountId: String,
+        address: String,
+        password: String,
+    ): AuthenticationOutcome
+
+    suspend fun changePassword(accountId: String, newPassword: String)
+
+    suspend fun deleteAccount(accountId: String)
+
+    suspend fun listFolders(accountId: String): List<StalwartProductFolder>
+
+    suspend fun createFolder(
+        accountId: String,
+        name: String,
+        parentId: String? = null,
+    ): StalwartProductFolder
+
+    suspend fun deleteFolder(accountId: String, folderId: String)
+
+    suspend fun listMessages(
+        accountId: String,
+        mailboxId: String? = null,
+        limit: Int = 100,
+    ): List<StalwartProductMessageSummary>
+
+    suspend fun readMessage(accountId: String, emailId: String): StalwartProductMessage
+
+    suspend fun importEml(
+        accountId: String,
+        mailboxId: String,
+        rawEml: String,
+        receivedAt: Instant = Instant.now(),
+    ): StalwartImportedEmail
+
+    suspend fun setSeen(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        seen: Boolean,
+    )
+
+    suspend fun setFlagged(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        flagged: Boolean,
+    )
+
+    suspend fun moveMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        sourceMailboxId: String,
+        targetMailboxId: String,
+    )
+
+    suspend fun copyMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        targetMailboxId: String,
+    ): List<String>
+
+    suspend fun trashMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        sourceMailboxId: String,
+    )
+
+    suspend fun deleteMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+    )
+}
 
 /**
  * Local developer-tool adapter for the Stalwart v0.16 JMAP and registry APIs.
@@ -34,7 +130,7 @@ internal class StalwartProductAdapter(
     private val managementCredentialProvider: StalwartManagementCredentialProvider,
     private val accountCredentialCatalog: StalwartAccountCredentialCatalog,
     private val transport: GateHttpTransport,
-) : AutoCloseable {
+) : StalwartProductGateway {
     constructor(
         baseUri: URI,
         managementCredentialProvider: StalwartManagementCredentialProvider,
@@ -46,7 +142,7 @@ internal class StalwartProductAdapter(
         transport = KtorGateHttpTransport(),
     )
 
-    suspend fun listAccounts(): List<StalwartProductAccount> =
+    override suspend fun listAccounts(): List<StalwartProductAccount> =
         withManagementClient { client, managementAccountId ->
             val accounts = registryObjects(
                 client = client,
@@ -80,7 +176,7 @@ internal class StalwartProductAdapter(
             }.sortedBy(StalwartProductAccount::address)
         }
 
-    suspend fun createAccount(request: StalwartCreateAccount): StalwartProductAccount {
+    override suspend fun createAccount(request: StalwartCreateAccount): StalwartProductAccount {
         val address = parseAddress(request.address)
         requirePassword(request.password, "Account password")
         require(request.enabledProtocols.isNotEmpty()) {
@@ -138,14 +234,61 @@ internal class StalwartProductAdapter(
         )
     }
 
-    suspend fun changePassword(accountId: String, newPassword: String) {
+    override suspend fun probeOrdinaryLogin(
+        accountId: String,
+        address: String,
+        password: String,
+    ): AuthenticationOutcome {
         require(accountId.isNotBlank()) { "Account ID is absent" }
-        requirePassword(newPassword, "New password")
-        if (accountCredentialCatalog.find(accountId) == null) {
-            throw StalwartProductException(
-                "No local credential is registered for the Stalwart Account",
+        parseAddress(address)
+        requirePassword(password, "Account password")
+        val credential = GateCredential.basic(address, password.toCharArray())
+        return try {
+            GateJmapClient(baseUri, credential, transport).use { client ->
+                val session = client.discoverSession()
+                if (
+                    session.primaryAccountId != accountId ||
+                    !session.username.orEmpty().equals(address, ignoreCase = true)
+                ) {
+                    AuthenticationOutcome.MissingAccount(
+                        "JMAP Session resolved another ordinary Account",
+                    )
+                } else {
+                    AuthenticationOutcome.Authenticated("JMAP authentication succeeded")
+                }
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: GateJmapException) {
+            when (val kind = failure.kind) {
+                is GateJmapFailure.HttpStatus -> when (kind.status) {
+                    401, 403 -> AuthenticationOutcome.WrongPassword(
+                        "JMAP authentication rejected ordinary credentials",
+                    )
+                    404 -> AuthenticationOutcome.MissingAccount(
+                        "JMAP ordinary Account was not found",
+                    )
+                    else -> AuthenticationOutcome.Unavailable(
+                        safeAuthenticationDiagnostic(failure.message, password),
+                    )
+                }
+                GateJmapFailure.Transport,
+                GateJmapFailure.InvalidResponse,
+                is GateJmapFailure.MethodError,
+                -> AuthenticationOutcome.Unavailable(
+                    safeAuthenticationDiagnostic(failure.message, password),
+                )
+            }
+        } catch (failure: Exception) {
+            AuthenticationOutcome.Unavailable(
+                safeAuthenticationDiagnostic(failure.message, password),
             )
         }
+    }
+
+    override suspend fun changePassword(accountId: String, newPassword: String) {
+        require(accountId.isNotBlank()) { "Account ID is absent" }
+        requirePassword(newPassword, "New password")
         withManagementClient { client, managementAccountId ->
             val account = registryGetObjects(
                 client = client,
@@ -180,7 +323,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun deleteAccount(accountId: String) {
+    override suspend fun deleteAccount(accountId: String) {
         require(accountId.isNotBlank()) { "Account ID is absent" }
         withManagementClient { client, managementAccountId ->
             val response = client.registryDestroy(
@@ -198,7 +341,7 @@ internal class StalwartProductAdapter(
         accountCredentialCatalog.remove(accountId)
     }
 
-    suspend fun listFolders(accountId: String): List<StalwartProductFolder> =
+    override suspend fun listFolders(accountId: String): List<StalwartProductFolder> =
         withAccountClient(accountId) { client ->
             val payload = callPayload(
                 client = client,
@@ -233,10 +376,10 @@ internal class StalwartProductAdapter(
             }.sortedWith(compareBy({ it.role != "inbox" }, StalwartProductFolder::name))
         }
 
-    suspend fun createFolder(
+    override suspend fun createFolder(
         accountId: String,
         name: String,
-        parentId: String? = null,
+        parentId: String?,
     ): StalwartProductFolder {
         require(name.isNotBlank()) { "Mailbox name is absent" }
         val id = withAccountClient(accountId) { client ->
@@ -269,7 +412,7 @@ internal class StalwartProductAdapter(
         return StalwartProductFolder(id, name, null, parentId, 0, 0)
     }
 
-    suspend fun deleteFolder(accountId: String, folderId: String) {
+    override suspend fun deleteFolder(accountId: String, folderId: String) {
         withAccountClient(accountId) { client ->
             val response = client.call(
                 methodName = "Mailbox/set",
@@ -283,10 +426,10 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun listMessages(
+    override suspend fun listMessages(
         accountId: String,
-        mailboxId: String? = null,
-        limit: Int = 100,
+        mailboxId: String?,
+        limit: Int,
     ): List<StalwartProductMessageSummary> {
         require(limit in 1..100) { "Message list limit must be between 1 and 100" }
         return withAccountClient(accountId) { client ->
@@ -353,7 +496,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun readMessage(
+    override suspend fun readMessage(
         accountId: String,
         emailId: String,
     ): StalwartProductMessage = withAccountClient(accountId) { client ->
@@ -374,11 +517,11 @@ internal class StalwartProductAdapter(
         )
     }
 
-    suspend fun importEml(
+    override suspend fun importEml(
         accountId: String,
         mailboxId: String,
         rawEml: String,
-        receivedAt: Instant = Instant.now(),
+        receivedAt: Instant,
     ): StalwartImportedEmail {
         require(rawEml.isNotBlank()) { "Raw EML is absent" }
         return withAccountClient(accountId) { client ->
@@ -443,7 +586,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun setSeen(
+    override suspend fun setSeen(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,
@@ -454,7 +597,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun setFlagged(
+    override suspend fun setFlagged(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,
@@ -465,7 +608,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun moveMessages(
+    override suspend fun moveMessages(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,
@@ -478,7 +621,7 @@ internal class StalwartProductAdapter(
         }
     }
 
-    suspend fun copyMessages(
+    override suspend fun copyMessages(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,
@@ -490,7 +633,7 @@ internal class StalwartProductAdapter(
         return emailIds
     }
 
-    suspend fun trashMessages(
+    override suspend fun trashMessages(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,
@@ -501,7 +644,7 @@ internal class StalwartProductAdapter(
         moveMessages(accountId, emailIds, expectedState, sourceMailboxId, trash.id)
     }
 
-    suspend fun deleteMessages(
+    override suspend fun deleteMessages(
         accountId: String,
         emailIds: List<String>,
         expectedState: String,

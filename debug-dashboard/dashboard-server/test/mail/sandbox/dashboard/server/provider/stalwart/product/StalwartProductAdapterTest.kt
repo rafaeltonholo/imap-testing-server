@@ -2,7 +2,10 @@ package mail.sandbox.dashboard.server.provider.stalwart.product
 
 import java.net.URI
 import java.time.Instant
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -18,6 +21,7 @@ import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpRequest
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpResponse
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpTransport
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -26,6 +30,84 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class StalwartProductAdapterTest {
+    @Test
+    fun ordinaryLoginProbeAuthenticatesTheExactAccountWithoutPersistingThePassword() =
+        runBlocking {
+            val transport = RecordingTransport()
+            val catalog = InMemoryStalwartAccountCredentialCatalog()
+            val adapter = adapter(transport, catalog)
+
+            val outcome = adapter.probeOrdinaryLogin(
+                accountId = "account-one",
+                address = "dev@local.test",
+                password = "ordinary-password",
+            )
+
+            assertTrue(outcome is AuthenticationOutcome.Authenticated)
+            assertEquals(
+                listOf("dev@local.test" to "ordinary-password"),
+                transport.sessionCredentials,
+            )
+            assertNull(catalog.find("account-one"))
+            transport.assertExhausted()
+        }
+
+    @Test
+    fun ordinaryLoginProbeReportsRejectedCredentialsWithoutLeakingOrPersistingThem() =
+        runBlocking {
+            val transport = RejectingSessionTransport(
+                status = 401,
+                responseBody = "ordinary-password must never be echoed",
+            )
+            val catalog = InMemoryStalwartAccountCredentialCatalog()
+            val adapter = adapter(transport, catalog)
+
+            val outcome = adapter.probeOrdinaryLogin(
+                accountId = "account-one",
+                address = "dev@local.test",
+                password = "ordinary-password",
+            )
+
+            assertTrue(outcome is AuthenticationOutcome.WrongPassword)
+            assertTrue("ordinary-password" !in outcome.diagnostic)
+            assertTrue(outcome.diagnostic.length <= 512)
+            assertNull(catalog.find("account-one"))
+            assertEquals(1, transport.calls)
+        }
+
+    @Test
+    fun ordinaryLoginProbeRejectsAnotherPrimaryAccount() = runBlocking {
+        val transport = RecordingTransport()
+        val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())
+
+        val outcome = adapter.probeOrdinaryLogin(
+            accountId = "different-account",
+            address = "dev@local.test",
+            password = "ordinary-password",
+        )
+
+        assertTrue(outcome is AuthenticationOutcome.MissingAccount)
+        assertTrue("ordinary-password" !in outcome.diagnostic)
+        transport.assertExhausted()
+    }
+
+    @Test
+    fun ordinaryLoginProbePropagatesParentTimeoutCancellation() = runBlocking {
+        val transport = GateHttpTransport { awaitCancellation() }
+        val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())
+
+        assertFailsWith<TimeoutCancellationException> {
+            withTimeout(25) {
+                adapter.probeOrdinaryLogin(
+                    accountId = "account-one",
+                    address = "dev@local.test",
+                    password = "ordinary-password",
+                )
+            }
+        }
+        Unit
+    }
+
     @Test
     fun defaultConstructorOwnsTheKtorTransportWithoutOpeningANetworkSession() {
         StalwartProductAdapter(
@@ -196,7 +278,7 @@ class StalwartProductAdapterTest {
         }
 
     @Test
-    fun changePasswordPatchesProviderWithoutRememberingBeforeOrdinaryAuthentication() =
+    fun changePasswordPatchesProviderWithoutRequiringOrRememberingACachedPassword() =
         runBlocking {
         val transport = RecordingTransport(
             expectedCall(
@@ -222,20 +304,12 @@ class StalwartProductAdapterTest {
                 )
             },
         )
-        val catalog = InMemoryStalwartAccountCredentialCatalog().also {
-            it.save(
-                StalwartAccountLogin(
-                    accountId = "account-one",
-                    address = "dev@local.test",
-                    password = "old-password",
-                ),
-            )
-        }
+        val catalog = InMemoryStalwartAccountCredentialCatalog()
         val adapter = adapter(transport, catalog)
 
         adapter.changePassword("account-one", "new-password")
 
-        assertEquals("old-password", catalog.find("account-one")?.password)
+        assertNull(catalog.find("account-one"))
         transport.assertExhausted()
     }
 
@@ -728,7 +802,7 @@ class StalwartProductAdapterTest {
     }
 
     private fun adapter(
-        transport: RecordingTransport,
+        transport: GateHttpTransport,
         catalog: StalwartAccountCredentialCatalog,
     ): StalwartProductAdapter = StalwartProductAdapter(
         baseUri = BASE_URI,
@@ -749,10 +823,12 @@ class StalwartProductAdapterTest {
         vararg calls: ExpectedCall,
     ) : GateHttpTransport {
         private val remaining = ArrayDeque(calls.toList())
+        val sessionCredentials = mutableListOf<Pair<String, String>>()
 
         override suspend fun execute(request: GateHttpRequest): GateHttpResponse {
             if (request.method == "GET") {
                 val username = request.credential.basicUsername
+                sessionCredentials += decodeBasicCredential(request)
                 val accountId = if (username == "manager@local.test") {
                     "management-account"
                 } else {
@@ -809,9 +885,32 @@ class StalwartProductAdapterTest {
         }
     }
 
+    private class RejectingSessionTransport(
+        private val status: Int,
+        private val responseBody: String,
+    ) : GateHttpTransport {
+        var calls = 0
+            private set
+
+        override suspend fun execute(request: GateHttpRequest): GateHttpResponse {
+            calls += 1
+            return GateHttpResponse(
+                status = status,
+                effectiveUrl = request.url,
+                body = responseBody,
+            )
+        }
+    }
+
     private companion object {
         val BASE_URI: URI = URI("http://127.0.0.1:8443")
         val API_URI: URI = URI("http://127.0.0.1:8443/jmap/")
+
+        fun decodeBasicCredential(request: GateHttpRequest): Pair<String, String> {
+            val encoded = request.credential.authorizationHeader().removePrefix("Basic ")
+            val decoded = java.util.Base64.getDecoder().decode(encoded).decodeToString()
+            return decoded.substringBefore(':') to decoded.substringAfter(':')
+        }
 
         fun expectedCall(
             method: String,

@@ -43,13 +43,26 @@ internal data class ProviderAuthenticationEndpoint(
     val host: String,
     val port: Int,
     val startTls: Boolean,
-)
+) {
+    init {
+        require(host == "127.0.0.1" && port in 1..65_535) {
+            "Provider authentication endpoints must use a valid loopback port"
+        }
+    }
+}
 
 internal data class ProviderAuthenticationRequest(
     val protocol: ProviderAuthenticationProtocol,
     val mechanism: ProviderAuthenticationMechanism,
     val credentials: AccountCredentials,
-)
+    val endpointOverride: ProviderAuthenticationEndpoint? = null,
+) {
+    init {
+        require(endpointOverride == null || protocol == ProviderAuthenticationProtocol.SMTP) {
+            "Only SMTP authentication probes support a request-scoped endpoint"
+        }
+    }
+}
 
 internal data class ProviderAuthenticationAttempt(
     val protocol: ProviderAuthenticationProtocol,
@@ -153,7 +166,7 @@ internal class ProviderAuthenticationProbe(
         val attempt = ProviderAuthenticationAttempt(
             protocol = request.protocol,
             mechanism = request.mechanism,
-            endpoint = request.protocol.endpoint,
+            endpoint = request.endpointOverride ?: request.protocol.endpoint,
             address = credentials.address,
             secret = secret,
             authenticateOnly = request.protocol == ProviderAuthenticationProtocol.SMTP,

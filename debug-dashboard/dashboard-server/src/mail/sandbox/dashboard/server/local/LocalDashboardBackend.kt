@@ -496,7 +496,6 @@ internal class LocalDashboardBackend(
             repositoryRoot: Path = Path.of(System.getProperty("user.dir"))
                 .toAbsolutePath()
                 .normalize(),
-            environment: Map<String, String> = System.getenv(),
         ): LocalDashboardBackend {
             val catalog = LocalAccountCatalog.production(repositoryRoot)
             return LocalDashboardBackend(
@@ -506,9 +505,7 @@ internal class LocalDashboardBackend(
                         catalog = catalog,
                     ),
                     Provider.STALWART to createStalwartDashboardProvider(
-                        repositoryRoot = repositoryRoot,
                         catalog = catalog,
-                        environment = environment,
                     ),
                 ),
                 logSource = DockerComposeLogSource(repositoryRoot),

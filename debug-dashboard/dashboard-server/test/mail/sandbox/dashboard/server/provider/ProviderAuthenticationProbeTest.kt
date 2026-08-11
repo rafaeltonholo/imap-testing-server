@@ -160,6 +160,29 @@ class ProviderAuthenticationProbeTest {
     }
 
     @Test
+    fun requestScopedSmtpEndpointTargetsNormalStalwartSubmission() {
+        val connector = RecordingAuthenticationConnector()
+        val probe = ProviderAuthenticationProbe(connector)
+
+        val outcome = probe.probe(
+            ProviderAuthenticationRequest(
+                protocol = ProviderAuthenticationProtocol.SMTP,
+                mechanism = ProviderAuthenticationMechanism.PASSWORD,
+                credentials = AccountCredentials("alice@local.test", "password"),
+                endpointOverride = ProviderAuthenticationEndpoint(
+                    host = "127.0.0.1",
+                    port = 8587,
+                    startTls = true,
+                ),
+            ),
+        )
+
+        assertIs<AuthenticationOutcome.Authenticated>(outcome)
+        assertEquals(8587, connector.attempts.single().endpoint.port)
+        assertTrue(connector.attempts.single().authenticateOnly)
+    }
+
+    @Test
     fun missingAndProviderFailuresAreTypedAndDiagnosticsAreBounded() {
         val connector = RecordingAuthenticationConnector()
         val probe = ProviderAuthenticationProbe(connector)

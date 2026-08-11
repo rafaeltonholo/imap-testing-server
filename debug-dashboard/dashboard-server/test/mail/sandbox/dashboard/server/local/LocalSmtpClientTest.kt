@@ -135,7 +135,7 @@ class LocalSmtpClientTest {
             assertEquals("2.0.0 Message accepted for delivery", result.acceptanceText)
             assertNull(result.queueId)
             assertEquals("127.0.0.1", server.connectionRequest?.host)
-            assertEquals(18587, server.connectionRequest?.port)
+            assertEquals(8587, server.connectionRequest?.port)
         }
     }
 

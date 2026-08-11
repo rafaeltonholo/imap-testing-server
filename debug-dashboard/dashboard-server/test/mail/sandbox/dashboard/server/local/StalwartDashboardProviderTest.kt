@@ -1,10 +1,15 @@
 package mail.sandbox.dashboard.server.local
 
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Instant
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
@@ -21,6 +26,7 @@ import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
 import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
 import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.MessageDeliveryMode
@@ -31,14 +37,356 @@ import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpRequest
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpResponse
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpTransport
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartCreateAccount
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartImportedEmail
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartManagementCredentialProvider
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAccount
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAdapter
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductFolder
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductGateway
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductMessage
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductMessageSummary
+import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductProtocol
 
 class StalwartDashboardProviderTest {
     @Test
+    fun liveRegistryStaysCompleteAndOverlaysReadinessByExactProviderId() = runBlocking {
+        withCatalog("stalwart-dashboard-live-overlay") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alpha@local.test",
+                    password = "alpha-password",
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "account-a",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    "account-a",
+                    "alpha@local.test",
+                    setOf(StalwartProductProtocol.JMAP),
+                ),
+                StalwartProductAccount(
+                    "account-b",
+                    "beta@local.test",
+                    setOf(StalwartProductProtocol.JMAP, StalwartProductProtocol.SMTP),
+                ),
+            ).apply {
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+            }
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val accounts = provider.listAccounts()
+
+            assertEquals(listOf("account-a", "account-b"), accounts.map { it.providerAccountId })
+            assertEquals(
+                listOf(CredentialReadiness.READY, CredentialReadiness.PASSWORD_REQUIRED),
+                accounts.map { it.credentialReadiness },
+            )
+            assertEquals(
+                listOf(
+                    listOf(MailProtocol.JMAP),
+                    listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                ),
+                accounts.map { it.protocols },
+            )
+            assertEquals(
+                listOf(StalwartLoginProbe("account-a", "alpha@local.test", "alpha-password")),
+                gateway.jmapProbes,
+            )
+            assertEquals(ProviderAvailability.READY, provider.providerStatus().availability)
+
+            assertFailsWith<IllegalStateException> {
+                provider.listFolders("beta@local.test", "account-b")
+            }
+            assertEquals(1, gateway.accountListingCalls)
+            assertEquals(0, gateway.folderListingCalls)
+        }
+    }
+
+    @Test
+    fun sameAddressOldIdPasswordIsNeverInheritedByARecreatedAccount() = runBlocking {
+        withCatalog("stalwart-dashboard-recreated-account") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "old-password",
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                    providerAccountId = "old-account",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    "new-account",
+                    "alice@local.test",
+                    setOf(StalwartProductProtocol.JMAP, StalwartProductProtocol.SMTP),
+                ),
+            )
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val account = provider.listAccounts().single()
+
+            assertEquals("new-account", account.providerAccountId)
+            assertEquals(CredentialReadiness.PASSWORD_REQUIRED, account.credentialReadiness)
+            assertTrue(gateway.jmapProbes.isEmpty())
+            assertFailsWith<IllegalStateException> {
+                provider.listFolders("alice@local.test", "new-account")
+            }
+            assertEquals(1, gateway.accountListingCalls)
+            assertEquals(0, gateway.folderListingCalls)
+        }
+    }
+
+    @Test
+    fun adoptionStoresOnlyAnExactLoginThatPassedOrdinaryJmapAuthentication() = runBlocking {
+        withCatalog("stalwart-dashboard-adoption") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = null,
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(ordinaryAccount()).apply {
+                jmapOutcomes += AuthenticationOutcome.WrongPassword("JMAP rejected credentials")
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+                beforeJmapProbe = {
+                    assertNull(
+                        catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+                    )
+                }
+            }
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val rejected = provider.adoptPassword(
+                "alice@local.test",
+                AdoptPasswordRequest("wrong-password"),
+                "account-one",
+            )
+            assertFalse(rejected.operation.success)
+            assertEquals(CredentialReadiness.AUTHENTICATION_FAILED, rejected.readiness)
+            assertNull(
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+
+            val accepted = provider.adoptPassword(
+                "alice@local.test",
+                AdoptPasswordRequest("right-password"),
+                "account-one",
+            )
+            assertTrue(accepted.operation.success)
+            assertEquals(CredentialReadiness.READY, accepted.readiness)
+            assertEquals(
+                "right-password",
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+            assertEquals(
+                listOf("wrong-password", "right-password"),
+                gateway.jmapProbes.map(StalwartLoginProbe::password),
+            )
+        }
+    }
+
+    @Test
+    fun resetWorksWithoutACachedPasswordAndPersistsOnlyAfterOrdinaryLogin() = runBlocking {
+        withCatalog("stalwart-dashboard-reset") { catalog ->
+            val gateway = RecordingStalwartGateway(ordinaryAccount()).apply {
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+                beforeJmapProbe = {
+                    assertNull(
+                        catalog.findByProviderAccountId(Provider.STALWART, "account-one"),
+                    )
+                }
+            }
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val response = provider.changePassword(
+                "alice@local.test",
+                "replacement-password",
+                "account-one",
+            )
+
+            assertTrue(response.operation.success)
+            assertEquals(CredentialReadiness.READY, response.readiness)
+            assertEquals(
+                listOf("account-one" to "replacement-password"),
+                gateway.changedPasswords,
+            )
+            assertEquals(
+                "replacement-password",
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+        }
+    }
+
+    @Test
+    fun failedPostResetAuthenticationForgetsTheObsoletePassword() = runBlocking {
+        withCatalog("stalwart-dashboard-reset-failure") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "old-password",
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(ordinaryAccount()).apply {
+                jmapOutcomes += AuthenticationOutcome.WrongPassword("JMAP rejected credentials")
+            }
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val response = provider.changePassword(
+                "alice@local.test",
+                "replacement-password",
+                "account-one",
+            )
+
+            assertFalse(response.operation.success)
+            assertEquals(CredentialReadiness.AUTHENTICATION_FAILED, response.readiness)
+            assertNull(
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+        }
+    }
+
+    @Test
+    fun explicitJmapAndSmtpProbesUseRememberedOrOverrideSecretsWithoutChangingTheCatalog() =
+        runBlocking {
+            withCatalog("stalwart-dashboard-explicit-probes") { catalog ->
+                catalog.put(
+                    LocalAccountRecord(
+                        provider = Provider.STALWART,
+                        address = "alice@local.test",
+                        password = "remembered-password",
+                        protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                        providerAccountId = "account-one",
+                    ),
+                )
+                val gateway = RecordingStalwartGateway(ordinaryAccount()).apply {
+                    jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+                }
+                val smtpProbe = RecordingStalwartSmtpProbe().apply {
+                    outcomes += AuthenticationOutcome.WrongPassword(
+                        "override-password\n" + "provider-detail".repeat(80),
+                    )
+                }
+                val provider = StalwartDashboardProvider(
+                    adapter = gateway,
+                    catalog = catalog,
+                    smtpAuthenticationProbe = smtpProbe,
+                )
+
+                val jmap = provider.probeAuthentication(
+                    AuthenticationProbeRequest(
+                        address = "alice@local.test",
+                        provider = Provider.STALWART,
+                        protocol = AuthenticationProtocol.JMAP,
+                        providerAccountId = "account-one",
+                    ),
+                )
+                val smtp = provider.probeAuthentication(
+                    AuthenticationProbeRequest(
+                        address = "alice@local.test",
+                        provider = Provider.STALWART,
+                        protocol = AuthenticationProtocol.SMTP,
+                        credentialOverride = "override-password",
+                        providerAccountId = "account-one",
+                    ),
+                )
+
+                assertTrue(jmap.response.success)
+                assertFalse(smtp.response.success)
+                assertTrue(smtp.response.providerResponse.length <= 512)
+                assertTrue("override-password" !in smtp.response.providerResponse)
+                assertEquals(listOf("override-password"), smtp.secretsToRedact)
+                assertEquals(
+                    listOf(
+                        StalwartLoginProbe(
+                            "account-one",
+                            "alice@local.test",
+                            "remembered-password",
+                        ),
+                    ),
+                    gateway.jmapProbes,
+                )
+                assertEquals(
+                    listOf("alice@local.test" to "override-password"),
+                    smtpProbe.probes,
+                )
+                assertEquals(
+                    "remembered-password",
+                    catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+                )
+            }
+        }
+
+    @Test
+    fun accountCreationVerifiesAndStoresTheExactOrdinaryLogin() = runBlocking {
+        withCatalog("stalwart-dashboard-create") { catalog ->
+            val gateway = RecordingStalwartGateway().apply {
+                createdAccount = ordinaryAccount()
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+                beforeJmapProbe = {
+                    assertNull(
+                        catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+                    )
+                }
+            }
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val account = provider.createAccount(
+                CreateAccountRequest(
+                    address = "alice@local.test",
+                    password = "created-password",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                ),
+            )
+
+            assertEquals(CredentialReadiness.READY, account.credentialReadiness)
+            assertEquals("account-one", account.providerAccountId)
+            assertEquals(
+                "created-password",
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+        }
+    }
+
+    @Test
+    fun normalConstructionHasNoGateFixtureRoutesOrCredentialLifecycle() {
+        val source = dashboardRoot().resolve(
+            "dashboard-server/src/mail/sandbox/dashboard/server/local/" +
+                "StalwartDashboardProvider.kt",
+        ).toFile().readText()
+
+        assertTrue("http://127.0.0.1:8443" in source)
+        assertTrue("dashboard-management@local.test" in source)
+        assertTrue("secret" in source)
+        listOf(
+            "18443",
+            "18587",
+            "StalwartGateSecretFiles",
+            "GateFixtureManagementCredentialProvider",
+            "fixtureCredentialSource",
+            "providerGeneration",
+            "AppPassword",
+        ).forEach { forbidden ->
+            assertTrue(forbidden !in source, "Production Stalwart source retained $forbidden")
+        }
+    }
+
+    @Test
     fun staleProviderIdentityStopsDeleteResetAndMailActionsBeforeMutation() = runBlocking {
         repeat(3) { actionIndex ->
-            val transport = ArrivalTransport(*accountListingCalls("current-account"))
+            val transport = ArrivalTransport(
+                *if (actionIndex < 2) accountListingCalls("current-account") else emptyArray(),
+            )
             val directory = createTempDirectory("stalwart-dashboard-stale-$actionIndex").toRealPath()
             try {
                 val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
@@ -57,7 +405,7 @@ class StalwartDashboardProviderTest {
                     catalog = catalog,
                 )
 
-                assertFailsWith<mail.sandbox.dashboard.server.api.DashboardNotFoundException> {
+                val action = suspend {
                     when (actionIndex) {
                         0 -> provider.deleteAccount("alice@local.test", "stale-account")
                         1 -> provider.changePassword(
@@ -78,6 +426,13 @@ class StalwartDashboardProviderTest {
                             ),
                         )
                     }
+                }
+                if (actionIndex < 2) {
+                    assertFailsWith<mail.sandbox.dashboard.server.api.DashboardNotFoundException> {
+                        action()
+                    }
+                } else {
+                    assertFailsWith<IllegalStateException> { action() }
                 }
                 transport.assertExhausted()
                 provider.close()
@@ -127,9 +482,9 @@ class StalwartDashboardProviderTest {
                 assertEquals("alice@local.test", account.address)
                 assertEquals("c", account.providerAccountId)
                 assertEquals(listOf(MailProtocol.JMAP, MailProtocol.SMTP), account.protocols)
-                assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, account.credentialReadiness)
-                assertTrue(account.readinessMessage?.isNotBlank() == true)
-                assertEquals(ProviderAvailability.DEGRADED, provider.providerStatus().availability)
+                assertEquals(CredentialReadiness.PASSWORD_REQUIRED, account.credentialReadiness)
+                assertEquals(null, account.readinessMessage)
+                assertEquals(ProviderAvailability.READY, provider.providerStatus().availability)
 
                 val adoption = provider.adoptPassword(
                     account.address,
@@ -137,7 +492,7 @@ class StalwartDashboardProviderTest {
                     "c",
                 )
                 assertTrue(!adoption.operation.success)
-                assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, adoption.readiness)
+                assertEquals(CredentialReadiness.AUTHENTICATION_FAILED, adoption.readiness)
                 assertTrue(
                     !provider.probeAuthentication(
                         AuthenticationProbeRequest(
@@ -313,7 +668,7 @@ class StalwartDashboardProviderTest {
 
     @Test
     fun smtpDeliveryRequiresCredentialForTheExactLiveProviderIdentity() = runBlocking {
-        val transport = ArrivalTransport(*accountListingCalls("current-account"))
+        val transport = ArrivalTransport()
         val smtp = StalwartRecordingSmtpSender()
         val directory = createTempDirectory("stalwart-dashboard-smtp-identity").toRealPath()
         try {
@@ -341,7 +696,7 @@ class StalwartDashboardProviderTest {
             )
             val raw = message("<smtp-identity@local.test>")
 
-            assertFailsWith<NoSuchElementException> {
+            assertFailsWith<IllegalStateException> {
                 provider.deliverMessages(
                     GenerateMessageRequest(
                         targetAccount = "alice@local.test",
@@ -372,8 +727,42 @@ class StalwartDashboardProviderTest {
             "\r\n" +
             "body"
 
+    private suspend fun withCatalog(
+        prefix: String,
+        block: suspend (LocalAccountCatalog) -> Unit,
+    ) {
+        val directory = createTempDirectory(prefix).toRealPath()
+        try {
+            block(LocalAccountCatalog(directory.resolve("accounts.json")))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    private fun dashboardRoot(): Path {
+        val working = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
+        return when {
+            Files.isDirectory(working.resolve("dashboard-server")) -> working
+            working.fileName.toString() == "dashboard-server" &&
+                Files.isDirectory(working.parent.resolve("dashboard-server")) -> working.parent
+            Files.isDirectory(working.resolve("debug-dashboard/dashboard-server")) ->
+                working.resolve("debug-dashboard")
+            else -> error("Could not locate the debug-dashboard source tree from $working")
+        }
+    }
+
     private companion object {
         val BASE_URI: URI = URI("http://127.0.0.1:18443")
+
+        fun ordinaryAccount(): StalwartProductAccount = StalwartProductAccount(
+            id = "account-one",
+            address = "alice@local.test",
+            enabledProtocols = setOf(
+                StalwartProductProtocol.JMAP,
+                StalwartProductProtocol.SMTP,
+            ),
+        )
+
         fun query(accountId: String, ids: List<String>): JsonObject = buildJsonObject {
             put("accountId", accountId)
             put("queryState", "query-state")
@@ -446,6 +835,154 @@ class StalwartDashboardProviderTest {
                 ),
             ),
         )
+    }
+}
+
+private data class StalwartLoginProbe(
+    val accountId: String,
+    val address: String,
+    val password: String,
+)
+
+private class RecordingStalwartGateway(
+    vararg initialAccounts: StalwartProductAccount,
+) : StalwartProductGateway {
+    private val accounts = initialAccounts.toMutableList()
+    val jmapOutcomes = ArrayDeque<AuthenticationOutcome>()
+    val jmapProbes = mutableListOf<StalwartLoginProbe>()
+    val changedPasswords = mutableListOf<Pair<String, String>>()
+    var beforeJmapProbe: (StalwartLoginProbe) -> Unit = {}
+    var createdAccount: StalwartProductAccount? = null
+    var accountListingCalls = 0
+        private set
+    var folderListingCalls = 0
+        private set
+
+    override suspend fun listAccounts(): List<StalwartProductAccount> {
+        accountListingCalls += 1
+        return accounts.toList()
+    }
+
+    override suspend fun createAccount(request: StalwartCreateAccount): StalwartProductAccount =
+        requireNotNull(createdAccount) { "No created Account result was configured" }.also {
+            accounts += it
+        }
+
+    override suspend fun probeOrdinaryLogin(
+        accountId: String,
+        address: String,
+        password: String,
+    ): AuthenticationOutcome {
+        val probe = StalwartLoginProbe(accountId, address, password)
+        beforeJmapProbe(probe)
+        jmapProbes += probe
+        return jmapOutcomes.removeFirstOrNull()
+            ?: error("No ordinary JMAP outcome was configured")
+    }
+
+    override suspend fun changePassword(accountId: String, newPassword: String) {
+        changedPasswords += accountId to newPassword
+    }
+
+    override suspend fun deleteAccount(accountId: String) {
+        accounts.removeAll { it.id == accountId }
+    }
+
+    override suspend fun listFolders(accountId: String): List<StalwartProductFolder> {
+        folderListingCalls += 1
+        return emptyList()
+    }
+
+    override suspend fun createFolder(
+        accountId: String,
+        name: String,
+        parentId: String?,
+    ): StalwartProductFolder = error("Unexpected createFolder")
+
+    override suspend fun deleteFolder(accountId: String, folderId: String) {
+        error("Unexpected deleteFolder")
+    }
+
+    override suspend fun listMessages(
+        accountId: String,
+        mailboxId: String?,
+        limit: Int,
+    ): List<StalwartProductMessageSummary> = error("Unexpected listMessages")
+
+    override suspend fun readMessage(
+        accountId: String,
+        emailId: String,
+    ): StalwartProductMessage = error("Unexpected readMessage")
+
+    override suspend fun importEml(
+        accountId: String,
+        mailboxId: String,
+        rawEml: String,
+        receivedAt: Instant,
+    ): StalwartImportedEmail = error("Unexpected importEml")
+
+    override suspend fun setSeen(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        seen: Boolean,
+    ) {
+        error("Unexpected setSeen")
+    }
+
+    override suspend fun setFlagged(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        flagged: Boolean,
+    ) {
+        error("Unexpected setFlagged")
+    }
+
+    override suspend fun moveMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        sourceMailboxId: String,
+        targetMailboxId: String,
+    ) {
+        error("Unexpected moveMessages")
+    }
+
+    override suspend fun copyMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        targetMailboxId: String,
+    ): List<String> = error("Unexpected copyMessages")
+
+    override suspend fun trashMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+        sourceMailboxId: String,
+    ) {
+        error("Unexpected trashMessages")
+    }
+
+    override suspend fun deleteMessages(
+        accountId: String,
+        emailIds: List<String>,
+        expectedState: String,
+    ) {
+        error("Unexpected deleteMessages")
+    }
+
+    override fun close() = Unit
+}
+
+private class RecordingStalwartSmtpProbe : StalwartSmtpAuthenticationProbe {
+    val outcomes = ArrayDeque<AuthenticationOutcome>()
+    val probes = mutableListOf<Pair<String, String>>()
+
+    override fun probe(address: String, password: String): AuthenticationOutcome {
+        probes += address to password
+        return outcomes.removeFirstOrNull() ?: error("No SMTP outcome was configured")
     }
 }
 

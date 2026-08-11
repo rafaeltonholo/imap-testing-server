@@ -14,7 +14,7 @@ import java.util.Locale
 
 internal enum class LocalSmtpEndpoint(internal val port: Int) {
     POSTFIX(21025),
-    STALWART(18587),
+    STALWART(8587),
 }
 
 internal data class LocalSmtpCredentials(
