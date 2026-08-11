@@ -34,7 +34,7 @@ CONFIG_COMMAND = [
     "json",
 ]
 EXPECTED_ENVIRONMENT = {
-    "STALWART_PUBLIC_URL": "http://127.0.0.1:18080",
+    "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
     "STALWART_RECOVERY_ADMIN": "review-placeholder:review-placeholder",
     "STALWART_RECOVERY_MODE": "1",
     "STALWART_RECOVERY_MODE_PORT": "8080",
@@ -74,8 +74,8 @@ EXPECTED_OWNER_COMMAND = [
     "chmod 0700 /var/lib/stalwart",
 ]
 EXPECTED_STALWART_IMAGE = (
-    "stalwartlabs/stalwart:v0.16.16@"
-    "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+    "stalwartlabs/stalwart:v0.16.17@"
+    "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
 )
 
 
@@ -364,7 +364,14 @@ class StalwartMigrationComposeTest(unittest.TestCase):
                 {
                     "mode": "ingress",
                     "target": 8080,
-                    "published": "18080",
+                    "published": "8443",
+                    "protocol": "tcp",
+                    "host_ip": "127.0.0.1",
+                },
+                {
+                    "mode": "ingress",
+                    "target": 587,
+                    "published": "8587",
                     "protocol": "tcp",
                     "host_ip": "127.0.0.1",
                 },
@@ -474,7 +481,7 @@ class StalwartMigrationComposeTest(unittest.TestCase):
             },
         )
 
-    def test_resolved_service_contains_no_inherited_v015_or_mail_surface(self) -> None:
+    def test_resolved_service_contains_only_reviewed_jmap_and_submission_surface(self) -> None:
         service = self.migration_service()
         self.assertNotEqual(
             service.get("image"),
@@ -492,11 +499,7 @@ class StalwartMigrationComposeTest(unittest.TestCase):
             for port in ports
             for field in ("target", "published")
         }
-        self.assertTrue(
-            exposed_ports.isdisjoint(
-                {25, 110, 143, 465, 587, 993, 995, 8443, 8587},
-            ),
-        )
+        self.assertEqual(exposed_ports, {587, 8080, 8443, 8587})
 
         volumes = service.get("volumes")
         self.assertIsInstance(volumes, list)

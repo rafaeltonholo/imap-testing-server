@@ -1869,7 +1869,7 @@ internal class GateStalwartMailCredentialProbeRemote(
                     "Mail credential authenticated the wrong Account"
                 }
                 // A successfully authenticated, identity-bound JMAP Session is
-                // itself a Core proof. Stalwart v0.16.16 may deny Core/echo to
+                // itself a Core proof. Stalwart v0.16.17 may deny Core/echo to
                 // a mail-only AppPassword while allowing every required mail
                 // method, so echo remains an optional supplemental probe.
                 val proven = linkedSetOf(StalwartMailCapability.Core)

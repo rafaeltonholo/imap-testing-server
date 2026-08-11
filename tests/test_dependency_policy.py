@@ -44,9 +44,9 @@ POSTFIX_PACKAGES = {
 GATE_0B_SUPERSESSION_BANNER = (
     "> **Superseded dependency baseline:** This completed Gate 0B plan "
     "preserves the Stalwart v0.16.14 commands and evidence it actually "
-    "proved. Active future work now targets Stalwart v0.16.16 under the "
+    "proved. Active future work now targets Stalwart v0.16.17 under the "
     "2026-08-01 latest-coherent dependency plan; do not rewrite the "
-    "historical steps below as v0.16.16 evidence."
+    "historical steps below as v0.16.17 evidence."
 )
 
 
@@ -69,7 +69,7 @@ class FuturePlanDependencyPolicyTest(unittest.TestCase):
             "Jakarta Mail API 2.1.5",
             "Angus Mail 2.0.5",
             "jsoup 1.23.1",
-            "Stalwart v0.16.16",
+            "Stalwart v0.16.17",
         ):
             with self.subTest(selected=selected):
                 self.assertIn(selected, tech_stack)
@@ -80,7 +80,7 @@ class FuturePlanDependencyPolicyTest(unittest.TestCase):
             "- jsoup: `1.23.1`.",
             (
                 "| 0B | `2026-07-23-debug-dashboard-gate-0b-stalwart.md` | "
-                "Stalwart v0.16.16 management plus Account-bound "
+                "Stalwart v0.16.17 management plus Account-bound "
                 "AppPassword/store/lifecycle, mail, submission, isolation, "
                 "and deletion proof |"
             ),
@@ -118,7 +118,7 @@ class FuturePlanDependencyPolicyTest(unittest.TestCase):
         ):
             with self.subTest(plan=name):
                 tech_stack = self.tech_stack(name)
-                self.assertIn("Stalwart v0.16.16", tech_stack)
+                self.assertIn("Stalwart v0.16.17", tech_stack)
                 self.assertNotIn("Stalwart v0.16.14", tech_stack)
 
     def test_mail_provider_plan_declares_selected_mail_and_html_libraries(self) -> None:

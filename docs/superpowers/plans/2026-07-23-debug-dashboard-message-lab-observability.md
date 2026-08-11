@@ -6,7 +6,7 @@
 
 **Architecture:** A bounded message-source pipeline produces one validated raw message plus a separate local envelope. Append and delivery dispatch to different provider ports and verify mailbox arrival. Every Stalwart append/submission/read-back call uses the exact Account's Gate-0B credential lease, after an all-target readiness preflight that makes zero submission calls on failure. Docker/stdout and optional Stalwart structured logs enter a redact-first normalization pipeline, then correlation links exact identifiers before cautious time adjacency.
 
-**Tech Stack:** Kotlin/JVM, Angus Mail 2.0.5/Jakarta Mail API 2.1.5, Ktor multipart/SSE, allowlisted Docker Compose logs, Dovecot `doveadm save`, Postfix SMTP, Stalwart v0.16.16 JMAP upload/import/EmailSubmission, SQLite JDBC 3.53.2.1 event cache.
+**Tech Stack:** Kotlin/JVM, Angus Mail 2.0.5/Jakarta Mail API 2.1.5, Ktor multipart/SSE, allowlisted Docker Compose logs, Dovecot `doveadm save`, Postfix SMTP, Stalwart v0.16.17 JMAP upload/import/EmailSubmission, SQLite JDBC 3.53.2.1 event cache.
 
 ---
 

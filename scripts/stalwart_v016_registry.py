@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed stdlib transport for Stalwart v0.16.16 Registry calls.
+"""Fail-closed stdlib transport for Stalwart v0.16.17 Registry calls.
 
 The transport is intentionally pinned to the loopback listener exposed by the
 v0.16 migration overlay.  It does not accept configurable origins or follow
@@ -19,10 +19,10 @@ from typing import Final
 
 
 REGISTRY_HOST: Final = "127.0.0.1"
-REGISTRY_PORT: Final = 18080
+REGISTRY_PORT: Final = 8443
 SESSION_PATH: Final = "/.well-known/jmap"
 API_PATH: Final = "/jmap/"
-API_URL: Final = "http://127.0.0.1:18080/jmap/"
+API_URL: Final = "http://127.0.0.1:8443/jmap/"
 CORE_CAPABILITY: Final = "urn:ietf:params:jmap:core"
 STALWART_CAPABILITY: Final = "urn:stalwart:jmap"
 MAX_JSON_BODY_BYTES: Final = 256 * 1024

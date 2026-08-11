@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Superseded dependency baseline:** This completed Gate 0B plan preserves the Stalwart v0.16.14 commands and evidence it actually proved. Active future work now targets Stalwart v0.16.16 under the 2026-08-01 latest-coherent dependency plan; do not rewrite the historical steps below as v0.16.16 evidence.
+> **Superseded dependency baseline:** This completed Gate 0B plan preserves the Stalwart v0.16.14 commands and evidence it actually proved. Active future work now targets Stalwart v0.16.17 under the 2026-08-01 latest-coherent dependency plan; do not rewrite the historical steps below as v0.16.17 evidence.
 
 **Goal:** Prove—or stop safely before migration—that Stalwart v0.16.14 supports the approved protected management credential, Account-bound dashboard AppPasswords, encrypted local credential lifecycle, every required management/mail/submission/deletion contract, and optional structured-log enrichment.
 

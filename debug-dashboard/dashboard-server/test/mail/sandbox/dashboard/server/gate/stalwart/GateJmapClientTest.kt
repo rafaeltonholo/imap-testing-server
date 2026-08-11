@@ -49,11 +49,11 @@ class GateJmapClientTest {
             StalwartEndpointProfile.GATE_FIXTURE.apiUrl,
         )
         assertEquals(
-            URI("http://127.0.0.1:18080"),
+            URI("http://127.0.0.1:8443"),
             StalwartEndpointProfile.MIGRATION_BOOTSTRAP.baseUrl,
         )
         assertEquals(
-            URI("http://127.0.0.1:18080/jmap/"),
+            URI("http://127.0.0.1:8443/jmap/"),
             StalwartEndpointProfile.MIGRATION_BOOTSTRAP.apiUrl,
         )
         assertEquals(
@@ -104,7 +104,7 @@ class GateJmapClientTest {
                 GateHttpResponse(
                     status = 200,
                     effectiveUrl = URI(
-                        "http://127.0.0.1:18080/.well-known/jmap",
+                        "http://127.0.0.1:8443/.well-known/jmap",
                     ),
                     body = """{"apiUrl":"/jmap/","primaryAccounts":{}}""",
                 ),
@@ -123,7 +123,7 @@ class GateJmapClientTest {
 
         assertEquals(profile.apiUrl, session.apiUrl)
         assertEquals(
-            listOf(URI("http://127.0.0.1:18080/.well-known/jmap")),
+            listOf(URI("http://127.0.0.1:8443/.well-known/jmap")),
             transport.requests.map(GateHttpRequest::url),
         )
 
@@ -138,7 +138,7 @@ class GateJmapClientTest {
                         GateHttpResponse(
                             status = 200,
                             effectiveUrl = URI(
-                                "http://127.0.0.1:18080/.well-known/jmap",
+                                "http://127.0.0.1:8443/.well-known/jmap",
                             ),
                             body = """
                                 {
@@ -196,7 +196,7 @@ class GateJmapClientTest {
         listOf(
             null,
             "/jmap/",
-            "http://127.0.0.1:18080/jmap/session",
+            "http://127.0.0.1:8443/jmap/session",
             "http://example.test/jmap/session",
         ).forEach { location ->
             val rejectedTransport = QueueTransport(

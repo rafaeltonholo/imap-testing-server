@@ -531,8 +531,8 @@ secret = "%{env:ADMIN_SECRET}%"
                     "stalwartlabs/stalwart:latest"
                     if legacy
                     else (
-                        "stalwartlabs/stalwart:v0.16.16@"
-                        "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+                        "stalwartlabs/stalwart:v0.16.17@"
+                        "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
                     )
                 ),
                 "Labels": {

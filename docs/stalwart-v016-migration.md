@@ -1,4 +1,4 @@
-# Stalwart v0.15 to v0.16.16 Operator Runbook
+# Stalwart v0.15 to v0.16.17 Operator Runbook
 
 This is the operator sequence for the one-time, fail-closed migration of the
 real mail-sandbox Stalwart store. It records commands and checkpoints; it is
@@ -34,6 +34,41 @@ not evidence that those commands have run.
   digests of those secret values.
 
 Run every following command from the captured primary checkout root.
+
+## Startup classification is read-only
+
+Normal startup may run only the classifier before deciding what to do:
+
+```bash
+REPOSITORY_ROOT="$(pwd -P)"
+python3 scripts/stalwart_runtime_state.py classify \
+  --repository "$REPOSITORY_ROOT"
+```
+
+- `fresh` permits only the explicit `initialize-fresh` command below. That
+  command still refuses before creating bytes while root Compose remains on
+  the temporary v0.15 hold.
+- `current` permits ordinary root Compose startup after receipt validation.
+- `migration-required` requires the explicit capture/rehearsal/apply sequence
+  in this runbook. Startup never migrates automatically.
+- `invalid` is a hard stop for manual investigation.
+
+For a genuinely empty store, after the root Compose cutover has installed the
+reviewed current model, initialize it exactly once:
+
+```bash
+python3 scripts/bootstrap_stalwart_v016.py initialize-fresh \
+  --repository "$REPOSITORY_ROOT"
+```
+
+The command creates the protected management Account with the fixed local-test
+Basic password `secret`, proves JMAP and authenticated SMTP before and after a
+normal-runtime restart, publishes `current.json`, and requires the classifier
+to return `current`. It never seeds or overwrites a nonempty store. A partial
+failure is stopped and marked `invalid`; it is not silently retried as fresh.
+
+Capture, rehearsal, migration apply, rollback, and snapshot deletion remain
+operator-invoked commands. The classifier performs none of them.
 
 ## 1. Capture the live v0.15 source
 
@@ -151,11 +186,13 @@ will adopt or destroy.
 Only after Step 1 succeeds may the primary checkout be updated to the reviewed
 v0.16 model. Its Stalwart service is fixed to:
 
-- image `stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`;
+- image `stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa`;
 - container name `stalwart-dev`;
 - user `2000:2000`;
 - restart policy `unless-stopped`;
 - TCP loopback publication `127.0.0.1:8443` to container port `8080`;
+- TCP loopback publication `127.0.0.1:8587` to authenticated submission port
+  `587`;
 - `STALWART_PUBLIC_URL=http://127.0.0.1:8443`;
 - a long-form bind with `type: bind`, `source: ./stalwart`,
   `target: /etc/stalwart`, `read_only: true`, and
@@ -167,7 +204,7 @@ v0.16 model. Its Stalwart service is fixed to:
 - no `ADMIN_SECRET` or `STALWART_RECOVERY_*` variable.
 
 The expected local image ID is
-`sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`.
+`sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa`.
 The migration tools validate it locally and use `--pull never`.
 
 `stalwart/config.json` must contain exactly this pretty-printed byte sequence:
@@ -217,7 +254,7 @@ Download only the tagged upstream script and verify its fixed digest:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/stalwartlabs/stalwart/v0.16.16/resources/scripts/migrate_v016.py \
+  https://raw.githubusercontent.com/stalwartlabs/stalwart/v0.16.17/resources/scripts/migrate_v016.py \
   -o debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
 chmod 0600 \
   debug-dashboard/.runtime/stalwart-migration/migrate_v016.py
@@ -263,11 +300,11 @@ The `apply` preflight supplies all three fixed `STALWART_MIGRATION_*` path
 variables and performs the exact primary-root, captured-project, two-file
 `config --quiet` validation before any `up`.
 
-That internally validated overlay pins v0.16.16, runs the owner helper as root
+That internally validated overlay pins v0.16.17, runs the owner helper as root
 only for the fixed ownership operation, runs Stalwart as UID/GID 2000,
-publishes only `127.0.0.1:18080:8080`, binds the whole recovery config directory
-read-only, binds the real data store writable, and sources the mode-`0600`
-recovery environment by path.
+publishes only `127.0.0.1:8443:8080` and `127.0.0.1:8587:587`, binds the whole
+recovery config directory read-only, binds the real data store writable, and
+sources the mode-`0600` recovery environment by path.
 
 ## 5. Apply, but do not retire recovery
 
@@ -301,14 +338,15 @@ that interpolates and prints its contents.
 ## 6. Bootstrap at the migration endpoint
 
 Task 7 bootstrap owns the live routing proof. It starts the exact
-receipt-bound recovery runtime at `http://127.0.0.1:18080`, invokes
+receipt-bound recovery runtime at `http://127.0.0.1:8443`, invokes
 `StalwartRoutingProofCliKt`, and publishes an owner-only
 `bootstrap-routing-proof.json` bound into the final `bootstrap.json`.
 
 `StalwartRoutingLiveTest` is configured for the migration endpoint
-`127.0.0.1:18080`; it is not a normal-runtime `:8443` test. Do not run a stale
-manual `StalwartRoutingLiveTest` invocation against `:8443`, and do not replace
-the bootstrap-owned CLI proof with a separate test invocation.
+`127.0.0.1:8443`. Recovery and normal runtime intentionally share that
+loopback publication but use different, validated Compose/environment
+identities. Do not replace the bootstrap-owned CLI proof with a separate test
+invocation.
 
 Validate tracked assets, then bootstrap:
 
@@ -344,7 +382,7 @@ python3 scripts/stalwart_v016.py retire-recovery
 ```
 
 Retirement revalidates the whole Task 5–7 receipt chain. It starts only the
-base Compose Stalwart service on `127.0.0.1:8443`, proves v0.16.16 readiness,
+base Compose Stalwart service on `127.0.0.1:8443`, proves v0.16.17 readiness,
 authenticates the exact immutable management Account/API-key binding, proves
 the old recovery credential returns 401 or 403, and verifies there is one
 expected writer with no migration container. It durably writes

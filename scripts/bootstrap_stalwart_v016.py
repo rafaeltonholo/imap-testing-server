@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash-recoverable Stalwart v0.16.16 bootstrap and offline planner.
+"""Crash-recoverable Stalwart v0.16.17 bootstrap and offline planner.
 
 The pure planner remains import-safe and stdlib-only.  Live Registry, migration
 runtime, and Kotlin routing operations are reachable only through the explicit
@@ -21,6 +21,7 @@ import re
 import secrets
 import selectors
 import signal
+import smtplib
 import stat
 import subprocess
 import sys
@@ -28,7 +29,7 @@ import time
 from typing import BinaryIO, Callable, Mapping, Sequence
 
 
-SERVER_VERSION = "0.16.16"
+SERVER_VERSION = "0.16.17"
 MANAGEMENT_ADDRESS = "dashboard-management@local.test"
 MANAGEMENT_LOCAL_PART = "dashboard-management"
 MANAGEMENT_KEY_DESCRIPTION = "mail-sandbox/debug-dashboard/management"
@@ -279,6 +280,64 @@ def _manifest_records() -> tuple[dict[str, object], ...]:
             "object_type": "Account",
         },
         {
+            "desired": {
+                "bind": {"[::]:587": True},
+                "name": "submission",
+                "protocol": "smtp",
+                "tlsImplicit": False,
+                "useTls": False,
+            },
+            "kind": "normal_runtime_object",
+            "lookup": {"name": "submission"},
+            "object_type": "NetworkListener",
+        },
+        {
+            "desired": {
+                "directoryId": None,
+                "passwordMinLength": 1,
+                "passwordMinStrength": "zero",
+            },
+            "kind": "normal_runtime_object",
+            "lookup": {"id": "singleton"},
+            "object_type": "Authentication",
+        },
+        {
+            "desired": {
+                "maxFailures": {"else": "3", "match": {}},
+                "mustMatchSender": {"else": "true", "match": {}},
+                "require": {"else": "true", "match": {}},
+                "saslMechanisms": {
+                    "else": "[plain, login, oauthbearer, xoauth2]",
+                    "match": {},
+                },
+                "waitOnFail": {"else": "0ms", "match": {}},
+            },
+            "kind": "normal_runtime_object",
+            "lookup": {"id": "singleton"},
+            "object_type": "MtaStageAuth",
+        },
+        {
+            "desired": {
+                "@type": "Stdout",
+                "ansi": False,
+                "buffered": False,
+                "enable": True,
+                "events": {},
+                "eventsPolicy": "exclude",
+                "level": "debug",
+                "lossy": False,
+                "multiline": False,
+            },
+            "kind": "normal_runtime_object",
+            "lookup": {"description": "mail-sandbox debug stdout"},
+            "object_type": "Tracer",
+        },
+        {
+            "account": MANAGEMENT_ADDRESS,
+            "kind": "normal_runtime_password_intent",
+            "password": "secret",
+        },
+        {
             "account": MANAGEMENT_ADDRESS,
             "allowed_ips": {},
             "description": MANAGEMENT_KEY_DESCRIPTION,
@@ -460,6 +519,16 @@ class DesiredState:
         if len(matches) != 1:
             raise BootstrapError("desired object type is absent or ambiguous")
         return matches[0]
+
+    def __repr__(self) -> str:
+        return _redacted_repr(type(self).__name__)
+
+
+@dataclass(frozen=True, repr=False)
+class NormalRuntimeContract:
+    objects: tuple[DesiredObject, ...]
+    management_address: str
+    management_password: str
 
     def __repr__(self) -> str:
         return _redacted_repr(type(self).__name__)
@@ -1029,7 +1098,9 @@ def load_desired_state(paths: BootstrapPaths) -> DesiredState:
     _validate_permissions()
 
     desired_objects: list[DesiredObject] = []
-    for record in records[1:-1]:
+    for record in records:
+        if record.get("kind") != "object":
+            continue
         object_type = record.get("object_type")
         lookup = record.get("lookup")
         desired = record.get("desired")
@@ -1053,9 +1124,12 @@ def load_desired_state(paths: BootstrapPaths) -> DesiredState:
                 _desired_json=_json_text(desired_copy),
             ),
         )
-    intent = records[-1]
-    if intent.get("kind") != "api_key_intent":
+    intents = tuple(
+        record for record in records if record.get("kind") == "api_key_intent"
+    )
+    if len(intents) != 1:
         raise BootstrapError("management API-key intent is absent")
+    intent = intents[0]
     permissions = intent.get("permissions")
     allowed_ips = intent.get("allowed_ips")
     if not isinstance(permissions, dict) or not isinstance(allowed_ips, dict):
@@ -1082,6 +1156,59 @@ def load_desired_state(paths: BootstrapPaths) -> DesiredState:
             _allowed_ips_json=_json_text(allowed_ips),
         ),
         deferred_capabilities=tuple(deferred),
+    )
+
+
+def load_normal_runtime_contract(paths: BootstrapPaths) -> NormalRuntimeContract:
+    """Load the fixed local-only password, SMTP, and tracing contract."""
+    _validate_fixed_paths(paths)
+    _binding, content = _snapshot_regular(
+        paths.manifest,
+        root=paths.repository_root,
+        label="bootstrap manifest",
+        required_mode=0o644,
+        maximum=MAXIMUM_ASSET_SIZE,
+    )
+    records = _parse_manifest(content)
+    objects: list[DesiredObject] = []
+    for record in records:
+        if record.get("kind") != "normal_runtime_object":
+            continue
+        object_type = record.get("object_type")
+        lookup = record.get("lookup")
+        desired = record.get("desired")
+        if (
+            type(object_type) is not str
+            or not isinstance(lookup, dict)
+            or not isinstance(desired, dict)
+            or _contains_sensitive_field(desired)
+        ):
+            raise BootstrapError("normal runtime object is malformed")
+        objects.append(
+            DesiredObject(
+                object_type=object_type,
+                _lookup_json=_json_text(lookup),
+                _desired_json=_json_text(desired),
+            ),
+        )
+    intents = tuple(
+        record
+        for record in records
+        if record.get("kind") == "normal_runtime_password_intent"
+    )
+    if (
+        len(intents) != 1
+        or set(intents[0]) != {"account", "kind", "password"}
+        or intents[0].get("account") != MANAGEMENT_ADDRESS
+        or intents[0].get("password") != "secret"
+        or tuple(item.object_type for item in objects)
+        != ("NetworkListener", "Authentication", "MtaStageAuth", "Tracer")
+    ):
+        raise BootstrapError("normal runtime contract is malformed")
+    return NormalRuntimeContract(
+        objects=tuple(objects),
+        management_address=MANAGEMENT_ADDRESS,
+        management_password="secret",
     )
 
 
@@ -4196,6 +4323,27 @@ class BootstrapOrchestratorDependencies:
         return _redacted_repr(type(self).__name__)
 
 
+@dataclass
+class FreshInitializationDependencies:
+    """Injected stages for the one-shot fresh-store initializer."""
+
+    classify: Callable[[Path], str]
+    validate_definition: Callable[[Path], None]
+    prepare: Callable[[Path], None]
+    start_recovery: Callable[[Path], None]
+    apply_contract: Callable[[Path], None]
+    prove: Callable[[Path, str], None]
+    stop_recovery: Callable[[Path], None]
+    start_normal: Callable[[Path], None]
+    restart_normal: Callable[[Path], None]
+    stop_normal: Callable[[Path], None]
+    publish_receipt: Callable[[Path], Path]
+    mark_invalid: Callable[[Path], None]
+
+    def __repr__(self) -> str:
+        return _redacted_repr(type(self).__name__)
+
+
 def _load_sibling_module(filename: str, module_name: str) -> object:
     path = Path(__file__).resolve().parent / filename
     existing = sys.modules.get(module_name)
@@ -4673,6 +4821,558 @@ def production_orchestrator_dependencies() -> BootstrapOrchestratorDependencies:
         raise BootstrapError(
             "bootstrap production dependency is unavailable",
         ) from None
+
+
+FRESH_RECOVERY_USERNAME = "fresh-recovery"
+FRESH_RECOVERY_PASSWORD = "secret"
+FRESH_RECOVERY_ENV_RELATIVE = (
+    Path("debug-dashboard")
+    / ".runtime"
+    / "stalwart"
+    / "fresh-recovery.env"
+)
+FRESH_FAILURE_MARKER = ".mail-sandbox-fresh-initialization-failed"
+
+
+def _fresh_compose_prefix(repository: Path, *, recovery: bool) -> list[str]:
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(repository),
+        "--file",
+        str(repository / "docker-compose.yml"),
+    ]
+    if recovery:
+        command.extend(
+            [
+                "--file",
+                str(repository / "docker-compose.stalwart-migration.yml"),
+                "--profile",
+                "stalwart-migration",
+            ],
+        )
+    return command
+
+
+def _run_fresh_command(
+    command: Sequence[str],
+    *,
+    repository: Path,
+    environment: Mapping[str, str] | None = None,
+    timeout: int = 180,
+) -> bytes:
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=repository,
+            env=None if environment is None else dict(environment),
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            raise
+        raise BootstrapError("fresh Stalwart command failed safely") from None
+    if completed.returncode != 0:
+        raise BootstrapError("fresh Stalwart command failed safely")
+    return completed.stdout
+
+
+def _strict_json_model(data: bytes) -> dict[str, object]:
+    if type(data) is not bytes or not data or len(data) > MAXIMUM_JSON_SIZE:
+        raise BootstrapError("current Stalwart Compose model is malformed")
+    try:
+        value = json.loads(
+            data.decode("utf-8", "strict"),
+            object_pairs_hook=lambda pairs: _strict_object(pairs),
+            parse_float=lambda _value: (_ for _ in ()).throw(ValueError()),
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        raise BootstrapError(
+            "current Stalwart Compose model is malformed",
+        ) from None
+    if not isinstance(value, dict):
+        raise BootstrapError("current Stalwart Compose model is malformed")
+    return value
+
+
+def _strict_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _validate_fresh_compose_model(
+    data: bytes,
+    *,
+    repository: Path,
+    current_image: str,
+) -> None:
+    value = _strict_json_model(data)
+    services = value.get("services")
+    service = services.get("stalwart") if isinstance(services, dict) else None
+    if not isinstance(service, dict):
+        raise BootstrapError("current Stalwart Compose model is malformed")
+    expected_ports = [
+        {
+            "host_ip": "127.0.0.1",
+            "mode": "ingress",
+            "protocol": "tcp",
+            "published": "8443",
+            "target": 8080,
+        },
+        {
+            "host_ip": "127.0.0.1",
+            "mode": "ingress",
+            "protocol": "tcp",
+            "published": "8587",
+            "target": 587,
+        },
+    ]
+    volumes = service.get("volumes")
+    if not isinstance(volumes, list):
+        raise BootstrapError("current Stalwart Compose model is malformed")
+    observed_mounts = {
+        item.get("target"): (
+            item.get("source"),
+            item.get("read_only", False),
+            item.get("type"),
+        )
+        for item in volumes
+        if isinstance(item, dict) and type(item.get("target")) is str
+    }
+    environment = service.get("environment")
+    if (
+        service.get("image") != current_image
+        or service.get("user") != "2000:2000"
+        or service.get("restart") != "unless-stopped"
+        or service.get("ports") != expected_ports
+        or observed_mounts
+        != {
+            "/etc/stalwart": (
+                str(repository / "stalwart"),
+                True,
+                "bind",
+            ),
+            "/var/lib/stalwart": (
+                str(repository / "stalwart-data"),
+                False,
+                "bind",
+            ),
+        }
+        or environment
+        != {"STALWART_PUBLIC_URL": "http://127.0.0.1:8443"}
+    ):
+        raise BootstrapError("current Stalwart Compose model is malformed")
+
+
+class _ProductionFreshRuntime:
+    def __init__(
+        self,
+        *,
+        migration: object,
+        registry: object,
+        runtime_state: object,
+    ) -> None:
+        self._migration = migration
+        self._registry = registry
+        self._runtime_state = runtime_state
+        self._management_account_id: str | None = None
+
+    @staticmethod
+    def _environment(repository: Path) -> dict[str, str]:
+        environment = os.environ.copy()
+        for name in (
+            "COMPOSE_FILE",
+            "COMPOSE_PROFILES",
+            "COMPOSE_PROJECT_NAME",
+        ):
+            environment.pop(name, None)
+        environment.update(
+            {
+                "STALWART_MIGRATION_CONFIG_DIR": str(
+                    repository / "stalwart",
+                ),
+                "STALWART_MIGRATION_DATA_DIR": str(
+                    repository / "stalwart-data",
+                ),
+                "STALWART_MIGRATION_RECOVERY_ENV_FILE": str(
+                    repository / FRESH_RECOVERY_ENV_RELATIVE,
+                ),
+            },
+        )
+        return environment
+
+    def classify(self, repository: Path) -> str:
+        state = self._runtime_state.classify_repository(repository)
+        value = getattr(state, "value", None)
+        if type(value) is not str:
+            raise BootstrapError("Stalwart runtime classification is malformed")
+        return value
+
+    def validate_definition(self, repository: Path) -> None:
+        # Load and validate all immutable assets before Docker evaluates Compose.
+        load_desired_state(BootstrapPaths.for_repository(repository))
+        load_normal_runtime_contract(BootstrapPaths.for_repository(repository))
+        command = [
+            *_fresh_compose_prefix(repository, recovery=False),
+            "config",
+            "--format",
+            "json",
+            "stalwart",
+        ]
+        output = _run_fresh_command(command, repository=repository)
+        _validate_fresh_compose_model(
+            output,
+            repository=repository,
+            current_image=self._runtime_state.CURRENT_IMAGE,
+        )
+
+    def prepare(self, repository: Path) -> None:
+        store = repository / "stalwart-data"
+        try:
+            store.mkdir(mode=0o700)
+        except FileExistsError:
+            try:
+                metadata = store.lstat()
+                empty = next(store.iterdir(), None) is None
+            except OSError:
+                raise BootstrapError("fresh Stalwart store is unsafe") from None
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
+                metadata.st_mode,
+            ) or not empty:
+                raise BootstrapError("fresh Stalwart store is unsafe")
+        except OSError:
+            raise BootstrapError("fresh Stalwart store could not be created") from None
+        runtime = repository / "debug-dashboard" / ".runtime"
+        for directory in (runtime, runtime / "stalwart"):
+            self._migration.ensure_owner_directory(
+                directory,
+                trusted_root=repository,
+                owner_root=runtime,
+            )
+        _write_new_bytes_0600(
+            repository / FRESH_RECOVERY_ENV_RELATIVE,
+            (
+                "STALWART_RECOVERY_ADMIN="
+                f"{FRESH_RECOVERY_USERNAME}:{FRESH_RECOVERY_PASSWORD}\n"
+            ).encode("ascii"),
+            root=repository,
+            maximum=1024,
+        )
+
+    def start_recovery(self, repository: Path) -> None:
+        _run_fresh_command(
+            [
+                *_fresh_compose_prefix(repository, recovery=True),
+                "up",
+                "--detach",
+                "--wait",
+                "--force-recreate",
+                "--pull",
+                "never",
+                "stalwart",
+            ],
+            repository=repository,
+            environment=self._environment(repository),
+        )
+
+    def _upsert(
+        self,
+        client: object,
+        desired: DesiredObject,
+        *,
+        domain_id: str,
+    ) -> str:
+        value = _resolve_references(desired.desired_dict(), domain_id)
+        if not isinstance(value, dict):
+            raise BootstrapError("fresh Registry object is malformed")
+        lookup = desired.lookup_dict()
+        existing: object | None = None
+        if set(lookup) == {"name"} and type(lookup["name"]) is str:
+            ids = client.query_named_ids(desired.object_type, lookup["name"])
+            if not isinstance(ids, tuple) or len(ids) > 1:
+                raise BootstrapError("fresh Registry object is ambiguous")
+            if ids:
+                existing = client.get_one(desired.object_type, ids[0])
+        elif lookup == {"id": "singleton"}:
+            try:
+                existing = client.get_singleton(desired.object_type)
+            except self._registry.RegistryNotFoundError:
+                existing = None
+        elif desired.object_type != "Tracer":
+            raise BootstrapError("fresh Registry lookup is malformed")
+        if existing is None:
+            created = client.create(desired.object_type, value)
+            return _validate_mutation_result(
+                created,
+                operation="create",
+                object_type=desired.object_type,
+            )
+        object_id = getattr(existing, "object_id", None)
+        observed = existing.value()
+        if type(object_id) is not str or not isinstance(observed, dict):
+            raise BootstrapError("fresh Registry projection is malformed")
+        observed = _registry_value_without_id(observed)
+        patch = _desired_patch(
+            value,
+            observed,
+            object_type=desired.object_type,
+        )
+        if patch:
+            updated = client.update(
+                desired.object_type,
+                object_id,
+                patch,
+            )
+            _validate_mutation_result(
+                updated,
+                operation="update",
+                object_type=desired.object_type,
+                object_id=object_id,
+            )
+        return object_id
+
+    def apply_contract(self, repository: Path) -> None:
+        paths = BootstrapPaths.for_repository(repository)
+        desired = load_desired_state(paths)
+        normal = load_normal_runtime_contract(paths)
+        credential = self._registry.BasicCredential(
+            FRESH_RECOVERY_USERNAME,
+            FRESH_RECOVERY_PASSWORD,
+        )
+        client = self._registry.RegistryClient(
+            credential,
+            expected_username=FRESH_RECOVERY_USERNAME,
+            expected_account_id=None,
+            timeout_seconds=5.0,
+        )
+        with client:
+            client.discover()
+            domain = desired.object("Domain")
+            domain_id = self._upsert(client, domain, domain_id="pending")
+            for item in desired.objects:
+                if item.object_type in {"Domain", "Account"}:
+                    continue
+                self._upsert(client, item, domain_id=domain_id)
+            for item in normal.objects:
+                self._upsert(client, item, domain_id=domain_id)
+            account = desired.object("Account")
+            if client.query_named_ids("Account", MANAGEMENT_LOCAL_PART):
+                raise BootstrapError("protected management Account already exists")
+            account_value = _resolve_references(
+                account.desired_dict(),
+                domain_id,
+            )
+            if not isinstance(account_value, dict):
+                raise BootstrapError("protected management Account is malformed")
+            account_value["credentials"] = {
+                "0": {
+                    "@type": "Password",
+                    "allowedIps": {},
+                    "secret": normal.management_password,
+                },
+            }
+            created = client.create("Account", account_value)
+            self._management_account_id = _validate_mutation_result(
+                created,
+                operation="create",
+                object_type="Account",
+            )
+        _write_new_canonical_json_0600(
+            paths.protected_accounts,
+            {
+                "account_ids": [self._management_account_id],
+                "schema": PROTECTED_ACCOUNTS_SCHEMA,
+            },
+            root=repository,
+        )
+
+    def _protected_account_id(self, repository: Path) -> str:
+        if self._management_account_id is not None:
+            return self._management_account_id
+        _binding, content = _snapshot_regular(
+            BootstrapPaths.for_repository(repository).protected_accounts,
+            root=repository,
+            label="protected Stalwart Accounts",
+            required_mode=0o600,
+            maximum=4096,
+        )
+        try:
+            value = json.loads(content.decode("utf-8", "strict"))
+        except (UnicodeError, json.JSONDecodeError):
+            raise BootstrapError("protected Stalwart Account is malformed") from None
+        ids = value.get("account_ids") if isinstance(value, dict) else None
+        if (
+            not isinstance(ids, list)
+            or len(ids) != 1
+            or type(ids[0]) is not str
+            or SAFE_ID_PATTERN.fullmatch(ids[0]) is None
+        ):
+            raise BootstrapError("protected Stalwart Account is malformed")
+        return ids[0]
+
+    def prove(self, repository: Path, phase: str) -> None:
+        if phase not in {"recovery", "normal", "restarted"}:
+            raise BootstrapError("fresh Stalwart proof phase is malformed")
+        account_id = self._protected_account_id(repository)
+        for attempt in range(30):
+            try:
+                credential = self._registry.BasicCredential(
+                    MANAGEMENT_ADDRESS,
+                    FRESH_RECOVERY_PASSWORD,
+                )
+                client = self._registry.RegistryClient(
+                    credential,
+                    expected_username=MANAGEMENT_ADDRESS,
+                    expected_account_id=account_id,
+                    timeout_seconds=5.0,
+                )
+                with client:
+                    session = client.discover()
+                    if getattr(session, "account_id", None) != account_id:
+                        raise BootstrapError(
+                            "fresh JMAP identity proof is malformed",
+                        )
+                with smtplib.SMTP("127.0.0.1", 8587, timeout=5.0) as smtp:
+                    smtp.ehlo()
+                    smtp.login(MANAGEMENT_ADDRESS, FRESH_RECOVERY_PASSWORD)
+                    status, _message = smtp.noop()
+                    if status != 250:
+                        raise BootstrapError("fresh SMTP proof is malformed")
+                return
+            except Exception:
+                if attempt == 29:
+                    break
+                time.sleep(1)
+        raise BootstrapError("fresh Stalwart proof failed safely")
+
+    def stop_recovery(self, repository: Path) -> None:
+        _run_fresh_command(
+            [
+                *_fresh_compose_prefix(repository, recovery=True),
+                "rm",
+                "--force",
+                "--stop",
+                "stalwart",
+                "stalwart-migration-data-owner",
+            ],
+            repository=repository,
+            environment=self._environment(repository),
+        )
+        environment_file = repository / FRESH_RECOVERY_ENV_RELATIVE
+        if _path_present(environment_file):
+            _safe_unlink_0600(environment_file, root=repository)
+
+    def start_normal(self, repository: Path) -> None:
+        _run_fresh_command(
+            [
+                *_fresh_compose_prefix(repository, recovery=False),
+                "up",
+                "--detach",
+                "--wait",
+                "--force-recreate",
+                "--pull",
+                "never",
+                "--no-deps",
+                "stalwart",
+            ],
+            repository=repository,
+        )
+
+    def restart_normal(self, repository: Path) -> None:
+        _run_fresh_command(
+            [
+                *_fresh_compose_prefix(repository, recovery=False),
+                "restart",
+                "--timeout",
+                "30",
+                "stalwart",
+            ],
+            repository=repository,
+        )
+
+    def stop_normal(self, repository: Path) -> None:
+        _run_fresh_command(
+            [
+                *_fresh_compose_prefix(repository, recovery=False),
+                "stop",
+                "--timeout",
+                "30",
+                "stalwart",
+            ],
+            repository=repository,
+        )
+
+    def publish_receipt(self, repository: Path) -> Path:
+        return self._runtime_state.publish_current_receipt(repository)
+
+    def mark_invalid(self, repository: Path) -> None:
+        store = repository / "stalwart-data"
+        try:
+            store.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        marker = store / FRESH_FAILURE_MARKER
+        try:
+            descriptor = os.open(
+                marker,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        except OSError:
+            raise BootstrapError("fresh failure marker could not be written") from None
+        try:
+            os.write(descriptor, b"invalid\n")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def production_fresh_initialization_dependencies(
+) -> FreshInitializationDependencies:
+    """Load the fixed fresh-store runtime stages without touching Docker."""
+    migration = _load_sibling_module(
+        "stalwart_v016.py",
+        "_mail_sandbox_stalwart_v016",
+    )
+    registry = _load_sibling_module(
+        "stalwart_v016_registry.py",
+        "_mail_sandbox_stalwart_v016_registry",
+    )
+    runtime_state = _load_sibling_module(
+        "stalwart_runtime_state.py",
+        "_mail_sandbox_stalwart_runtime_state",
+    )
+    runtime = _ProductionFreshRuntime(
+        migration=migration,
+        registry=registry,
+        runtime_state=runtime_state,
+    )
+    return FreshInitializationDependencies(
+        classify=runtime.classify,
+        validate_definition=runtime.validate_definition,
+        prepare=runtime.prepare,
+        start_recovery=runtime.start_recovery,
+        apply_contract=runtime.apply_contract,
+        prove=runtime.prove,
+        stop_recovery=runtime.stop_recovery,
+        start_normal=runtime.start_normal,
+        restart_normal=runtime.restart_normal,
+        stop_normal=runtime.stop_normal,
+        publish_receipt=runtime.publish_receipt,
+        mark_invalid=runtime.mark_invalid,
+    )
 
 
 def _callable_dependency(value: object, label: str) -> object:
@@ -6542,9 +7242,9 @@ def _bootstrap_inside_recovery_runtime(
     dependencies: BootstrapOrchestratorDependencies,
 ) -> None:
     if (
-        getattr(runtime, "base_url", None) != "http://127.0.0.1:18080"
+        getattr(runtime, "base_url", None) != "http://127.0.0.1:8443"
         or getattr(runtime, "api_url", None)
-        != "http://127.0.0.1:18080/jmap/"
+        != "http://127.0.0.1:8443/jmap/"
         or getattr(runtime, "server_version", None) != SERVER_VERSION
     ):
         raise BootstrapError("migration bootstrap runtime is not pinned")
@@ -6700,6 +7400,89 @@ def run_bootstrap(
         return validated_final
 
 
+def _validate_fresh_initialization_dependencies(
+    dependencies: FreshInitializationDependencies,
+) -> None:
+    if not isinstance(dependencies, FreshInitializationDependencies) or any(
+        not callable(getattr(dependencies, field))
+        for field in dependencies.__dataclass_fields__
+    ):
+        raise BootstrapError("fresh initialization dependencies are malformed")
+
+
+def initialize_fresh(
+    repository_root: Path,
+    *,
+    dependencies: FreshInitializationDependencies,
+) -> Path:
+    """Initialize one empty root store and publish its current receipt once."""
+    root = _normalized_absolute(repository_root, "repository root")
+    _validate_fresh_initialization_dependencies(dependencies)
+    state = dependencies.classify(root)
+    if state != "fresh":
+        raise BootstrapError("Stalwart runtime is not fresh")
+
+    # This check is deliberately before every mutating stage.  In particular,
+    # the temporary v0.15 root Compose hold cannot create even an empty store.
+    dependencies.validate_definition(root)
+
+    mutation_started = True
+    try:
+        dependencies.prepare(root)
+        dependencies.start_recovery(root)
+        dependencies.apply_contract(root)
+        dependencies.prove(root, "recovery")
+        dependencies.stop_recovery(root)
+        dependencies.start_normal(root)
+        dependencies.prove(root, "normal")
+        dependencies.restart_normal(root)
+        dependencies.prove(root, "restarted")
+        receipt = dependencies.publish_receipt(root)
+        if not isinstance(receipt, Path) or not receipt.is_absolute():
+            raise BootstrapError("current runtime receipt path is malformed")
+        if dependencies.classify(root) != "current":
+            raise BootstrapError("current runtime receipt did not reclassify")
+        return receipt
+    except BaseException as failure:
+        cleanup_failed = False
+        if mutation_started:
+            for cleanup in (
+                dependencies.stop_normal,
+                dependencies.stop_recovery,
+                dependencies.mark_invalid,
+            ):
+                try:
+                    cleanup(root)
+                except BaseException as cleanup_error:
+                    cleanup_failed = True
+                    if not isinstance(cleanup_error, Exception):
+                        try:
+                            cleanup_error.add_note(
+                                "fresh Stalwart cleanup continued",
+                            )
+                        except BaseException:
+                            pass
+            try:
+                cleanup_failed = (
+                    dependencies.classify(root) != "invalid"
+                    or cleanup_failed
+                )
+            except BaseException:
+                cleanup_failed = True
+        if not isinstance(failure, Exception):
+            if cleanup_failed:
+                try:
+                    failure.add_note(
+                        "fresh Stalwart cleanup failed safely",
+                    )
+                except BaseException:
+                    pass
+            raise
+        raise BootstrapError(
+            "fresh Stalwart initialization failed safely",
+        ) from None
+
+
 def build_routing_verifier_command(
     repository_root: Path,
     invocation_id: str,
@@ -6763,12 +7546,22 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=_absolute_cli_path,
         help="normalized absolute Task 6 migration Python",
     )
+    initialize_parser = subparsers.add_parser(
+        "initialize-fresh",
+        help="initialize one empty root store as the normal runtime",
+    )
+    initialize_parser.add_argument(
+        "--repository",
+        required=True,
+        type=_absolute_cli_path,
+        help="exact normalized repository root",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    live_bootstrap_started = False
+    live_action_started: str | None = None
     if arguments and arguments[0] in {
         "apply",
         "execute",
@@ -6787,13 +7580,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             load_desired_state(paths)
             print(paths.manifest)
             return 0
-        if options.command != "bootstrap":
+        if options.command not in {"bootstrap", "initialize-fresh"}:
             raise BootstrapError("requested action is unavailable")
         if options.repository != REPOSITORY_ROOT:
             raise BootstrapError(
                 "bootstrap repository must be the exact repository root",
             )
-        live_bootstrap_started = True
+        if options.command == "initialize-fresh":
+            live_action_started = "fresh initialization"
+            receipt = initialize_fresh(
+                options.repository,
+                dependencies=production_fresh_initialization_dependencies(),
+            )
+            print(receipt)
+            return 0
+        live_action_started = "bootstrap"
         token = run_bootstrap(
             options.repository,
             options.migration_python,
@@ -6802,21 +7603,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(token.final_receipt.path)
         return 0
     except BootstrapError as error:
-        if live_bootstrap_started:
+        if live_action_started is not None:
             print(
-                "error: Stalwart bootstrap failed safely",
+                f"error: Stalwart {live_action_started} failed safely",
                 file=sys.stderr,
             )
         else:
             print(f"error: {error}", file=sys.stderr)
         return 1
     except Exception:
-        print("error: Stalwart bootstrap failed safely", file=sys.stderr)
+        label = live_action_started or "bootstrap"
+        print(f"error: Stalwart {label} failed safely", file=sys.stderr)
         return 1
     except BaseException:
-        if not live_bootstrap_started:
+        if live_action_started is None:
             raise
-        print("error: Stalwart bootstrap failed safely", file=sys.stderr)
+        print(
+            f"error: Stalwart {live_action_started} failed safely",
+            file=sys.stderr,
+        )
         return 1
 
 

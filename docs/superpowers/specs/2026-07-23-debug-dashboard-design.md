@@ -1,5 +1,9 @@
 # Debug Dashboard — Design Specification
 
+> **Superseded provider version:** This original design records the v0.16.16
+> provider contract used at the time. The 2026-08-10 single-stack plan and its
+> 2026-08-11 revalidation select stable Stalwart v0.16.17 for active work.
+
 **Date:** 2026-07-23
 
 **Status:** Design approved; AppPassword and confirmed Dovecot stdio amendments incorporated

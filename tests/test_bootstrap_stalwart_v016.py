@@ -218,6 +218,64 @@ MANIFEST_RECORDS = (
         "object_type": "Account",
     },
     {
+        "desired": {
+            "bind": {"[::]:587": True},
+            "name": "submission",
+            "protocol": "smtp",
+            "tlsImplicit": False,
+            "useTls": False,
+        },
+        "kind": "normal_runtime_object",
+        "lookup": {"name": "submission"},
+        "object_type": "NetworkListener",
+    },
+    {
+        "desired": {
+            "directoryId": None,
+            "passwordMinLength": 1,
+            "passwordMinStrength": "zero",
+        },
+        "kind": "normal_runtime_object",
+        "lookup": {"id": "singleton"},
+        "object_type": "Authentication",
+    },
+    {
+        "desired": {
+            "maxFailures": {"else": "3", "match": {}},
+            "mustMatchSender": {"else": "true", "match": {}},
+            "require": {"else": "true", "match": {}},
+            "saslMechanisms": {
+                "else": "[plain, login, oauthbearer, xoauth2]",
+                "match": {},
+            },
+            "waitOnFail": {"else": "0ms", "match": {}},
+        },
+        "kind": "normal_runtime_object",
+        "lookup": {"id": "singleton"},
+        "object_type": "MtaStageAuth",
+    },
+    {
+        "desired": {
+            "@type": "Stdout",
+            "ansi": False,
+            "buffered": False,
+            "enable": True,
+            "events": {},
+            "eventsPolicy": "exclude",
+            "level": "debug",
+            "lossy": False,
+            "multiline": False,
+        },
+        "kind": "normal_runtime_object",
+        "lookup": {"description": "mail-sandbox debug stdout"},
+        "object_type": "Tracer",
+    },
+    {
+        "account": "dashboard-management@local.test",
+        "kind": "normal_runtime_password_intent",
+        "password": "secret",
+    },
+    {
         "account": "dashboard-management@local.test",
         "allowed_ips": {},
         "description": "mail-sandbox/debug-dashboard/management",
@@ -285,7 +343,7 @@ TASK6_APPLY_PAYLOAD = {
         "management_status": 200,
         "operation_count": 5,
         "operations_sha256": "f" * 64,
-        "server_version": "0.16.16",
+        "server_version": "0.16.17",
     },
     "runtime_artifacts": {
         "config": task6_file("config.json", 31),
@@ -491,14 +549,38 @@ class CanonicalAssetTest(unittest.TestCase):
             {"address": "dashboard-management@local.test"},
         )
 
-    def test_manifest_has_no_secret_or_password_and_no_invented_directory(self) -> None:
+    def test_manifest_has_exact_local_password_intent_and_no_invented_directory(self) -> None:
         lowered = MANIFEST_BYTES.decode("utf-8").lower()
-        self.assertNotIn('"secret"', lowered)
-        self.assertNotIn("password", lowered)
+        self.assertEqual(lowered.count('"password":"secret"'), 1)
+        self.assertEqual(lowered.count('"kind":"normal_runtime_password_intent"'), 1)
         self.assertNotIn('"object_type":"directory"', lowered)
         self.assertIn('"object_type":"mtaroute"', lowered)
         self.assertIn('"object_type":"sievesystemscript"', lowered)
         self.assertIn('"isactive":true', lowered)
+
+    def test_loads_normal_runtime_contract_for_password_smtp_and_debug_stdout(self) -> None:
+        with TemporaryRepository() as repository:
+            contract = bootstrap.load_normal_runtime_contract(
+                bootstrap.BootstrapPaths.for_repository(repository.root),
+            )
+
+        self.assertEqual(contract.management_address, "dashboard-management@local.test")
+        self.assertEqual(contract.management_password, "secret")
+        self.assertEqual(
+            tuple(item.object_type for item in contract.objects),
+            ("NetworkListener", "Authentication", "MtaStageAuth", "Tracer"),
+        )
+        submission = contract.objects[0].desired_dict()
+        self.assertEqual(submission["bind"], {"[::]:587": True})
+        self.assertEqual(submission["protocol"], "smtp")
+        authentication = contract.objects[1].desired_dict()
+        self.assertIsNone(authentication["directoryId"])
+        self.assertEqual(authentication["passwordMinLength"], 1)
+        self.assertEqual(authentication["passwordMinStrength"], "zero")
+        tracer = contract.objects[3].desired_dict()
+        self.assertEqual(tracer["@type"], "Stdout")
+        self.assertEqual(tracer["level"], "debug")
+        self.assertFalse(tracer["buffered"])
 
     def test_rejects_duplicate_extra_malformed_and_noncanonical_records(self) -> None:
         mutations = (
@@ -1121,7 +1203,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.16",
+            server_version="0.16.17",
         )
 
     def write_proof(
@@ -1536,7 +1618,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             bootstrap.plan_crash_recovery(final_state, remote_keys=()).state,
             "validated-final",
         )
-        self.assertEqual(final_state.final_receipt.server_version, "0.16.16")
+        self.assertEqual(final_state.final_receipt.server_version, "0.16.17")
         self.assertIn("redacted", repr(final_state.final_receipt).lower())
 
     def test_remote_orphan_is_exactly_revoked_then_replaced_once(self) -> None:
@@ -1824,7 +1906,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                     authenticated_username=(
                         "dashboard-management@local.test"
                     ),
-                    server_version="0.16.16",
+                    server_version="0.16.17",
                 )
         except TypeError:
             self.fail("key adoption lacks a complete-inventory API")
@@ -1836,7 +1918,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.16",
+            server_version="0.16.17",
         )
         payload = bootstrap.build_key_checkpoint_payload(
             account,
@@ -1852,7 +1934,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             {
                 "authentication": {
                     "account_id": "management-id",
-                    "server_version": "0.16.16",
+                    "server_version": "0.16.17",
                     "status": 200,
                     "username": "dashboard-management@local.test",
                 },
@@ -2281,7 +2363,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                         authenticated_username=(
                             "dashboard-management@local.test"
                         ),
-                        server_version="0.16.16",
+                        server_version="0.16.17",
                     )
 
         incomplete = safe_objects[:-1]
@@ -2296,7 +2378,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.16",
+                server_version="0.16.17",
             )
 
         incompatible_preserved = self.preserved_objects()
@@ -2312,7 +2394,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.16",
+                server_version="0.16.17",
             )
 
     def test_executor_proof_binds_durable_account_domain_id(self) -> None:
@@ -2338,7 +2420,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 authentication_status=200,
                 authenticated_account_id="management-id",
                 authenticated_username="dashboard-management@local.test",
-                server_version="0.16.16",
+                server_version="0.16.17",
             )
 
         forged_account = replace(
@@ -2362,7 +2444,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             authentication_status=200,
             authenticated_account_id="management-id",
             authenticated_username="dashboard-management@local.test",
-            server_version="0.16.16",
+            server_version="0.16.17",
         )
         forged_payload = bootstrap.build_proof_payload(
             inputs,
@@ -2405,7 +2487,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
                 "server_version",
             },
         )
-        self.assertEqual(payload["server_version"], "0.16.16")
+        self.assertEqual(payload["server_version"], "0.16.17")
         self.assertEqual(
             payload["schema"],
             "mail-sandbox.stalwart-v016-bootstrap-receipt.v2",
@@ -2420,7 +2502,7 @@ class CheckpointAndReceiptTest(unittest.TestCase):
             payload["authentication"],
             {
                 "account_id": "management-id",
-                "server_version": "0.16.16",
+                "server_version": "0.16.17",
                 "status": 200,
                 "username": "dashboard-management@local.test",
             },
@@ -3709,6 +3791,231 @@ class ProductionRoutingRunnerTest(unittest.TestCase):
                     self.assertNotIn(canary, str(raised.exception))
 
 
+class FreshInitializationTest(unittest.TestCase):
+    CURRENT_IMAGE = (
+        "stalwartlabs/stalwart:v0.16.17@"
+        "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
+    )
+
+    def dependencies(
+        self,
+        events: list[object],
+        states: list[str],
+        *,
+        fail_at: str | None = None,
+    ) -> object:
+        def step(name: str, result: object = None):
+            def run(*args: object) -> object:
+                events.append((name, *args))
+                if fail_at == name:
+                    raise RuntimeError("secret failure detail")
+                return result
+
+            return run
+
+        def classify(repository: Path) -> str:
+            events.append(("classify", repository))
+            return states.pop(0)
+
+        return bootstrap.FreshInitializationDependencies(
+            classify=classify,
+            validate_definition=step("validate-definition"),
+            prepare=step("prepare"),
+            start_recovery=step("start-recovery"),
+            apply_contract=step("apply-contract"),
+            prove=step("prove"),
+            stop_recovery=step("stop-recovery"),
+            start_normal=step("start-normal"),
+            restart_normal=step("restart-normal"),
+            stop_normal=step("stop-normal"),
+            publish_receipt=step(
+                "publish-receipt",
+                Path("/unit/current.json"),
+            ),
+            mark_invalid=step("mark-invalid"),
+        )
+
+    def test_initialize_fresh_orders_proofs_restart_and_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+            dependencies = self.dependencies(
+                events,
+                ["fresh", "current"],
+            )
+
+            receipt = bootstrap.initialize_fresh(
+                root,
+                dependencies=dependencies,
+            )
+
+            self.assertEqual(receipt, Path("/unit/current.json"))
+            self.assertEqual(
+                [event[0] for event in events],
+                [
+                    "classify",
+                    "validate-definition",
+                    "prepare",
+                    "start-recovery",
+                    "apply-contract",
+                    "prove",
+                    "stop-recovery",
+                    "start-normal",
+                    "prove",
+                    "restart-normal",
+                    "prove",
+                    "publish-receipt",
+                    "classify",
+                ],
+            )
+            self.assertEqual(
+                [event[2] for event in events if event[0] == "prove"],
+                ["recovery", "normal", "restarted"],
+            )
+
+    def test_legacy_hold_refuses_before_any_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+            dependencies = self.dependencies(events, ["fresh"])
+            dependencies.validate_definition = (
+                lambda repository: (
+                    events.append(("validate-definition", repository)),
+                    (_ for _ in ()).throw(
+                        bootstrap.BootstrapError(
+                            "root Compose is not the current runtime",
+                        ),
+                    ),
+                )[-1]
+            )
+
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "root Compose is not the current runtime",
+            ):
+                bootstrap.initialize_fresh(
+                    root,
+                    dependencies=dependencies,
+                )
+
+            self.assertEqual(
+                [event[0] for event in events],
+                ["classify", "validate-definition"],
+            )
+
+    def test_failure_after_prepare_stops_and_marks_store_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+            dependencies = self.dependencies(
+                events,
+                ["fresh", "invalid"],
+                fail_at="apply-contract",
+            )
+
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "fresh Stalwart initialization failed safely",
+            ) as raised:
+                bootstrap.initialize_fresh(
+                    root,
+                    dependencies=dependencies,
+                )
+
+            self.assertNotIn("secret failure detail", str(raised.exception))
+            self.assertEqual(
+                [event[0] for event in events],
+                [
+                    "classify",
+                    "validate-definition",
+                    "prepare",
+                    "start-recovery",
+                    "apply-contract",
+                    "stop-normal",
+                    "stop-recovery",
+                    "mark-invalid",
+                    "classify",
+                ],
+            )
+
+    def test_rendered_root_definition_is_exact_image_ports_and_mounts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = {
+                "environment": {
+                    "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
+                },
+                "image": self.CURRENT_IMAGE,
+                "ports": [
+                    {
+                        "host_ip": "127.0.0.1",
+                        "mode": "ingress",
+                        "protocol": "tcp",
+                        "published": "8443",
+                        "target": 8080,
+                    },
+                    {
+                        "host_ip": "127.0.0.1",
+                        "mode": "ingress",
+                        "protocol": "tcp",
+                        "published": "8587",
+                        "target": 587,
+                    },
+                ],
+                "restart": "unless-stopped",
+                "user": "2000:2000",
+                "volumes": [
+                    {
+                        "read_only": True,
+                        "source": str(root / "stalwart"),
+                        "target": "/etc/stalwart",
+                        "type": "bind",
+                    },
+                    {
+                        "source": str(root / "stalwart-data"),
+                        "target": "/var/lib/stalwart",
+                        "type": "bind",
+                    },
+                ],
+            }
+
+            bootstrap._validate_fresh_compose_model(
+                json.dumps({"services": {"stalwart": service}}).encode(),
+                repository=root,
+                current_image=self.CURRENT_IMAGE,
+            )
+
+            mutations = {
+                "floating-image": lambda value: value.update(
+                    {"image": "stalwartlabs/stalwart:latest"},
+                ),
+                "missing-smtp": lambda value: value["ports"].pop(),
+                "broad-jmap": lambda value: value["ports"][0].update(
+                    {"host_ip": "0.0.0.0"},
+                ),
+                "wrong-store": lambda value: value["volumes"][1].update(
+                    {"source": str(root / "copy")},
+                ),
+                "recovery-env": lambda value: value["environment"].update(
+                    {"STALWART_RECOVERY_MODE": "1"},
+                ),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    changed = json.loads(json.dumps(service))
+                    mutate(changed)
+                    with self.assertRaises(bootstrap.BootstrapError):
+                        bootstrap._validate_fresh_compose_model(
+                            json.dumps(
+                                {"services": {"stalwart": changed}},
+                            ).encode(),
+                            repository=root,
+                            current_image=self.CURRENT_IMAGE,
+                        )
+
+
 class ProductionOrchestratorTest(unittest.TestCase):
     STARTED = "2026-07-28T12:00:00Z"
     INVOCATION = "0123456789abcdef0123456789abcdef"
@@ -3887,7 +4194,7 @@ class ProductionOrchestratorTest(unittest.TestCase):
             "management_credential_id": "management-credential",
             "preserved_objects_sha256": "b" * 64,
             "schema": "mail-sandbox.stalwart-v016-routing-input.v1",
-            "server_version": "0.16.16",
+            "server_version": "0.16.17",
         }
 
     def dependencies(
@@ -3959,9 +4266,9 @@ class ProductionOrchestratorTest(unittest.TestCase):
             self.assertIs(operation_lock, events[0][1])
             events.append(("runtime-enter", paths, kwargs))
             runtime = SimpleNamespace(
-                base_url="http://127.0.0.1:18080",
-                api_url="http://127.0.0.1:18080/jmap/",
-                server_version="0.16.16",
+                base_url="http://127.0.0.1:8443",
+                api_url="http://127.0.0.1:8443/jmap/",
+                server_version="0.16.17",
                 borrow_recovery_credential=lambda: memoryview(recovery).toreadonly(),
             )
             try:
@@ -4669,9 +4976,9 @@ class ProductionOrchestratorTest(unittest.TestCase):
                     return view
 
                 runtime = SimpleNamespace(
-                    base_url="http://127.0.0.1:18080",
-                    api_url="http://127.0.0.1:18080/jmap/",
-                    server_version="0.16.16",
+                    base_url="http://127.0.0.1:8443",
+                    api_url="http://127.0.0.1:8443/jmap/",
+                    server_version="0.16.17",
                     borrow_recovery_credential=borrow,
                 )
                 return operation(runtime)
@@ -6082,6 +6389,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(options.repository, REPOSITORY_ROOT)
         self.assertEqual(options.migration_python, Path(sys.executable))
 
+    def test_initialize_fresh_cli_has_the_exact_documented_shape(self) -> None:
+        parser = bootstrap._build_argument_parser()
+        options = parser.parse_args(
+            [
+                "initialize-fresh",
+                "--repository",
+                str(REPOSITORY_ROOT),
+            ],
+        )
+
+        self.assertEqual(options.command, "initialize-fresh")
+        self.assertEqual(options.repository, REPOSITORY_ROOT)
+
     def test_routing_command_is_the_fixed_list_form_contract(self) -> None:
         invocation = "0123456789abcdef0123456789abcdef"
         self.assertEqual(
@@ -6159,6 +6479,47 @@ class CliTest(unittest.TestCase):
         run.assert_called_once_with(
             REPOSITORY_ROOT,
             Path(sys.executable),
+            dependencies=dependencies,
+        )
+
+    def test_initialize_fresh_cli_wires_production_stages_once(self) -> None:
+        dependencies = object()
+        receipt = (
+            REPOSITORY_ROOT
+            / "debug-dashboard"
+            / ".runtime"
+            / "stalwart"
+            / "current.json"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                bootstrap,
+                "production_fresh_initialization_dependencies",
+                return_value=dependencies,
+            ),
+            mock.patch.object(
+                bootstrap,
+                "initialize_fresh",
+                return_value=receipt,
+            ) as initialize,
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            result = bootstrap.main(
+                [
+                    "initialize-fresh",
+                    "--repository",
+                    str(REPOSITORY_ROOT),
+                ],
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(stdout.getvalue(), f"{receipt}\n")
+        initialize.assert_called_once_with(
+            REPOSITORY_ROOT,
             dependencies=dependencies,
         )
 
@@ -6274,6 +6635,7 @@ class CliTest(unittest.TestCase):
         )
         self.assertNotIn("migration receipt", help_text)
         self.assertIn("bootstrap", help_text)
+        self.assertIn("initialize-fresh", help_text)
         self.assertNotIn("execute", help_text)
         self.assertNotIn("apply", help_text)
 

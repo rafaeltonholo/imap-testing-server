@@ -68,7 +68,7 @@ curl -fsSL https://repo1.maven.org/maven2/jakarta/mail/jakarta.mail-api/maven-me
 curl -fsSL https://repo1.maven.org/maven2/org/eclipse/angus/angus-mail/maven-metadata.xml
 curl -fsSL https://api.github.com/repos/stalwartlabs/stalwart/releases/latest
 docker buildx imagetools inspect dovecot/dovecot:2.4.4
-docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.16
+docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.17
 ```
 
 Expected: every selected direct dependency is the newest stable release as of the recorded timestamp. A newer alpha, beta, RC, nightly, unreleased tag, or child artifact managed by a selected parent is recorded under “Not selected and why.”

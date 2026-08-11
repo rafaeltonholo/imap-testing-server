@@ -1,7 +1,8 @@
 # Dependency baseline revalidation — 2026-08-10
 
 All publisher metadata in this record was retrieved on 2026-08-10, with the
-final UTC checkpoint at `2026-08-10T19:08:53Z`. Versions described as stable
+final UTC checkpoint at `2026-08-10T19:08:53Z`. Stalwart alone was revalidated
+on 2026-08-11 after its next stable release. Versions described as stable
 exclude alpha, beta, milestone, release-candidate, development, and nightly
 channels. An OCI digest below is the multi-architecture image index digest,
 not a platform manifest digest.
@@ -24,7 +25,7 @@ not a platform manifest digest.
 | Jakarta Mail API | `2.1.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/jakarta/mail/jakarta.mail-api/maven-metadata.xml) | Compile dependency owned exactly once by `dashboard-server`. |
 | Angus Mail | `2.0.5` stable | [Maven Central metadata](https://repo1.maven.org/maven2/org/eclipse/angus/angus-mail/maven-metadata.xml) | Compile-scoped provider owned exactly once by `dashboard-server`; Task 5 requires its typed IMAP MOVE and UIDPLUS APIs. |
 | Dovecot | `2.4.4` stable | [publisher registry tags](https://hub.docker.com/r/dovecot/dovecot/tags), `docker buildx imagetools inspect dovecot/dovecot:2.4.4` | `dovecot/dovecot:2.4.4@sha256:723e3392fe16c6fad8ddc605ea767cc01b4bad9cd9f13eb1dbac15e79c89b2d4`. |
-| Stalwart | `v0.16.16` stable final target | [publisher release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.16), `docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.16` | Final-target index digest `sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced`; the normal service is intentionally not cut over in this task. |
+| Stalwart | `v0.16.17` stable final target | [publisher release](https://github.com/stalwartlabs/stalwart/releases/tag/v0.16.17), `docker buildx imagetools inspect stalwartlabs/stalwart:v0.16.17` | Revalidated 2026-08-11; final-target index digest `sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa`; the normal service is intentionally not cut over in this task. |
 | Python | `3.14.7` stable | [Python 3.14.7 release](https://www.python.org/downloads/release/python-3147/), `docker buildx imagetools inspect python:3.14.7-slim-trixie` | `python:3.14.7-slim-trixie@sha256:83c1cebb322d099ac9e3a3a532ba74b0146d702838b25e4c75c02fa81ffeb910`; Python.org published this seventh 3.14 maintenance release on 2026-08-05. |
 | Debian | `13.6` stable | [Debian stable release](https://www.debian.org/releases/stable/), `docker buildx imagetools inspect debian:13.6-slim` | `debian:13.6-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258`; the tag's index was refreshed since the previous pin. |
 
@@ -76,7 +77,7 @@ stalwartlabs/stalwart:v0.15@sha256:dcf575db2d53d9ef86d6ced8abe4ba491984659a0f886
 ```
 
 This is an immutable description of the observed legacy runtime, not the
-selected final baseline. `v0.16.16` remains the newest stable target and needs
+selected final baseline. `v0.16.17` is the newest stable target and needs
 the separately authorized capture/migration/cutover workflow. No
 `stalwart-data` content was read and the running container was not changed.
 
@@ -93,6 +94,10 @@ selections:
 - Compose Material3 `1.12.0-alpha01` through `1.12.0-alpha03` are prereleases
   and are not the Compose `1.11.1` mapping.
 - Jakarta Mail API `2.2.0-M1` and Angus Mail `2.1.0-M1` are milestone builds.
+- Stalwart development branches and unversioned edge images may contain commits
+  newer than `v0.16.17`, but they are not stable, versioned, reproducible
+  releases. “Latest” for this project means the newest publisher-designated
+  stable release, so those latest-latest development artifacts are excluded.
 - Python `3.15.0a1` through `3.15.0a8`, `3.15.0b1` through `3.15.0b4`, and
   [`3.15.0rc1`](https://www.python.org/downloads/release/python-3150rc1/)
   are preview releases. Python.org published `3.15.0rc1` on 2026-08-04 but
@@ -105,7 +110,8 @@ selections:
 
 No numerically newer published entry was visible in the cited stable/artifact
 metadata for Ktor, kotlinx.serialization, JUnit, Logback, Selenium, the
-selected js-joda WebJar coordinate, Dovecot, or Stalwart. Material3 and Skiko
+selected js-joda WebJar coordinate, or Dovecot. Stalwart was revalidated
+separately as `v0.16.17`. Material3 and Skiko
 are the only parent-managed exceptions in the Kotlin graph; the JUnit API,
 engine, and launcher versions are BOM-managed, and the Debian binaries are
 distribution-managed.

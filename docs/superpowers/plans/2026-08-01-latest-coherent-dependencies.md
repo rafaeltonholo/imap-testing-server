@@ -1,5 +1,10 @@
 # Latest Coherent Dependency Baseline Implementation Plan
 
+> **Historical checkpoint:** This plan records the v0.16.16 selection and
+> evidence available during its 2026-08-01 batch. Active dashboard work was
+> revalidated on 2026-08-11 and now targets stable Stalwart v0.16.17; commands
+> below are not v0.16.17 evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Upgrade every active direct dashboard, provider, container, and repository-tool dependency to the latest coherent stable baseline approved in the 2026-08-01 design, and re-prove the Kotlin browser and both provider gates without downgrades.

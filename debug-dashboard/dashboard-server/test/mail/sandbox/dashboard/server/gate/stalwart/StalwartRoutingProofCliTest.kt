@@ -539,7 +539,7 @@ class StalwartRoutingProofCliTest {
             transport.execute(
                 GateHttpRequest(
                     method = "GET",
-                    url = URI("http://127.0.0.1:18080/.well-known/jmap"),
+                    url = URI("http://127.0.0.1:8443/.well-known/jmap"),
                     credential = credential,
                 ),
             )
@@ -548,7 +548,7 @@ class StalwartRoutingProofCliTest {
                     GateHttpRequest(
                         method = "GET",
                         url = URI(
-                            "http://127.0.0.1:18080/download/" +
+                            "http://127.0.0.1:8443/download/" +
                                 "senderaccount/blob1/message.eml",
                         ),
                         credential = credential,
@@ -1002,7 +1002,7 @@ class StalwartRoutingProofCliTest {
             put("undo_status", "pending")
         }
         return StalwartRoutingVerifierEvidence(
-            serverVersion = "0.16.16",
+            serverVersion = "0.16.17",
             managementAccountId = "managementaccount",
             managementCredentialId = "managementcredential",
             bootstrapProof = bootstrapProof(),
@@ -1129,7 +1129,7 @@ class StalwartRoutingProofCliTest {
                 "schema",
                 "mail-sandbox.stalwart-v016-routing-input.v1",
             )
-            put("server_version", "0.16.16")
+            put("server_version", "0.16.17")
         }
 
     private fun bootstrapProof(): JsonObject = buildJsonObject {
@@ -1244,7 +1244,7 @@ class StalwartRoutingProofCliTest {
         methodName: String,
     ): GateHttpRequest = GateHttpRequest(
         method = "POST",
-        url = URI("http://127.0.0.1:18080/jmap/"),
+        url = URI("http://127.0.0.1:8443/jmap/"),
         credential = credential,
         body = buildJsonObject {
             put(

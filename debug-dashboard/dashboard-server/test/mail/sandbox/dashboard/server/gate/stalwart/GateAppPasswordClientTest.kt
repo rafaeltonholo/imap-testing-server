@@ -2702,7 +2702,7 @@ class GateAppPasswordClientTest {
             GateHttpResponse(
                 status = 200,
                 effectiveUrl = URI(
-                    "http://127.0.0.1:18080/.well-known/jmap",
+                    "http://127.0.0.1:8443/.well-known/jmap",
                 ),
                 body = """
                     {
@@ -2762,7 +2762,7 @@ class GateAppPasswordClientTest {
     ): GateHttpResponse =
         GateHttpResponse(
             status = 200,
-            effectiveUrl = URI("http://127.0.0.1:18080/jmap/"),
+            effectiveUrl = URI("http://127.0.0.1:8443/jmap/"),
             body = """
                 {
                   "methodResponses":[

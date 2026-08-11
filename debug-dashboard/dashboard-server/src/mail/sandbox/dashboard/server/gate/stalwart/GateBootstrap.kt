@@ -23,7 +23,7 @@ import kotlinx.serialization.json.put
 
 internal object StalwartFixtureAudit {
     private const val IMAGE =
-        "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+        "stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
     private const val PUBLIC_URL = "http://127.0.0.1:18443"
     private const val CONFIG_JSON =
         "{\"@type\":\"RocksDb\",\"path\":\"/var/lib/stalwart/\"}\n"

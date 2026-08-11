@@ -1,9 +1,10 @@
 # Gate 0B — Stalwart v0.16.14
 
-## Superseding v0.16.16 evidence
+## Historical v0.16.16 evidence; current target v0.16.17
 
-The isolated latest-provider runner supersedes the v0.16.14 evidence below for
-the active dashboard baseline. It passed bootstrap, recovery retirement, raw
+The isolated v0.16.16 provider runner superseded the v0.16.14 evidence below.
+It remains historical evidence rather than a claim about the newly selected
+v0.16.17 runtime. The v0.16.16 run passed bootstrap, recovery retirement, raw
 Blob compatibility, the permission matrix, AppPassword semantics, the mail
 credential lifecycle and all restart phases, same-Account mailbox and keyword
 mutations, and Account creation followed by SMTP/JMAP routing, reading, and

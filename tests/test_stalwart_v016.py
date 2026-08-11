@@ -865,13 +865,13 @@ class FixedContractTest(unittest.TestCase):
     def test_pins_the_exact_stalwart_image_and_migration_script_digest(self) -> None:
         self.assertEqual(
             getattr(stalwart_v016, "STALWART_IMAGE", None),
-            "stalwartlabs/stalwart:v0.16.16@"
-            "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+            "stalwartlabs/stalwart:v0.16.17@"
+            "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
         )
         self.assertEqual(
             getattr(stalwart_v016, "STALWART_IMAGE_ID", None),
             "sha256:"
-            "66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+            "a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
         )
         self.assertEqual(
             getattr(stalwart_v016, "MIGRATION_SCRIPT_SHA256", None),
@@ -884,7 +884,7 @@ class FixedContractTest(unittest.TestCase):
         )
         self.assertEqual(
             CANONICAL_MIGRATION_OVERLAY_SHA256,
-            "77dee99e79f4ce6a6be63edc51b5090e8fbab484fbdc04331cf0bd19f4bc28ca",
+            "77540a67777579e8b4a2be9d386122c3f7f7dba911889cbe8100d49a0e4fac62",
         )
         self.assertEqual(
             getattr(stalwart_v016, "MIGRATION_COMPOSE_SHA256", None),
@@ -900,7 +900,7 @@ class FixedContractTest(unittest.TestCase):
 
         self.assertIn(
             "https://raw.githubusercontent.com/stalwartlabs/stalwart/"
-            "v0.16.16/resources/scripts/migrate_v016.py",
+            "v0.16.17/resources/scripts/migrate_v016.py",
             text,
         )
         self.assertNotIn(
@@ -1614,12 +1614,12 @@ class RecoveryRetirementContractTest(unittest.TestCase):
             api_key_projection_sha256="0" * 64,
             retirement_attempt_sha256="b" * 64,
             operation_plan_sha256="c" * 64,
-            server_version="0.16.16",
+            server_version="0.16.17",
             management_status=200,
             readiness_status=200,
             old_recovery_auth_status=401,
             normal_url="http://127.0.0.1:8443",
-            image_reference="stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+            image_reference="stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
             image_id="sha256:" + "d" * 64,
             container_id="e" * 64,
             overlapping_writer_ids=("e" * 64,),
@@ -1643,7 +1643,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
             bootstrap_receipt_sha256="0" * 64,
             apply_receipt_sha256="1" * 64,
             bootstrap_proof_sha256="2" * 64,
-            server_version="0.16.16",
+            server_version="0.16.17",
             authentication_status=200,
             management_account_id="unit-account",
             management_api_key_id="unit-key",
@@ -2207,7 +2207,7 @@ class CommandRunnerTest(unittest.TestCase):
                 base_url="http://127.0.0.1:19443",
                 username="admin",
                 password=secret,
-                version="0.16.16",
+                version="0.16.17",
             ),
         ]
         for candidate in invalid:
@@ -4217,7 +4217,7 @@ class ApplyPreparationTest(unittest.TestCase):
         return stalwart_v016.PostApplyCensusProof(
             operations_sha256=self._operation_digest(operations),
             operation_count=len(operations),
-            server_version="0.16.16",
+            server_version="0.16.17",
             management_status=200,
         )
 
@@ -4327,7 +4327,7 @@ class ApplyPreparationTest(unittest.TestCase):
     ) -> dict[str, object]:
         return {
             "Id": container_id,
-            "Image": "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+            "Image": "stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
             "ImageID": stalwart_v016.STALWART_IMAGE_ID,
             "User": "2000:2000",
             "Project": plan.source.compose_project,
@@ -4361,7 +4361,13 @@ class ApplyPreparationTest(unittest.TestCase):
                 "8080/tcp": [
                     {
                         "HostIp": "127.0.0.1",
-                        "HostPort": "18080",
+                        "HostPort": "8443",
+                    },
+                ],
+                "587/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "8587",
                     },
                 ],
             },
@@ -6243,7 +6249,7 @@ class ApplyPreparationTest(unittest.TestCase):
             "schema": (
                 "mail-sandbox.stalwart-v016-bootstrap-routing-proof.v1"
             ),
-            "server_version": "0.16.16",
+            "server_version": "0.16.17",
         }
         self._write_0600(
             routing_proof_path,
@@ -6263,7 +6269,7 @@ class ApplyPreparationTest(unittest.TestCase):
             ),
             "authentication": {
                 "account_id": account_id,
-                "server_version": "0.16.16",
+                "server_version": "0.16.17",
                 "status": 200,
                 "username": "dashboard-management@local.test",
             },
@@ -6310,7 +6316,7 @@ class ApplyPreparationTest(unittest.TestCase):
             "schema": (
                 "mail-sandbox.stalwart-v016-bootstrap-receipt.v2"
             ),
-            "server_version": "0.16.16",
+            "server_version": "0.16.17",
         }
         self._write_bootstrap_receipt(fixture, payload)
         fixture.bootstrap_payload = payload
@@ -6470,12 +6476,12 @@ class ApplyPreparationTest(unittest.TestCase):
             ),
             "retirement_attempt_sha256": plan.retirement_attempt.sha256,
             "operation_plan_sha256": plan.operation_plan_sha256,
-            "server_version": "0.16.16",
+            "server_version": "0.16.17",
             "management_status": 200,
             "readiness_status": 200,
             "old_recovery_auth_status": 401,
             "normal_url": "http://127.0.0.1:8443",
-            "image_reference": "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+            "image_reference": "stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
             "image_id": stalwart_v016.STALWART_IMAGE_ID,
             "container_id": "b" * 64,
             "overlapping_writer_ids": ("b" * 64,),
@@ -6531,6 +6537,13 @@ class ApplyPreparationTest(unittest.TestCase):
                             "protocol": "tcp",
                             "published": "8443",
                             "target": 8080,
+                        },
+                        {
+                            "host_ip": "127.0.0.1",
+                            "mode": "ingress",
+                            "protocol": "tcp",
+                            "published": "8587",
+                            "target": 587,
                         },
                     ],
                     "restart": "unless-stopped",
@@ -6596,6 +6609,12 @@ class ApplyPreparationTest(unittest.TestCase):
                     {
                         "HostIp": "127.0.0.1",
                         "HostPort": "8443",
+                    },
+                ],
+                "587/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "8587",
                     },
                 ],
             },
@@ -9136,7 +9155,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     "inspect",
                     "--format",
                     "{{.Id}}",
-                    "stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced",
+                    "stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa",
                 ],
             )
             self.assertEqual(
@@ -10238,7 +10257,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 ):
                     self.assertTrue(running)
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 if (
@@ -10292,7 +10311,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 stalwart_v016.PostApplyCensusProof(
                     operations_sha256=plan.operations_sha256,
                     operation_count=len(plan.operations),
-                    server_version="0.16.16",
+                    server_version="0.16.17",
                     management_status=200,
                 ),
             )
@@ -10411,7 +10430,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 ):
                     self.assertTrue(running)
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 if args == stalwart_v016.build_migration_compose_stop_command(
@@ -10426,9 +10445,9 @@ class ApplyPreparationTest(unittest.TestCase):
                     repr(session),
                     "MigrationBootstrapRuntime(<redacted>)",
                 )
-                self.assertEqual(session.base_url, "http://127.0.0.1:18080")
-                self.assertEqual(session.api_url, "http://127.0.0.1:18080/jmap/")
-                self.assertEqual(session.server_version, "0.16.16")
+                self.assertEqual(session.base_url, "http://127.0.0.1:8443")
+                self.assertEqual(session.api_url, "http://127.0.0.1:8443/jmap/")
+                self.assertEqual(session.server_version, "0.16.17")
                 self.assertEqual(session.container_id, container_id)
                 self.assertEqual(
                     session.operations_sha256,
@@ -10556,7 +10575,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     container_id,
                 ):
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 if args == stalwart_v016.build_migration_compose_stop_command(
@@ -10679,7 +10698,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     container_id,
                 ):
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 return stalwart_v016.RedactedCommandResult(b"", b"")
@@ -10832,7 +10851,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     container_id,
                 ):
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 return stalwart_v016.RedactedCommandResult(b"", b"")
@@ -11033,7 +11052,7 @@ class ApplyPreparationTest(unittest.TestCase):
                         )
                     ):
                         return stalwart_v016.RedactedCommandResult(
-                            b"0.16.16\n",
+                            b"0.16.17\n",
                             b"",
                         )
                     elif args == (
@@ -11179,7 +11198,7 @@ class ApplyPreparationTest(unittest.TestCase):
                         )
                     ):
                         return stalwart_v016.RedactedCommandResult(
-                            b"0.16.16\n",
+                            b"0.16.17\n",
                             b"",
                         )
                     return stalwart_v016.RedactedCommandResult(b"", b"")
@@ -11467,11 +11486,11 @@ class ApplyPreparationTest(unittest.TestCase):
                             )
                         ):
                             stdout = {
-                                "version-format": b"0.16.16\r\n",
+                                "version-format": b"0.16.17\r\n",
                                 "version-value": b"0.16.15\n",
                             }.get(
                                 failure_stage,
-                                b"0.16.16\n",
+                                b"0.16.17\n",
                             )
                             return stalwart_v016.RedactedCommandResult(stdout, b"")
                         if (
@@ -11648,7 +11667,7 @@ class ApplyPreparationTest(unittest.TestCase):
                                 )
                             if args == commands["version"]:
                                 return stalwart_v016.RedactedCommandResult(
-                                    b"0.16.16\n",
+                                    b"0.16.17\n",
                                     b"",
                                 )
                             if args == commands["query"]:
@@ -11767,7 +11786,7 @@ class ApplyPreparationTest(unittest.TestCase):
                             )
                         ):
                             return stalwart_v016.RedactedCommandResult(
-                                b"0.16.16\n",
+                                b"0.16.17\n",
                                 b"",
                             )
                         if (
@@ -14194,7 +14213,7 @@ class ApplyPreparationTest(unittest.TestCase):
             "digest": stalwart_v016.PostApplyCensusProof(
                 operations_sha256="0" * 64,
                 operation_count=2,
-                server_version="0.16.16",
+                server_version="0.16.17",
                 management_status=200,
             ),
             "count": stalwart_v016.PostApplyCensusProof(
@@ -14205,7 +14224,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     ),
                 ),
                 operation_count=1,
-                server_version="0.16.16",
+                server_version="0.16.17",
                 management_status=200,
             ),
             "version": stalwart_v016.PostApplyCensusProof(
@@ -14227,7 +14246,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     ),
                 ),
                 operation_count=2,
-                server_version="0.16.16",
+                server_version="0.16.17",
                 management_status=500,
             ),
         }
@@ -14469,7 +14488,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     "operations_sha256": self._operation_digest(
                         fixture.operations,
                     ),
-                    "server_version": "0.16.16",
+                    "server_version": "0.16.17",
                 },
             )
             self.assertEqual(
@@ -14972,6 +14991,13 @@ class ApplyPreparationTest(unittest.TestCase):
                                     "published": "8443",
                                     "target": 8080,
                                 },
+                                {
+                                    "host_ip": "127.0.0.1",
+                                    "mode": "ingress",
+                                    "protocol": "tcp",
+                                    "published": "8587",
+                                    "target": 587,
+                                },
                             ],
                             "restart": "unless-stopped",
                             "user": "2000:2000",
@@ -15111,6 +15137,12 @@ class ApplyPreparationTest(unittest.TestCase):
                             {
                                 "HostIp": "127.0.0.1",
                                 "HostPort": "8443",
+                            },
+                        ],
+                        "587/tcp": [
+                            {
+                                "HostIp": "127.0.0.1",
+                                "HostPort": "8587",
                             },
                         ],
                     },
@@ -15454,13 +15486,17 @@ class ApplyPreparationTest(unittest.TestCase):
             """\
             services:
               stalwart:
-                image: stalwartlabs/stalwart:v0.16.16@sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced
+                image: stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa
                 container_name: stalwart-dev
                 user: "2000:2000"
                 restart: unless-stopped
                 ports:
                   - target: 8080
                     published: "8443"
+                    host_ip: 127.0.0.1
+                    protocol: tcp
+                  - target: 587
+                    published: "8587"
                     host_ip: 127.0.0.1
                     protocol: tcp
                 environment:
@@ -15886,7 +15922,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 if args[:2] == ["docker", "exec"]:
                     events.append("version")
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16\n",
+                        b"0.16.17\n",
                         b"",
                     )
                 if "stop" in args:
@@ -16095,7 +16131,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 if args[:2] == ["docker", "exec"]:
                     events.append("version")
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16",
+                        b"0.16.17",
                         b"",
                     )
                 if "stop" in args:
@@ -16237,7 +16273,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     return stalwart_v016.RedactedCommandResult(b"{}", b"")
                 if args[:2] == ["docker", "exec"]:
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16",
+                        b"0.16.17",
                         b"",
                     )
                 return stalwart_v016.RedactedCommandResult(b"", b"")
@@ -16375,7 +16411,7 @@ class ApplyPreparationTest(unittest.TestCase):
                         return stalwart_v016.RedactedCommandResult(b"{}", b"")
                     if args[:2] == ["docker", "exec"]:
                         return stalwart_v016.RedactedCommandResult(
-                            b"0.16.16",
+                            b"0.16.17",
                             b"",
                         )
                     self.fail(f"unexpected runtime command: {args!r}")
@@ -16649,7 +16685,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 if args[:2] == ["docker", "exec"]:
                     events.append("version")
                     return stalwart_v016.RedactedCommandResult(
-                        b"0.16.16",
+                        b"0.16.17",
                         b"",
                     )
                 if "stop" in args:

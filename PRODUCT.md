@@ -45,7 +45,7 @@ When the same email address exists on both servers, the dashboard represents it 
 
 - The initial dashboard must support the complete requested workflow on both current provider profiles before it is considered usable.
 - Account creation starts with capability-driven profiles, including Dovecot with IMAP and Stalwart with JMAP.
-- Stalwart v0.16.16 is the supported baseline. The sandbox was migrated from the v0.15 configuration and management model; legacy v0.15 dashboard compatibility is not required.
+- Stalwart v0.16.17 is the supported baseline. The sandbox migrates from the v0.15 configuration and management model; legacy v0.15 dashboard compatibility is not required.
 - A later phase may configure or enable additional protocols on the servers. The interface must not offer unsupported provider/protocol combinations as if they already work.
 - Logs and destructive operations are local development tools, but credentials, bearer tokens, and Docker control must still remain server-side and be redacted from browser-visible output.
 - Provider-specific failures and partial multi-server outcomes must be shown honestly rather than collapsed into false success.

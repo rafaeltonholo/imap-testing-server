@@ -1,5 +1,9 @@
 # Latest Coherent Dependency Baseline — Design Specification
 
+> **Historical checkpoint:** Stalwart v0.16.16 was the stable selection for
+> this design batch. The active baseline was revalidated on 2026-08-11 and now
+> selects stable v0.16.17; the historical rationale below is preserved.
+
 **Date:** 2026-08-01
 
 **Status:** Policy A approved by the user on 2026-08-01

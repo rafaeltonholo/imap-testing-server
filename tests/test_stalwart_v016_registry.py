@@ -156,7 +156,7 @@ def session_payload(
     *,
     username: str = "admin",
     account_id: str = "m1",
-    api_url: str = "http://127.0.0.1:18080/jmap/",
+    api_url: str = "http://127.0.0.1:8443/jmap/",
 ) -> dict[str, object]:
     return {
         "accounts": {
@@ -175,11 +175,11 @@ def session_payload(
             "urn:stalwart:jmap": {},
         },
         "downloadUrl": (
-            "http://127.0.0.1:18080/jmap/download/"
+            "http://127.0.0.1:8443/jmap/download/"
             "{accountId}/{blobId}/{name}?accept={type}"
         ),
         "eventSourceUrl": (
-            "http://127.0.0.1:18080/jmap/eventsource/"
+            "http://127.0.0.1:8443/jmap/eventsource/"
             "?types={types}&closeafter={closeafter}&ping={ping}"
         ),
         "primaryAccounts": {
@@ -187,7 +187,7 @@ def session_payload(
             "urn:stalwart:jmap": account_id,
         },
         "state": "1",
-        "uploadUrl": "http://127.0.0.1:18080/jmap/upload/{accountId}/",
+        "uploadUrl": "http://127.0.0.1:8443/jmap/upload/{accountId}/",
         "username": username,
     }
 
@@ -392,7 +392,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(session.username, "admin")
         self.assertEqual(session.account_id, "m1")
         self.assertEqual(session.api_path, "/jmap/")
-        self.assertEqual(factory.calls, [("127.0.0.1", 18080, 3.5)])
+        self.assertEqual(factory.calls, [("127.0.0.1", 8443, 3.5)])
         self.assertEqual(len(connection.requests), 1)
         request = connection.requests[0]
         self.assertEqual(request["method"], "GET")
@@ -413,7 +413,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_rejects_session_identity_or_endpoint_mismatch(self) -> None:
         mutations = (
             {"username": "other"},
-            {"apiUrl": "http://localhost:18080/jmap/"},
+            {"apiUrl": "http://localhost:8443/jmap/"},
             {
                 "capabilities": {
                     "urn:ietf:params:jmap:core": None,

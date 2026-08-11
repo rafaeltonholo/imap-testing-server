@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed preparation for the Stalwart v0.16.16 migration."""
+"""Fail-closed preparation for the Stalwart v0.16.17 migration."""
 
 from __future__ import annotations
 
@@ -28,12 +28,12 @@ from typing import Callable, NamedTuple
 
 
 STALWART_IMAGE = (
-    "stalwartlabs/stalwart:v0.16.16@"
-    "sha256:66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+    "stalwartlabs/stalwart:v0.16.17@"
+    "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
 )
 STALWART_IMAGE_ID = (
     "sha256:"
-    "66ae90f2753ec1dabd70f69cad7da9f0598d2628a04193ce2b08c7263d47aced"
+    "a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
 )
 BOOTSTRAP_MANAGEMENT_PERMISSIONS = (
     "authenticate",
@@ -63,7 +63,7 @@ NORMAL_RUNTIME_EVIDENCE_SCHEMA = (
     "mail-sandbox.stalwart-v016-normal-runtime-evidence.v2"
 )
 MIGRATION_COMPOSE_SHA256 = (
-    "77dee99e79f4ce6a6be63edc51b5090e8fbab484fbdc04331cf0bd19f4bc28ca"
+    "77540a67777579e8b4a2be9d386122c3f7f7dba911889cbe8100d49a0e4fac62"
 )
 CONVERTED_CONFIG_BYTES = (
     b'{\n'
@@ -80,8 +80,8 @@ MIGRATION_CONFIG_VARIABLE = "STALWART_MIGRATION_CONFIG_DIR"
 MIGRATION_RECOVERY_ENV_VARIABLE = "STALWART_MIGRATION_RECOVERY_ENV_FILE"
 MIGRATION_OWNER_SERVICE = "stalwart-migration-data-owner"
 RECOVERY_ENV_PREFIX = b"STALWART_RECOVERY_ADMIN="
-MIGRATION_BOOTSTRAP_BASE_URL = "http://127.0.0.1:18080"
-MIGRATION_BOOTSTRAP_API_URL = "http://127.0.0.1:18080/jmap/"
+MIGRATION_BOOTSTRAP_BASE_URL = "http://127.0.0.1:8443"
+MIGRATION_BOOTSTRAP_API_URL = "http://127.0.0.1:8443/jmap/"
 COMPOSE_PROJECT_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*")
 COMPOSE_SERVICE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 SAFE_COMMAND_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
@@ -3053,7 +3053,7 @@ class MigrationBootstrapRuntime:
 
     @property
     def server_version(self) -> str:
-        return "0.16.16"
+        return "0.16.17"
 
     @property
     def container_id(self) -> str:
@@ -5685,7 +5685,13 @@ def _validate_migration_container_inspection(
             "8080/tcp": [
                 {
                     "HostIp": "127.0.0.1",
-                    "HostPort": "18080",
+                    "HostPort": "8443",
+                },
+            ],
+            "587/tcp": [
+                {
+                    "HostIp": "127.0.0.1",
+                    "HostPort": "8587",
                 },
             ],
         }
@@ -5997,6 +6003,13 @@ def _validate_normal_compose_model(
                         "published": "8443",
                         "target": 8080,
                     },
+                    {
+                        "host_ip": "127.0.0.1",
+                        "mode": "ingress",
+                        "protocol": "tcp",
+                        "published": "8587",
+                        "target": 587,
+                    },
                 ],
                 "restart": "unless-stopped",
                 "user": "2000:2000",
@@ -6299,6 +6312,12 @@ def _validate_normal_container_inspection(
                 {
                     "HostIp": "127.0.0.1",
                     "HostPort": "8443",
+                },
+            ],
+            "587/tcp": [
+                {
+                    "HostIp": "127.0.0.1",
+                    "HostPort": "8587",
                 },
             ],
         }
@@ -6781,7 +6800,7 @@ def _build_recovery_retirement_proof(
         ),
         retirement_attempt_sha256=plan.retirement_attempt.sha256,
         operation_plan_sha256=plan.operation_plan_sha256,
-        server_version="0.16.16",
+        server_version="0.16.17",
         management_status=200,
         readiness_status=200,
         old_recovery_auth_status=old_recovery_auth_status,
@@ -7379,11 +7398,11 @@ class MigrationApplyExecutor:
 
 def _validated_server_version(stdout: bytes) -> str:
     if type(stdout) is not bytes or stdout not in {
-        b"0.16.16",
-        b"0.16.16\n",
+        b"0.16.17",
+        b"0.16.17\n",
     }:
         raise MigrationError("post-apply version output is malformed")
-    return "0.16.16"
+    return "0.16.17"
 
 
 def _validated_account_query_ids(stdout: bytes) -> tuple[str, ...]:
@@ -9331,7 +9350,7 @@ def _post_apply_proof_metadata(
         or type(proof.operation_count) is not int
         or proof.operation_count != len(plan.operations)
         or type(proof.server_version) is not str
-        or proof.server_version != "0.16.16"
+        or proof.server_version != "0.16.17"
         or type(proof.management_status) is not int
         or proof.management_status != 200
     ):
@@ -9520,7 +9539,7 @@ def _validate_apply_receipt_payload_with_runtime_metadata(
     expected_proof = {
         "operations_sha256": plan.operations_sha256,
         "operation_count": len(plan.operations),
-        "server_version": "0.16.16",
+        "server_version": "0.16.17",
         "management_status": 200,
     }
     expected_payload = {
@@ -9565,7 +9584,7 @@ def prepare_apply(
     """Prepare one apply using injected executor and authoritative census seam.
 
     The caller-supplied verifier is the offline contract boundary for a future
-    live v0.16.16 management census. This module makes no live request itself.
+    live v0.16.17 management census. This module makes no live request itself.
     """
     _require_fixed_apply_paths(
         paths,
@@ -11910,7 +11929,7 @@ def _validated_authoritative_bootstrap_token(
         bootstrap_receipt_sha256=receipt_after.sha256,
         apply_receipt_sha256=apply_receipt.sha256,
         bootstrap_proof_sha256=proof_snapshot.sha256,
-        server_version="0.16.16",
+        server_version="0.16.17",
         authentication_status=200,
         management_account_id=account_id,
         management_api_key_id=credential_id,
@@ -12172,7 +12191,7 @@ def _bootstrap_retirement_metadata(
             receipt.sha256,
             binding.bootstrap_receipt_sha256,
         )
-        or binding.server_version != "0.16.16"
+        or binding.server_version != "0.16.17"
         or type(binding.authentication_status) is not int
         or binding.authentication_status != 200
         or type(binding.ip_restriction_decision) is not str
@@ -12491,7 +12510,7 @@ def _recovery_proof_metadata(
             proof.operation_plan_sha256,
             plan.operation_plan_sha256,
         )
-        or proof.server_version != "0.16.16"
+        or proof.server_version != "0.16.17"
         or type(proof.management_status) is not int
         or proof.management_status != 200
         or type(proof.readiness_status) is not int
@@ -14369,7 +14388,7 @@ def _absolute_cli_path(value: str) -> Path:
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare, execute, and retire the fail-closed Stalwart v0.16.16 "
+            "Prepare, execute, and retire the fail-closed Stalwart v0.16.17 "
             "migration."
         ),
     )
