@@ -244,22 +244,61 @@ def _plain_regular(path: Path, maximum: int) -> tuple[bytes, os.stat_result] | N
 
 def _service_block(compose: str, service: str) -> str | None:
     lines = compose.splitlines()
+    normalized: list[str] = []
+    for raw_line in lines:
+        if "\t" in raw_line:
+            return None
+        normalized.append(re.sub(r"\s+#.*$", "", raw_line.rstrip()))
+
+    def indentation(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    def is_key_candidate(line: str, key: str, expected_indent: int) -> bool:
+        if not line or indentation(line) != expected_indent:
+            return False
+        name = re.escape(key)
+        return re.fullmatch(
+            rf"(?:{name}|'(?:{name})'|\"(?:{name})\")(?:\s*:.*)?",
+            line[expected_indent:],
+        ) is not None
+
+    services_candidates = [
+        index
+        for index, line in enumerate(normalized)
+        if is_key_candidate(line, "services", 0)
+    ]
+    if (
+        len(services_candidates) != 1
+        or normalized[services_candidates[0]] != "services:"
+    ):
+        return None
+
+    services_start = services_candidates[0]
+    services_end = len(lines)
+    for index in range(services_start + 1, len(lines)):
+        line = normalized[index]
+        if line and indentation(line) == 0:
+            services_end = index
+            break
+
     header = f"  {service}:"
-    matches = [index for index, line in enumerate(lines) if line == header]
-    if len(matches) != 1:
+    matches = [
+        index
+        for index, line in enumerate(normalized)
+        if is_key_candidate(line, service, 2)
+    ]
+    if (
+        len(matches) != 1
+        or not services_start < matches[0] < services_end
+        or normalized[matches[0]] != header
+    ):
         return None
     start = matches[0]
     service_indentation = len(header) - len(header.lstrip(" "))
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        line = lines[index]
-        stripped = line.lstrip(" ")
-        indentation = len(line) - len(stripped)
-        if (
-            stripped
-            and not stripped.startswith("#")
-            and indentation <= service_indentation
-        ):
+    end = services_end
+    for index in range(start + 1, services_end):
+        line = normalized[index]
+        if line and indentation(line) <= service_indentation:
             end = index
             break
     return "\n".join(lines[start:end])

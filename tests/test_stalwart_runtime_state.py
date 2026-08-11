@@ -110,6 +110,15 @@ def legacy_compose_text() -> str:
 """
 
 
+def under_shadow_parent(compose: str) -> str:
+    return (
+        compose.replace("services:\n", "x-shadow:\n", 1)
+        + "\nservices:\n"
+        + "  placeholder:\n"
+        + "    image: example.invalid/placeholder:fixed\n"
+    )
+
+
 def prepare_current_repository(root: Path) -> Path:
     (root / "stalwart").mkdir()
     (root / "debug-dashboard" / ".runtime" / "stalwart").mkdir(
@@ -242,6 +251,17 @@ class RuntimeStateClassificationTest(unittest.TestCase):
             runtime_state.RuntimeState.MIGRATION_REQUIRED,
         )
 
+    def test_legacy_model_under_an_extension_is_invalid(self) -> None:
+        self.write_compose_content(
+            under_shadow_parent(legacy_compose_text()),
+        )
+        self.make_nonempty_store()
+
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.INVALID,
+        )
+
     def test_legacy_service_stops_before_following_top_level_section(self) -> None:
         self.write_compose_content(
             legacy_compose_text()
@@ -361,6 +381,59 @@ class RuntimeStateClassificationTest(unittest.TestCase):
                         runtime_state.classify_repository(root),
                         runtime_state.RuntimeState.INVALID,
                     )
+                    receipt.unlink()
+                    with self.assertRaises(ValueError):
+                        runtime_state.publish_current_receipt(root)
+
+    def test_current_model_must_be_a_direct_child_of_services(self) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        self.make_nonempty_store()
+        receipt = runtime_state.publish_current_receipt(self.root)
+        shadowed = under_shadow_parent(current_compose_text())
+        self.write_compose_content(shadowed)
+        bind_receipt_to_compose(receipt, shadowed)
+
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.INVALID,
+        )
+
+        receipt.unlink()
+        with self.assertRaises(ValueError):
+            runtime_state.publish_current_receipt(self.root)
+
+    def test_duplicate_or_malformed_services_keys_are_invalid(self) -> None:
+        canonical = current_compose_text()
+        invalid_documents = {
+            "duplicate": canonical
+            + "\nservices:\n"
+            + "  placeholder:\n"
+            + "    image: example.invalid/placeholder:fixed\n",
+            "inline-value": canonical.replace(
+                "services:\n",
+                "services: {}\nx-shadow:\n",
+                1,
+            ),
+            "quoted": canonical.replace("services:\n", '"services":\n', 1),
+        }
+
+        for label, content in invalid_documents.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    prepare_current_repository(root)
+                    receipt = runtime_state.publish_current_receipt(root)
+                    (root / "docker-compose.yml").write_text(
+                        content,
+                        encoding="utf-8",
+                    )
+                    bind_receipt_to_compose(receipt, content)
+
+                    self.assertEqual(
+                        runtime_state.classify_repository(root),
+                        runtime_state.RuntimeState.INVALID,
+                    )
+
                     receipt.unlink()
                     with self.assertRaises(ValueError):
                         runtime_state.publish_current_receipt(root)

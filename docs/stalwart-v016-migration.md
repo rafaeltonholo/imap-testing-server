@@ -60,6 +60,10 @@ legacy health check. Mixed topology, extra ports/mounts/environment, or a
 service-level network override is `invalid`, even when the legacy image text is
 present. The current declaration is similarly exact: extra service fields are
 not accepted merely because the required image, ports, and mounts also appear.
+For either model, the declaration must be the single direct `stalwart` child
+of one plain top-level `services:` mapping. Duplicate or alternate-form
+`services` keys, and matching declarations nested under extensions or other
+parents, are `invalid`.
 
 Any `.mail-sandbox-fresh-initialization-failed` entry in the selected store is
 authoritative failure evidence regardless of its file type or whether a valid
