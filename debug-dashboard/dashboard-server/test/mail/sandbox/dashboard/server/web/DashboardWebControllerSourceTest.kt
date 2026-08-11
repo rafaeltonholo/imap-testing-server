@@ -80,6 +80,55 @@ class DashboardWebControllerSourceTest {
         assertTrue("failure.rethrowIfCancellation()" in operation)
     }
 
+    @Test
+    fun selectedProtocolProfileGatesMailboxAndMessageGenerationPaths() {
+        val root = dashboardRoot()
+        val apiSource = Files.readString(root.resolve(
+            "dashboard-web/src/mail/sandbox/dashboard/web/DashboardApi.kt",
+        ))
+        val controllerState = apiSource.section(
+            "val selectedAccount: AccountInfo?",
+            "suspend fun initialize()",
+        )
+        val generation = apiSource.section(
+            "suspend fun generateMessage(request: GenerateMessageRequest)",
+            "suspend fun mutateSelectedMessage(",
+        )
+        assertTrue("supportsMailboxOperations()" in controllerState)
+        assertTrue(
+            "MessageDeliveryMode.DIRECT_APPEND -> require(targetAccount.supportsMailboxOperations())" in generation,
+        )
+        assertTrue(
+            "MessageDeliveryMode.SMTP_DELIVERY -> require(MailProtocol.SMTP in targetAccount.protocols)" in generation,
+        )
+        assertTrue(
+            "if (targetAccount.supportsMailboxOperations())" in generation,
+            "SMTP-only delivery must refresh logs without requesting JMAP folders",
+        )
+
+        val appSource = Files.readString(root.resolve(
+            "dashboard-web/src/mail/sandbox/dashboard/web/DashboardApp.kt",
+        ))
+        val dialog = appSource.section(
+            "private fun GenerateMessageDialog(",
+            "private fun DeliveryPathChoice(",
+        )
+        assertTrue("val mailboxAvailable = targetAccount?.supportsMailboxOperations() == true" in dialog)
+        assertTrue("usesDirectAppend && mailboxAvailable" in dialog)
+        assertTrue("enabled = targetReady && mailboxAvailable" in dialog)
+        assertTrue(
+            "if (initialAccount?.supportsMailboxOperations() == true)" in dialog,
+            "An SMTP-only target must default to SMTP instead of a disabled direct append path",
+        )
+        val deliveryChoice = appSource.section(
+            "private fun DeliveryPathChoice(",
+            "private fun ProviderTargetChoice(",
+        )
+        assertTrue(
+            "Unavailable because this account has no IMAP or JMAP mailbox protocol." in deliveryChoice,
+        )
+    }
+
     private fun dashboardRoot(): Path {
         val working = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
         return generateSequence(working) { it.parent }

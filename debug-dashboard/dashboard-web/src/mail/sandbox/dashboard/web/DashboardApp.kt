@@ -1992,7 +1992,11 @@ private fun MailReadinessEmptyState(account: AccountInfo?) {
     val readiness = account?.credentialReadiness ?: return
     val title = readiness.displayName()
     val detail = when (readiness) {
-        CredentialReadiness.READY -> "Mail operations are ready. Refresh the selected provider."
+        CredentialReadiness.READY -> if (account.supportsMailboxOperations()) {
+            "Mail operations are ready. Refresh the selected provider."
+        } else {
+            "This account is SMTP-only. Use Generate message or the authentication probe; mailbox operations require IMAP or JMAP."
+        }
         CredentialReadiness.PASSWORD_REQUIRED ->
             "Verify the existing password or reset it before reading or changing mailbox state."
         CredentialReadiness.AUTHENTICATION_FAILED ->
@@ -2589,12 +2593,21 @@ private fun GenerateMessageDialog(
     val readyAccounts = accounts.filter {
         it.credentialReadiness == CredentialReadiness.READY
     }
-    val initialTarget = selectedTarget
-        ?.takeIf { selected -> readyAccounts.any { it.target() == selected } }
-        ?: readyAccounts.firstOrNull()?.target()
+    val initialAccount = selectedTarget
+        ?.let { selected -> readyAccounts.firstOrNull { it.target() == selected } }
+        ?: readyAccounts.firstOrNull()
+    val initialTarget = initialAccount?.target()
     var target by remember { mutableStateOf(initialTarget) }
     var sourceType by remember { mutableStateOf(MessageSourceType.TEXT) }
-    var deliveryMode by remember { mutableStateOf(MessageDeliveryMode.DIRECT_APPEND) }
+    var deliveryMode by remember {
+        mutableStateOf(
+            if (initialAccount?.supportsMailboxOperations() == true) {
+                MessageDeliveryMode.DIRECT_APPEND
+            } else {
+                MessageDeliveryMode.SMTP_DELIVERY
+            },
+        )
+    }
     var subject by remember { mutableStateOf("Dashboard reproduction") }
     var fromAddress by remember { mutableStateOf("debugger@local.test") }
     var content by remember { mutableStateOf("") }
@@ -2604,12 +2617,14 @@ private fun GenerateMessageDialog(
     val needsContent = sourceType == MessageSourceType.EML || sourceType == MessageSourceType.TEXT
     val seedValid = seed.isBlank() || parsedSeed != null
     val targetAccount = accounts.firstOrNull { it.target() == target }
+    val targetReady = targetAccount?.credentialReadiness == CredentialReadiness.READY
+    val mailboxAvailable = targetAccount?.supportsMailboxOperations() == true
     val smtpAvailable = MailProtocol.SMTP in targetAccount?.protocols.orEmpty()
     val usesDirectAppend = deliveryMode == MessageDeliveryMode.DIRECT_APPEND
     val canGenerate = target != null &&
-        targetAccount?.credentialReadiness == CredentialReadiness.READY &&
+        targetReady &&
         (!needsContent || content.isNotBlank()) && seedValid &&
-        (usesDirectAppend || smtpAvailable) && !busy
+        ((usesDirectAppend && mailboxAvailable) || (!usesDirectAppend && smtpAvailable)) && !busy
     val targetUsesLoadedFolders = target == selectedTarget
 
     AlertDialog(
@@ -2635,8 +2650,19 @@ private fun GenerateMessageDialog(
                         enabled = account.credentialReadiness == CredentialReadiness.READY,
                         onClick = {
                             target = account.target()
-                            if (MailProtocol.SMTP !in account.protocols) {
-                                deliveryMode = MessageDeliveryMode.DIRECT_APPEND
+                            deliveryMode = when (deliveryMode) {
+                                MessageDeliveryMode.DIRECT_APPEND ->
+                                    if (account.supportsMailboxOperations()) {
+                                        MessageDeliveryMode.DIRECT_APPEND
+                                    } else {
+                                        MessageDeliveryMode.SMTP_DELIVERY
+                                    }
+                                MessageDeliveryMode.SMTP_DELIVERY ->
+                                    if (MailProtocol.SMTP in account.protocols) {
+                                        MessageDeliveryMode.SMTP_DELIVERY
+                                    } else {
+                                        MessageDeliveryMode.DIRECT_APPEND
+                                    }
                             }
                             folderId = if (account.target() == selectedTarget) selectedFolderId else null
                         },
@@ -2647,13 +2673,13 @@ private fun GenerateMessageDialog(
                     DeliveryPathChoice(
                         mode = MessageDeliveryMode.DIRECT_APPEND,
                         selected = usesDirectAppend,
-                        enabled = targetAccount?.credentialReadiness == CredentialReadiness.READY,
+                        enabled = targetReady && mailboxAvailable,
                         onClick = { deliveryMode = MessageDeliveryMode.DIRECT_APPEND },
                     )
                     DeliveryPathChoice(
                         mode = MessageDeliveryMode.SMTP_DELIVERY,
                         selected = deliveryMode == MessageDeliveryMode.SMTP_DELIVERY,
-                        enabled = smtpAvailable,
+                        enabled = targetReady && smtpAvailable,
                         onClick = { deliveryMode = MessageDeliveryMode.SMTP_DELIVERY },
                     )
                 }
@@ -2805,8 +2831,11 @@ private fun DeliveryPathChoice(
         MessageDeliveryMode.SMTP_DELIVERY -> "SMTP delivery"
     }
     val description = when (mode) {
-        MessageDeliveryMode.DIRECT_APPEND ->
+        MessageDeliveryMode.DIRECT_APPEND -> if (enabled) {
             "Write directly into the mailbox. You can choose Inbox or another loaded folder."
+        } else {
+            "Unavailable because this account has no IMAP or JMAP mailbox protocol."
+        }
         MessageDeliveryMode.SMTP_DELIVERY -> if (enabled) {
             "Send through this provider's SMTP service. Provider delivery always targets Inbox."
         } else {

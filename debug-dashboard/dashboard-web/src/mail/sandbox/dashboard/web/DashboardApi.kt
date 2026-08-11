@@ -31,6 +31,7 @@ import mail.sandbox.dashboard.contract.GenerateMessageRequest
 import mail.sandbox.dashboard.contract.GenerateMessageResponse
 import mail.sandbox.dashboard.contract.LogResponse
 import mail.sandbox.dashboard.contract.LogService
+import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.MessageAction
 import mail.sandbox.dashboard.contract.MessageDeliveryMode
 import mail.sandbox.dashboard.contract.MessageDetail
@@ -56,6 +57,11 @@ internal data class AccountTarget(
 
 internal fun AccountInfo.target(): AccountTarget =
     AccountTarget(address, provider, providerAccountId)
+
+internal fun AccountInfo.supportsMailboxOperations(): Boolean = when (provider) {
+    Provider.DOVECOT -> MailProtocol.IMAP in protocols
+    Provider.STALWART -> MailProtocol.JMAP in protocols
+}
 
 internal val AccountTarget.displayName: String
     get() = "${provider.displayName()} · $address"
@@ -343,7 +349,10 @@ internal class DashboardController(
         get() = messages.firstOrNull { it.id == selectedMessageId }
 
     val mailActionsEnabled: Boolean
-        get() = selectedAccount?.credentialReadiness == CredentialReadiness.READY
+        get() = selectedAccount?.let { account ->
+            account.credentialReadiness == CredentialReadiness.READY &&
+                account.supportsMailboxOperations()
+        } == true
 
     suspend fun initialize() {
         refreshAccounts()
@@ -662,6 +671,14 @@ internal class DashboardController(
         require(targetAccount.credentialReadiness == CredentialReadiness.READY) {
             "A ready provider credential is required to generate mail"
         }
+        when (request.deliveryMode) {
+            MessageDeliveryMode.DIRECT_APPEND -> require(targetAccount.supportsMailboxOperations()) {
+                "Direct append requires an enabled IMAP or JMAP mailbox protocol"
+            }
+            MessageDeliveryMode.SMTP_DELIVERY -> require(MailProtocol.SMTP in targetAccount.protocols) {
+                "SMTP delivery is not enabled for this account"
+            }
+        }
         val result = api.generateMessage(request)
         lastReceipt = buildString {
             append(request.provider.displayName())
@@ -675,13 +692,17 @@ internal class DashboardController(
             }
         }
         if (selectedTarget == targetAccount.target()) {
-            refreshWorkspace(
-                keepFolderId = when (request.deliveryMode) {
-                    MessageDeliveryMode.DIRECT_APPEND -> request.folderId ?: selectedFolderId
-                    MessageDeliveryMode.SMTP_DELIVERY -> null
-                },
-                keepMessageId = result.messageIds.lastOrNull(),
-            )
+            if (targetAccount.supportsMailboxOperations()) {
+                refreshWorkspace(
+                    keepFolderId = when (request.deliveryMode) {
+                        MessageDeliveryMode.DIRECT_APPEND -> request.folderId ?: selectedFolderId
+                        MessageDeliveryMode.SMTP_DELIVERY -> null
+                    },
+                    keepMessageId = result.messageIds.lastOrNull(),
+                )
+            } else {
+                refreshAccountLogs()
+            }
         } else {
             refreshGlobalLogs()
         }
@@ -774,6 +795,9 @@ internal class DashboardController(
     }.also { account ->
         require(account.credentialReadiness == CredentialReadiness.READY) {
             "A verified provider password is required for mail operations"
+        }
+        require(account.supportsMailboxOperations()) {
+            "An enabled IMAP or JMAP protocol is required for mailbox operations"
         }
     }
 

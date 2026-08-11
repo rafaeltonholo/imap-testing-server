@@ -38,6 +38,10 @@ import mail.sandbox.dashboard.server.gate.stalwart.GateHttpRequest
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpResponse
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpTransport
 import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationAttempt
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationConnector
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProbe
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationTransportOutcome
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartCreateAccount
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartImportedEmail
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartManagementCredentialProvider
@@ -50,6 +54,31 @@ import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductMe
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductProtocol
 
 class StalwartDashboardProviderTest {
+    @Test
+    fun defaultSmtpAuthenticationProbeUsesThePlaintextMigrationSubmissionEndpoint() {
+        val attempts = mutableListOf<ProviderAuthenticationAttempt>()
+        val delegate = ProviderAuthenticationProbe(
+            ProviderAuthenticationConnector { attempt ->
+                attempts += attempt
+                ProviderAuthenticationTransportOutcome.Authenticated("SMTP login succeeded")
+            },
+        )
+        val probe = DefaultStalwartSmtpAuthenticationProbe(delegate)
+
+        assertTrue(
+            probe.probe("alice@local.test", "created-password") is
+                AuthenticationOutcome.Authenticated,
+        )
+
+        val attempt = attempts.single()
+        assertEquals("127.0.0.1", attempt.endpoint.host)
+        assertEquals(8587, attempt.endpoint.port)
+        assertFalse(attempt.endpoint.startTls)
+        assertTrue(attempt.authenticateOnly)
+        assertEquals("false", attempt.sessionProperties()["mail.smtp.starttls.enable"])
+        assertEquals("false", attempt.sessionProperties()["mail.smtp.starttls.required"])
+    }
+
     @Test
     fun liveRegistryStaysCompleteAndOverlaysReadinessByExactProviderId() = runBlocking {
         withCatalog("stalwart-dashboard-live-overlay") { catalog ->
@@ -354,6 +383,174 @@ class StalwartDashboardProviderTest {
             assertEquals(
                 "created-password",
                 catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.password,
+            )
+        }
+    }
+
+    @Test
+    fun smtpOnlyCreationAndRefreshUseSmtpReadinessAndKeepTheExactProfile() = runBlocking {
+        withCatalog("stalwart-dashboard-create-smtp-only") { catalog ->
+            val gateway = RecordingStalwartGateway().apply {
+                createdAccount = StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                )
+            }
+            val smtpProbe = RecordingStalwartSmtpProbe().apply {
+                outcomes += AuthenticationOutcome.Authenticated("SMTP login succeeded")
+                outcomes += AuthenticationOutcome.Authenticated("SMTP login succeeded")
+            }
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpAuthenticationProbe = smtpProbe,
+            )
+
+            val created = provider.createAccount(
+                CreateAccountRequest(
+                    address = "alice@local.test",
+                    password = "created-password",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.SMTP),
+                ),
+            )
+            val refreshed = provider.listAccounts().single()
+
+            assertEquals(listOf(MailProtocol.SMTP), created.protocols)
+            assertEquals(CredentialReadiness.READY, created.credentialReadiness)
+            assertEquals(listOf(MailProtocol.SMTP), refreshed.protocols)
+            assertEquals(CredentialReadiness.READY, refreshed.credentialReadiness)
+            assertTrue(gateway.jmapProbes.isEmpty())
+            assertEquals(
+                listOf(
+                    "alice@local.test" to "created-password",
+                    "alice@local.test" to "created-password",
+                ),
+                smtpProbe.probes,
+            )
+            assertEquals(
+                listOf(MailProtocol.SMTP),
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.protocols,
+            )
+        }
+    }
+
+    @Test
+    fun smtpOnlyProfileRejectsJmapAuthenticationBeforeCallingTheGateway() = runBlocking {
+        withCatalog("stalwart-dashboard-smtp-only-jmap-probe") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "created-password",
+                    protocols = listOf(MailProtocol.SMTP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                ),
+            )
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                provider.probeAuthentication(
+                    AuthenticationProbeRequest(
+                        address = "alice@local.test",
+                        provider = Provider.STALWART,
+                        protocol = AuthenticationProtocol.JMAP,
+                        providerAccountId = "account-one",
+                    ),
+                )
+            }
+
+            assertTrue("JMAP is not enabled" in failure.message.orEmpty())
+            assertTrue(gateway.jmapProbes.isEmpty())
+        }
+    }
+
+    @Test
+    fun smtpOnlyProfileRejectsJmapMailboxAccessBeforeCallingTheGateway() = runBlocking {
+        withCatalog("stalwart-dashboard-smtp-only-mailbox") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "created-password",
+                    protocols = listOf(MailProtocol.SMTP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                ),
+            )
+            val provider = StalwartDashboardProvider(gateway, catalog)
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                provider.listFolders("alice@local.test", "account-one")
+            }
+
+            assertTrue("JMAP is not enabled" in failure.message.orEmpty())
+            assertEquals(0, gateway.folderListingCalls)
+        }
+    }
+
+    @Test
+    fun smtpOnlyAdoptionAndResetReportOrdinaryAuthenticationWithoutClaimingJmap() = runBlocking {
+        withCatalog("stalwart-dashboard-smtp-only-passwords") { catalog ->
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                ),
+            )
+            val smtpProbe = RecordingStalwartSmtpProbe().apply {
+                outcomes += AuthenticationOutcome.Authenticated("SMTP login succeeded")
+                outcomes += AuthenticationOutcome.Authenticated("SMTP login succeeded")
+            }
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpAuthenticationProbe = smtpProbe,
+            )
+
+            val adoption = provider.adoptPassword(
+                "alice@local.test",
+                AdoptPasswordRequest("adopted-password"),
+                "account-one",
+            )
+            val reset = provider.changePassword(
+                "alice@local.test",
+                "replacement-password",
+                "account-one",
+            )
+
+            assertEquals(
+                "Stalwart password verified through ordinary-account authentication",
+                adoption.operation.message,
+            )
+            assertEquals(
+                "Password changed on Stalwart and ordinary-account authentication succeeded",
+                reset.operation.message,
+            )
+            assertTrue("JMAP" !in adoption.operation.message)
+            assertTrue("JMAP" !in reset.operation.message)
+            assertTrue(gateway.jmapProbes.isEmpty())
+            assertEquals(
+                listOf(
+                    "alice@local.test" to "adopted-password",
+                    "alice@local.test" to "replacement-password",
+                ),
+                smtpProbe.probes,
             )
         }
     }
@@ -715,6 +912,51 @@ class StalwartDashboardProviderTest {
             provider.close()
         } finally {
             directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun smtpOnlyDeliveryDoesNotUseJmapToConfirmProviderAcceptance() = runBlocking {
+        withCatalog("stalwart-dashboard-smtp-only-delivery") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "created-password",
+                    protocols = listOf(MailProtocol.SMTP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                ),
+            )
+            val smtp = StalwartRecordingSmtpSender()
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpSender = smtp,
+            )
+            val raw = message("<smtp-only@local.test>")
+
+            val ids = provider.deliverMessages(
+                GenerateMessageRequest(
+                    targetAccount = "alice@local.test",
+                    provider = Provider.STALWART,
+                    providerAccountId = "account-one",
+                    sourceType = MessageSourceType.EML,
+                    deliveryMode = MessageDeliveryMode.SMTP_DELIVERY,
+                    content = raw,
+                ),
+                listOf(GeneratedMessage(raw)),
+            )
+
+            assertTrue(ids.isEmpty())
+            assertEquals(1, smtp.calls)
+            assertEquals(0, gateway.folderListingCalls)
         }
     }
 

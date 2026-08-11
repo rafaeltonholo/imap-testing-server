@@ -210,7 +210,8 @@ class StalwartProductAdapterTest {
     }
 
     @Test
-    fun createAccountUsesDomainWithoutRememberingAnUnverifiedPassword() = runBlocking {
+    fun createSmtpOnlyAccountDoesNotGrantJmapPermissionsOrRememberAnUnverifiedPassword() =
+        runBlocking {
         val transport = RecordingTransport(
             expectedCall(
                 "x:Domain/query",
@@ -248,7 +249,12 @@ class StalwartProductAdapterTest {
                 val permissions = create.requiredObject("permissions")
                 assertEquals("Replace", permissions.requiredString("@type"))
                 val enabled = permissions.requiredObject("enabledPermissions")
-                assertTrue(enabled["jmapEmailGet"]?.jsonPrimitive?.booleanOrNull == true)
+                assertEquals(
+                    setOf("authenticate", "emailReceive", "emailSend"),
+                    enabled.keys,
+                )
+                assertTrue(enabled.values.all { it.jsonPrimitive.booleanOrNull == true })
+                assertFalse("jmapEmailGet" in enabled)
                 assertFalse("imapFetch" in enabled)
                 assertTrue(enabled["emailSend"]?.jsonPrimitive?.booleanOrNull == true)
             },

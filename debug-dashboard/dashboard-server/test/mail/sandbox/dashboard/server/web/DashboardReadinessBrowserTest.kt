@@ -176,7 +176,11 @@ class DashboardReadinessBrowserTest {
         assertTrue("providerStatuses = response.providerStatuses" in refresh)
         assertTrue("val mailActionsEnabled: Boolean" in api)
         assertTrue(
-            "selectedAccount?.credentialReadiness == CredentialReadiness.READY" in api,
+            "account.credentialReadiness == CredentialReadiness.READY" in api,
+        )
+        assertTrue(
+            "account.supportsMailboxOperations()" in api,
+            "A ready SMTP-only account must not trigger mailbox requests",
         )
         assertTrue(
             "if (!mailActionsEnabled)" in api,

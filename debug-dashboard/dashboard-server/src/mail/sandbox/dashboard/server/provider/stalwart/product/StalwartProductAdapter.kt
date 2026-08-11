@@ -884,10 +884,10 @@ internal class StalwartProductAdapter(
         )
 
         fun permissions(protocols: Set<StalwartProductProtocol>): JsonObject {
-            // Dashboard CRUD always uses JMAP internally, even when the account's
-            // advertised client protocol selection is SMTP-only.
             val enabled = linkedSetOf("authenticate", "emailReceive")
-            enabled += DASHBOARD_MAIL_PERMISSIONS
+            if (StalwartProductProtocol.JMAP in protocols) {
+                enabled += DASHBOARD_MAIL_PERMISSIONS
+            }
             if (StalwartProductProtocol.SMTP in protocols) {
                 enabled += setOf("emailSend", "emailReceive")
             }
