@@ -84,6 +84,13 @@ class StalwartProductAdapterTest {
             },
         )
         val catalog = InMemoryStalwartAccountCredentialCatalog()
+        catalog.save(
+            StalwartAccountLogin(
+                accountId = "account-one",
+                address = "stale-address@local.test",
+                password = "cached-password",
+            ),
+        )
         val adapter = adapter(transport, catalog)
 
         assertEquals(
@@ -103,7 +110,7 @@ class StalwartProductAdapterTest {
     }
 
     @Test
-    fun createAccountUsesDomainAndStoresItsLocalLogin() = runBlocking {
+    fun createAccountUsesDomainWithoutRememberingAnUnverifiedPassword() = runBlocking {
         val transport = RecordingTransport(
             expectedCall(
                 "x:Domain/query",
@@ -163,14 +170,7 @@ class StalwartProductAdapterTest {
                 ),
             ),
         )
-        assertEquals(
-            StalwartAccountLogin(
-                accountId = "account-created",
-                address = "new-user@local.test",
-                password = "test-password",
-            ),
-            catalog.find("account-created"),
-        )
+        assertNull(catalog.find("account-created"))
         transport.assertExhausted()
     }
 
@@ -196,7 +196,8 @@ class StalwartProductAdapterTest {
         }
 
     @Test
-    fun changePasswordPatchesThePasswordCredentialAndUpdatesCatalog() = runBlocking {
+    fun changePasswordPatchesProviderWithoutRememberingBeforeOrdinaryAuthentication() =
+        runBlocking {
         val transport = RecordingTransport(
             expectedCall(
                 "x:Account/get",
@@ -234,7 +235,7 @@ class StalwartProductAdapterTest {
 
         adapter.changePassword("account-one", "new-password")
 
-        assertEquals("new-password", catalog.find("account-one")?.password)
+        assertEquals("old-password", catalog.find("account-one")?.password)
         transport.assertExhausted()
     }
 

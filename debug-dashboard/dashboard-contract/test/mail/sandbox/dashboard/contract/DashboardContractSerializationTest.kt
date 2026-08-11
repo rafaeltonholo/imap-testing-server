@@ -5,6 +5,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class DashboardContractSerializationTest {
     private val json = Json
@@ -17,6 +18,9 @@ class DashboardContractSerializationTest {
         assertRoundTrip(MailProtocol.POP3)
         assertRoundTrip(MailProtocol.JMAP)
         assertRoundTrip(MailProtocol.SMTP)
+        CredentialReadiness.entries.forEach(::assertRoundTrip)
+        ProviderAvailability.entries.forEach(::assertRoundTrip)
+        AuthenticationProtocol.entries.forEach(::assertRoundTrip)
     }
 
     @Test
@@ -25,6 +29,10 @@ class DashboardContractSerializationTest {
             address = "dev@local.test",
             provider = Provider.STALWART,
             protocols = listOf(MailProtocol.IMAP, MailProtocol.JMAP, MailProtocol.SMTP),
+            providerAccountId = "account-42",
+            credentialReadiness = CredentialReadiness.AUTHENTICATION_FAILED,
+            readinessMessage = "Remembered password was rejected",
+            stale = true,
             enabled = true,
         )
 
@@ -37,8 +45,61 @@ class DashboardContractSerializationTest {
                 protocols = account.protocols,
             ),
         )
+        assertRoundTrip(AdoptPasswordRequest(password = "existing-password"))
         assertRoundTrip(ChangePasswordRequest(newPassword = "replacement-password"))
-        assertRoundTrip(AccountListResponse(accounts = listOf(account)))
+        assertRoundTrip(
+            CredentialUpdateResponse(
+                address = account.address,
+                provider = account.provider,
+                readiness = CredentialReadiness.READY,
+                operation = OperationResponse(success = true, message = "Password verified"),
+            ),
+        )
+        assertRoundTrip(
+            AccountListResponse(
+                accounts = listOf(account),
+                providerStatuses = providerStatuses(),
+            ),
+        )
+    }
+
+    @Test
+    fun authenticationProbeContractsRoundTripWithoutEchoingCredentials() {
+        val request = AuthenticationProbeRequest(
+            address = "dev@local.test",
+            provider = Provider.DOVECOT,
+            protocol = AuthenticationProtocol.OAUTH_IMAP,
+            credentialOverride = "opaque-bearer-token",
+        )
+        val response = AuthenticationProbeResponse(
+            address = request.address,
+            provider = request.provider,
+            protocol = request.protocol,
+            success = false,
+            providerResponse = "Authentication rejected",
+            correlatedLogs = listOf("auth failed for dev@local.test"),
+        )
+
+        assertRoundTrip(request)
+        assertRoundTrip(response)
+        val encodedResponse = json.encodeToString(response)
+        kotlin.test.assertFalse("opaque-bearer-token" in encodedResponse)
+    }
+
+    @Test
+    fun accountListRequiresExactlyOneProviderStatusInProviderOrder() {
+        val statuses = providerStatuses()
+
+        assertEquals(
+            listOf(Provider.DOVECOT, Provider.STALWART),
+            AccountListResponse(emptyList(), statuses).providerStatuses.map(ProviderStatus::provider),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            AccountListResponse(emptyList(), statuses.reversed())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AccountListResponse(emptyList(), statuses + statuses.first())
+        }
     }
 
     @Test
@@ -152,4 +213,13 @@ class DashboardContractSerializationTest {
     private inline fun <reified T> assertRoundTrip(value: T) {
         assertEquals(value, json.decodeFromString<T>(json.encodeToString(value)))
     }
+
+    private fun providerStatuses(): List<ProviderStatus> = listOf(
+        ProviderStatus(Provider.DOVECOT, ProviderAvailability.READY),
+        ProviderStatus(
+            provider = Provider.STALWART,
+            availability = ProviderAvailability.DEGRADED,
+            message = "Credential probes are not available yet",
+        ),
+    )
 }

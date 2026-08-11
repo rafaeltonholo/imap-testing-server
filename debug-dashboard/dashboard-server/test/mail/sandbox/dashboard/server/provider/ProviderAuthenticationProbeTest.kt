@@ -21,6 +21,37 @@ import kotlin.test.assertTrue
 
 class ProviderAuthenticationProbeTest {
     @Test
+    fun explicitEmptyPasswordIsAttemptedWhileNullRemainsMissing() {
+        val connector = RecordingAuthenticationConnector()
+        val probe = ProviderAuthenticationProbe(connector)
+
+        assertIs<AuthenticationOutcome.MissingCredentials>(
+            probe.probe(
+                ProviderAuthenticationRequest(
+                    protocol = ProviderAuthenticationProtocol.IMAP,
+                    mechanism = ProviderAuthenticationMechanism.PASSWORD,
+                    credentials = AccountCredentials("alice@local.test", password = null),
+                ),
+            ),
+        )
+        connector.next = ProviderAuthenticationTransportOutcome.WrongPassword(
+            "empty password rejected",
+        )
+        val emptyOutcome = assertIs<AuthenticationOutcome.WrongPassword>(
+            probe.probe(
+                ProviderAuthenticationRequest(
+                    protocol = ProviderAuthenticationProtocol.IMAP,
+                    mechanism = ProviderAuthenticationMechanism.PASSWORD,
+                    credentials = AccountCredentials("alice@local.test", password = ""),
+                ),
+            ),
+        )
+
+        assertEquals("empty password rejected", emptyOutcome.diagnostic)
+        assertEquals(listOf(""), connector.attempts.map(ProviderAuthenticationAttempt::secret))
+    }
+
+    @Test
     fun passwordAndRequestTokenProbesUseTheFixedLoopbackEndpoints() {
         val connector = RecordingAuthenticationConnector()
         val probe = ProviderAuthenticationProbe(connector)

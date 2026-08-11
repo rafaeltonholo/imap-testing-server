@@ -6,6 +6,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
+import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
 import mail.sandbox.dashboard.contract.MailProtocol
@@ -16,6 +20,12 @@ import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.server.provider.AccountCredentials
 import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationAttempt
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationConnector
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationMechanism
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProbe
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationTransportOutcome
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotAccountRegistry
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandRequest
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandResult
@@ -30,6 +40,228 @@ import mail.sandbox.dashboard.server.provider.dovecot.DovecotMessageSummary
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotProductAdapter
 
 class DovecotDashboardProviderTest {
+    @Test
+    fun accountListingMapsEveryOrdinaryImapReadinessOutcome() = runBlocking {
+        data class Case(
+            val name: String,
+            val registry: DovecotAccountRegistry,
+            val cachedPassword: String?,
+            val outcome: AuthenticationOutcome,
+            val expected: CredentialReadiness,
+            val expectedProbeCount: Int,
+        )
+        val cases = listOf(
+            Case(
+                "active-plain-ready",
+                MutablePlainAccountRegistry("active-password"),
+                null,
+                AuthenticationOutcome.Authenticated("authenticated"),
+                CredentialReadiness.READY,
+                1,
+            ),
+            Case(
+                "cached-hash-fallback-ready",
+                SingleAccount,
+                "verified-password",
+                AuthenticationOutcome.Authenticated("authenticated"),
+                CredentialReadiness.READY,
+                1,
+            ),
+            Case(
+                "password-required",
+                SingleAccount,
+                null,
+                AuthenticationOutcome.MissingCredentials("credentials required"),
+                CredentialReadiness.PASSWORD_REQUIRED,
+                0,
+            ),
+            Case(
+                "wrong-password",
+                MutablePlainAccountRegistry("wrong-password"),
+                null,
+                AuthenticationOutcome.WrongPassword("authentication failed"),
+                CredentialReadiness.AUTHENTICATION_FAILED,
+                1,
+            ),
+            Case(
+                "missing-account",
+                MutablePlainAccountRegistry("password"),
+                null,
+                AuthenticationOutcome.MissingAccount("unknown user"),
+                CredentialReadiness.AUTHENTICATION_FAILED,
+                1,
+            ),
+            Case(
+                "unavailable",
+                MutablePlainAccountRegistry("password"),
+                null,
+                AuthenticationOutcome.Unavailable("connection refused"),
+                CredentialReadiness.PROVIDER_UNAVAILABLE,
+                1,
+            ),
+            Case(
+                "timeout",
+                MutablePlainAccountRegistry("password"),
+                null,
+                AuthenticationOutcome.TimedOut("read timed out"),
+                CredentialReadiness.PROVIDER_UNAVAILABLE,
+                1,
+            ),
+        )
+
+        cases.forEach { case ->
+            val directory = createTempDirectory("dovecot-readiness-${case.name}").toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                case.cachedPassword?.let { password ->
+                    catalog.put(
+                        LocalAccountRecord(
+                            provider = Provider.DOVECOT,
+                            address = "alice@local.test",
+                            password = password,
+                            protocols = ALL_PROTOCOLS,
+                        ),
+                    )
+                }
+                val mailbox = RecordingMailboxClient(probeOutcome = case.outcome)
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(case.registry, QueueRunner()),
+                    catalog = catalog,
+                    mailboxClient = mailbox,
+                )
+
+                val account = provider.listAccounts().single()
+
+                assertEquals(case.expected, account.credentialReadiness, case.name)
+                assertEquals(case.outcome.diagnostic.takeIf { case.expected != CredentialReadiness.PASSWORD_REQUIRED }, account.readinessMessage)
+                assertEquals(case.expectedProbeCount, mailbox.probed.size, case.name)
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun passwordAdoptionPersistsOnlyAfterSuccessfulOrdinaryImapAuthentication() = runBlocking {
+        listOf(
+            AuthenticationOutcome.Authenticated("authenticated") to CredentialReadiness.READY,
+            AuthenticationOutcome.WrongPassword("authentication failed") to
+                CredentialReadiness.AUTHENTICATION_FAILED,
+            AuthenticationOutcome.Unavailable("connection refused") to
+                CredentialReadiness.PROVIDER_UNAVAILABLE,
+        ).forEachIndexed { index, (outcome, expectedReadiness) ->
+            val directory = createTempDirectory("dovecot-adopt-$index").toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                val mailbox = RecordingMailboxClient(probeOutcome = outcome)
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(SingleAccount, QueueRunner()),
+                    catalog = catalog,
+                    mailboxClient = mailbox,
+                )
+
+                val response = provider.adoptPassword(
+                    "alice@local.test",
+                    AdoptPasswordRequest("supplied-password"),
+                )
+
+                assertEquals(expectedReadiness, response.readiness)
+                assertEquals(outcome is AuthenticationOutcome.Authenticated, response.operation.success)
+                assertEquals(1, mailbox.probed.size)
+                assertEquals(
+                    if (outcome is AuthenticationOutcome.Authenticated) "supplied-password" else null,
+                    catalog.find(Provider.DOVECOT, "alice@local.test")?.password,
+                )
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun explicitProbesUseRememberedOverrideAndEmptyCredentialsWithoutPersistingOverrides() =
+        runBlocking {
+            val directory = createTempDirectory("dovecot-explicit-probes").toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                catalog.put(
+                    LocalAccountRecord(
+                        provider = Provider.DOVECOT,
+                        address = "alice@local.test",
+                        password = "remembered-password",
+                        protocols = ALL_PROTOCOLS,
+                    ),
+                )
+                val connector = RecordingExplicitAuthenticationConnector()
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(SingleAccount, QueueRunner()),
+                    catalog = catalog,
+                    mailboxClient = RecordingMailboxClient(),
+                    authenticationProbe = ProviderAuthenticationProbe(connector),
+                )
+
+                listOf(
+                    AuthenticationProbeRequest(
+                        "alice@local.test",
+                        Provider.DOVECOT,
+                        AuthenticationProtocol.IMAP,
+                    ),
+                    AuthenticationProbeRequest(
+                        "alice@local.test",
+                        Provider.DOVECOT,
+                        AuthenticationProtocol.POP3,
+                        "override-password",
+                    ),
+                    AuthenticationProbeRequest(
+                        "alice@local.test",
+                        Provider.DOVECOT,
+                        AuthenticationProtocol.SMTP,
+                        "",
+                    ),
+                    AuthenticationProbeRequest(
+                        "alice@local.test",
+                        Provider.DOVECOT,
+                        AuthenticationProtocol.OAUTH_IMAP,
+                        "imap-token",
+                    ),
+                    AuthenticationProbeRequest(
+                        "alice@local.test",
+                        Provider.DOVECOT,
+                        AuthenticationProtocol.OAUTH_SMTP,
+                        "smtp-token",
+                    ),
+                ).forEach { request ->
+                    assertTrue(provider.probeAuthentication(request).success)
+                }
+
+                assertEquals(
+                    listOf(
+                        "remembered-password",
+                        "override-password",
+                        "",
+                        "imap-token",
+                        "smtp-token",
+                    ),
+                    connector.attempts.map(ProviderAuthenticationAttempt::secret),
+                )
+                assertEquals(
+                    listOf(
+                        ProviderAuthenticationMechanism.PASSWORD,
+                        ProviderAuthenticationMechanism.PASSWORD,
+                        ProviderAuthenticationMechanism.PASSWORD,
+                        ProviderAuthenticationMechanism.OAUTHBEARER,
+                        ProviderAuthenticationMechanism.OAUTHBEARER,
+                    ),
+                    connector.attempts.map(ProviderAuthenticationAttempt::mechanism),
+                )
+                assertEquals(
+                    "remembered-password",
+                    catalog.find(Provider.DOVECOT, "alice@local.test")?.password,
+                )
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
     @Test
     fun activePlainPasswordBeatsTheStaleCatalogForMailboxWork() = runBlocking {
         val directory = createTempDirectory("dovecot-dashboard-authority").toRealPath()
@@ -123,13 +355,55 @@ class DovecotDashboardProviderTest {
                 mailboxClient = mailbox,
             )
 
-            provider.changePassword("alice@local.test", "changed-password")
+            val response = provider.changePassword("alice@local.test", "changed-password")
 
             assertEquals(
                 AccountCredentials("alice@local.test", "changed-password"),
                 mailbox.probed.single(),
             )
+            assertEquals(CredentialReadiness.READY, response.readiness)
+            assertTrue(response.operation.success)
             assertTrue(runner.requests.all { "mailbox" !in it.argv })
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun passwordChangeUsesTheLiveCanonicalAddressForCatalogLookup() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-password-canonical").toRealPath()
+        try {
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.DOVECOT,
+                    address = "alice@local.test",
+                    password = "old-password",
+                    protocols = ALL_PROTOCOLS,
+                ),
+            )
+            val registry = MutablePlainAccountRegistry("old-password")
+            val mailbox = RecordingMailboxClient()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    registry,
+                    QueueRunner(DovecotCommandResult.success()),
+                ),
+                catalog = catalog,
+                mailboxClient = mailbox,
+            )
+
+            val response = provider.changePassword("ALICE@LOCAL.TEST", "changed-password")
+
+            assertEquals("alice@local.test", response.address)
+            assertEquals(
+                "changed-password",
+                catalog.find(Provider.DOVECOT, "alice@local.test")?.password,
+            )
+            assertEquals(
+                AccountCredentials("alice@local.test", "changed-password"),
+                mailbox.probed.single(),
+            )
         } finally {
             directory.toFile().deleteRecursively()
         }
@@ -163,11 +437,18 @@ class DovecotDashboardProviderTest {
                     mailboxClient = RecordingMailboxClient(probeOutcome = outcome),
                 )
 
-                assertFailsWith<IllegalStateException> {
-                    provider.changePassword("alice@local.test", "changed-password")
-                }
+                val response = provider.changePassword("alice@local.test", "changed-password")
 
                 assertEquals("changed-password", registry.plainPassword("alice@local.test"))
+                assertEquals(
+                    if (outcome is AuthenticationOutcome.WrongPassword) {
+                        CredentialReadiness.AUTHENTICATION_FAILED
+                    } else {
+                        CredentialReadiness.PROVIDER_UNAVAILABLE
+                    },
+                    response.readiness,
+                )
+                assertTrue(!response.operation.success)
                 assertEquals(
                     "old-password",
                     catalog.find(Provider.DOVECOT, "alice@local.test")?.password,
@@ -467,6 +748,17 @@ class DovecotDashboardProviderTest {
 
     companion object {
         val ALL_PROTOCOLS = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP)
+    }
+}
+
+private class RecordingExplicitAuthenticationConnector : ProviderAuthenticationConnector {
+    val attempts = mutableListOf<ProviderAuthenticationAttempt>()
+
+    override fun authenticate(
+        attempt: ProviderAuthenticationAttempt,
+    ): ProviderAuthenticationTransportOutcome {
+        attempts += attempt
+        return ProviderAuthenticationTransportOutcome.Authenticated("authenticated")
     }
 }
 

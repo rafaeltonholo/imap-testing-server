@@ -9,6 +9,7 @@ class RoutesTest {
         assertEquals("/api/v1/accounts", Routes.ACCOUNTS)
         assertEquals("/api/v1/logs", Routes.LOGS)
         assertEquals("/api/v1/messages/generate", Routes.GENERATE_MESSAGE)
+        assertEquals("/api/v1/authentication-probes", Routes.AUTHENTICATION_PROBES)
     }
 
     @Test
@@ -17,6 +18,10 @@ class RoutesTest {
 
         assertEquals(account, Routes.account("dev@local.test", Provider.STALWART))
         assertEquals("$account/password", Routes.accountPassword("dev@local.test", Provider.STALWART))
+        assertEquals(
+            "$account/password/verify",
+            Routes.accountPasswordVerification("dev@local.test", Provider.STALWART),
+        )
         assertEquals("$account/folders", Routes.folders("dev@local.test", Provider.STALWART))
         assertEquals("$account/folders/archive", Routes.folder("dev@local.test", Provider.STALWART, "archive"))
         assertEquals("$account/messages", Routes.messages("dev@local.test", Provider.STALWART))

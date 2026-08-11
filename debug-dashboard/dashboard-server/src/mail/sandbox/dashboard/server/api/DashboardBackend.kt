@@ -2,7 +2,11 @@ package mail.sandbox.dashboard.server.api
 
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AccountListResponse
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
 import mail.sandbox.dashboard.contract.ChangePasswordRequest
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.CreateFolderRequest
 import mail.sandbox.dashboard.contract.FolderInfo
@@ -24,11 +28,21 @@ interface DashboardBackend {
 
     suspend fun deleteAccount(address: String, provider: Provider): OperationResponse
 
+    suspend fun adoptPassword(
+        address: String,
+        provider: Provider,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse
+
     suspend fun changePassword(
         address: String,
         provider: Provider,
         request: ChangePasswordRequest,
-    ): OperationResponse
+    ): CredentialUpdateResponse
+
+    suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse
 
     suspend fun logs(service: LogService): LogResponse
 
@@ -84,11 +98,21 @@ internal object UnavailableDashboardBackend : DashboardBackend {
         provider: Provider,
     ): OperationResponse = unavailable()
 
+    override suspend fun adoptPassword(
+        address: String,
+        provider: Provider,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = unavailable()
+
     override suspend fun changePassword(
         address: String,
         provider: Provider,
         request: ChangePasswordRequest,
-    ): OperationResponse = unavailable()
+    ): CredentialUpdateResponse = unavailable()
+
+    override suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse = unavailable()
 
     override suspend fun logs(service: LogService): LogResponse = unavailable()
 

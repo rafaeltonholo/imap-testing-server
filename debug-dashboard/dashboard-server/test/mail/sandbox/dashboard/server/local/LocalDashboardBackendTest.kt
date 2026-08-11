@@ -4,7 +4,12 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
+import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.FolderInfo
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
@@ -19,6 +24,8 @@ import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
 
 class LocalDashboardBackendTest {
     @Test
@@ -26,14 +33,17 @@ class LocalDashboardBackendTest {
         val dovecot = RecordingProvider(Provider.DOVECOT)
         val stalwart = RecordingProvider(Provider.STALWART)
         dovecot.accounts += AccountInfo(
-            "zeta@local.test",
-            Provider.DOVECOT,
-            listOf(MailProtocol.IMAP),
+            address = "zeta@local.test",
+            provider = Provider.DOVECOT,
+            protocols = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP),
+            credentialReadiness = CredentialReadiness.READY,
         )
         stalwart.accounts += AccountInfo(
-            "alpha@local.test",
-            Provider.STALWART,
-            listOf(MailProtocol.JMAP),
+            address = "alpha@local.test",
+            provider = Provider.STALWART,
+            protocols = listOf(MailProtocol.JMAP),
+            credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+            providerAccountId = "account-alpha",
         )
         val backend = LocalDashboardBackend(
             providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
@@ -43,6 +53,10 @@ class LocalDashboardBackendTest {
         assertEquals(
             listOf("alpha@local.test", "zeta@local.test"),
             backend.listAccounts().accounts.map(AccountInfo::address),
+        )
+        assertEquals(
+            listOf(Provider.DOVECOT, Provider.STALWART),
+            backend.listAccounts().providerStatuses.map(ProviderStatus::provider),
         )
 
         val request = CreateAccountRequest(
@@ -54,6 +68,181 @@ class LocalDashboardBackendTest {
         assertEquals(request.address, backend.createAccount(request).address)
         assertEquals(listOf(request), stalwart.createdAccounts)
         assertTrue(dovecot.createdAccounts.isEmpty())
+    }
+
+    @Test
+    fun providerFailuresAreIndependentAndOnlyFailedProviderUsesStaleCatalogProjection() =
+        runBlocking {
+            val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+                listFailure = IllegalStateException("Dovecot unavailable")
+            }
+            val stalwart = RecordingProvider(Provider.STALWART).apply {
+                status = ProviderStatus(
+                    provider = Provider.STALWART,
+                    availability = ProviderAvailability.DEGRADED,
+                    message = "Credential probes unavailable",
+                )
+                accounts += AccountInfo(
+                    address = "live@local.test",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                    credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+                    providerAccountId = "live-id",
+                )
+            }
+            val cached = listOf(
+                LocalAccountRecord(
+                    provider = Provider.DOVECOT,
+                    address = "cached-dove@local.test",
+                    password = "cached-password",
+                    protocols = listOf(MailProtocol.IMAP),
+                ),
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "live@local.test",
+                    password = "must-not-override-live",
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "live-id",
+                ),
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "cached-stalwart@local.test",
+                    password = null,
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "cached-id",
+                ),
+            )
+            val backend = LocalDashboardBackend(
+                providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+                logSource = RecordingLogs(),
+                cachedAccounts = { cached },
+            )
+
+            val response = backend.listAccounts()
+
+            assertEquals(
+                listOf("cached-dove@local.test", "live@local.test"),
+                response.accounts.map(AccountInfo::address),
+            )
+            val stale = response.accounts.first()
+            assertTrue(stale.stale)
+            assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, stale.credentialReadiness)
+            assertEquals(listOf(MailProtocol.IMAP), stale.protocols)
+            val live = response.accounts.last()
+            assertTrue(!live.stale)
+            assertEquals(listOf(MailProtocol.JMAP, MailProtocol.SMTP), live.protocols)
+            assertEquals(
+                listOf(ProviderAvailability.UNAVAILABLE, ProviderAvailability.DEGRADED),
+                response.providerStatuses.map(ProviderStatus::availability),
+            )
+            assertTrue("Dovecot unavailable" in response.providerStatuses.first().message.orEmpty())
+        }
+
+    @Test
+    fun providerStatusFailuresAreIndependentAndUseOnlyThatProvidersStaleProjection() =
+        runBlocking {
+            val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+                statusFailure = IllegalStateException("Dovecot status unavailable")
+                accounts += AccountInfo(
+                    address = "must-not-leak@local.test",
+                    provider = Provider.DOVECOT,
+                    protocols = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP),
+                    credentialReadiness = CredentialReadiness.READY,
+                )
+            }
+            val stalwart = RecordingProvider(Provider.STALWART).apply {
+                accounts += AccountInfo(
+                    address = "live@local.test",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.JMAP),
+                    credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+                    providerAccountId = "live-id",
+                )
+            }
+            val backend = LocalDashboardBackend(
+                providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+                logSource = RecordingLogs(),
+                cachedAccounts = {
+                    listOf(
+                        LocalAccountRecord(
+                            provider = Provider.DOVECOT,
+                            address = "cached@local.test",
+                            password = "cached-password",
+                            protocols = listOf(MailProtocol.IMAP),
+                        ),
+                    )
+                },
+            )
+
+            val response = backend.listAccounts()
+
+            assertEquals(
+                listOf("cached@local.test", "live@local.test"),
+                response.accounts.map(AccountInfo::address),
+            )
+            assertEquals(
+                listOf(ProviderAvailability.UNAVAILABLE, ProviderAvailability.READY),
+                response.providerStatuses.map(ProviderStatus::availability),
+            )
+            assertTrue(response.accounts.first().stale)
+        }
+
+    @Test
+    fun authenticationProbeRunsOnceAndReturnsOnlyNewAccountFilteredLogs() = runBlocking {
+        val credential = "wrong-password"
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            probeResponse = "authentication failed for $credential"
+        }
+        val logs = SequencedProbeLogs(
+            listOf("old matching line"),
+            listOf("old matching line"),
+            listOf("old matching line", "new matching line credential=$credential"),
+        )
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot),
+            logSource = logs,
+            authenticationLogPollDelayMillis = 0,
+        )
+        val request = AuthenticationProbeRequest(
+            address = "dev@local.test",
+            provider = Provider.DOVECOT,
+            protocol = AuthenticationProtocol.IMAP,
+            credentialOverride = credential,
+        )
+
+        val response = backend.probeAuthentication(request)
+
+        assertEquals(false, response.success)
+        assertEquals(listOf("new matching line credential=[redacted]"), response.correlatedLogs)
+        assertEquals("authentication failed for [redacted]", response.providerResponse)
+        assertEquals(listOf(request), dovecot.probeRequests)
+        assertEquals(3, logs.readCount)
+        assertTrue(credential !in response.providerResponse)
+        assertTrue(response.correlatedLogs.none { credential in it })
+    }
+
+    @Test
+    fun authenticationLogPollingIsBoundedWhenNoNewEvidenceArrives() = runBlocking {
+        val dovecot = RecordingProvider(Provider.DOVECOT)
+        val logs = SequencedProbeLogs(*Array(8) { listOf("old matching line") })
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot),
+            logSource = logs,
+            authenticationLogPollAttempts = 3,
+            authenticationLogPollDelayMillis = 0,
+        )
+
+        val response = backend.probeAuthentication(
+            AuthenticationProbeRequest(
+                address = "dev@local.test",
+                provider = Provider.DOVECOT,
+                protocol = AuthenticationProtocol.IMAP,
+            ),
+        )
+
+        assertEquals(emptyList(), response.correlatedLogs)
+        assertEquals(4, logs.readCount)
+        assertEquals(1, dovecot.probeRequests.size)
     }
 
     @Test
@@ -173,6 +362,23 @@ private class RecordingLogs : DashboardLogSource {
     }
 }
 
+private class SequencedProbeLogs(
+    vararg snapshots: List<String>,
+) : DashboardLogSource {
+    private val snapshots = ArrayDeque(snapshots.toList())
+    var readCount = 0
+
+    override fun read(
+        service: LogService,
+        account: DashboardLogAccount?,
+        limit: Int,
+    ): LogResponse {
+        readCount++
+        val lines = snapshots.removeFirstOrNull() ?: error("Unexpected log poll")
+        return LogResponse(service = service, account = account?.address, lines = lines)
+    }
+}
+
 private data class LogRead(
     val service: LogService,
     val account: DashboardLogAccount?,
@@ -187,19 +393,69 @@ private class RecordingProvider(
     val injectedMessages = mutableListOf<GeneratedMessage>()
     val deliveredMessages = mutableListOf<GeneratedMessage>()
     var logAccount = DashboardLogAccount("dev@local.test")
+    var listFailure: RuntimeException? = null
+    var statusFailure: RuntimeException? = null
+    var status = ProviderStatus(provider, ProviderAvailability.READY)
+    val probeRequests = mutableListOf<AuthenticationProbeRequest>()
+    var probeResponse = "authentication failed"
 
-    override suspend fun listAccounts(): List<AccountInfo> = accounts
+    override suspend fun listAccounts(): List<AccountInfo> {
+        listFailure?.let { throw it }
+        return accounts
+    }
+
+    override fun providerStatus(): ProviderStatus {
+        statusFailure?.let { throw it }
+        return status
+    }
 
     override suspend fun createAccount(request: CreateAccountRequest): AccountInfo {
         createdAccounts += request
-        return AccountInfo(request.address, request.provider, request.protocols)
+        return AccountInfo(
+            address = request.address,
+            provider = request.provider,
+            protocols = request.protocols,
+            credentialReadiness = CredentialReadiness.READY,
+        )
     }
 
     override suspend fun dashboardLogAccount(address: String): DashboardLogAccount = logAccount
 
     override suspend fun deleteAccount(address: String) = Unit
 
-    override suspend fun changePassword(address: String, newPassword: String) = Unit
+    override suspend fun adoptPassword(
+        address: String,
+        request: AdoptPasswordRequest,
+    ) = mail.sandbox.dashboard.contract.CredentialUpdateResponse(
+        address,
+        provider,
+        CredentialReadiness.READY,
+        OperationResponse(true, "verified"),
+    )
+
+    override suspend fun changePassword(
+        address: String,
+        newPassword: String,
+    ) = mail.sandbox.dashboard.contract.CredentialUpdateResponse(
+        address,
+        provider,
+        CredentialReadiness.READY,
+        OperationResponse(true, "changed"),
+    )
+
+    override suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse {
+        probeRequests += request
+        return AuthenticationProbeResponse(
+            address = request.address,
+            provider = request.provider,
+            protocol = request.protocol,
+            success = false,
+            providerResponse = probeResponse,
+            correlatedLogs = emptyList(),
+        )
+    }
 
     override suspend fun listFolders(address: String): List<FolderInfo> = emptyList()
 

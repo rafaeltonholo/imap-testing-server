@@ -16,11 +16,16 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
+import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
 import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.MessageDeliveryMode
 import mail.sandbox.dashboard.contract.MessageSourceType
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpRequest
 import mail.sandbox.dashboard.server.gate.stalwart.GateHttpResponse
@@ -29,6 +34,95 @@ import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartManagemen
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAdapter
 
 class StalwartDashboardProviderTest {
+    @Test
+    fun liveUnknownPasswordAccountKeepsLiveIdentityAndCapabilitiesWithHonestReadiness() =
+        runBlocking {
+            val transport = ArrivalTransport(
+                ExpectedJmapCall("x:Account/query", query("management-account", listOf("c"))),
+                ExpectedJmapCall(
+                    "x:Account/get",
+                    get(
+                        "management-account",
+                        buildJsonObject {
+                            put("id", "c")
+                            put("@type", "User")
+                            put("name", "alice")
+                            put("domainId", "domain-one")
+                            put("permissions", buildJsonObject { put("@type", "Inherit") })
+                        },
+                    ),
+                ),
+                ExpectedJmapCall(
+                    "x:Domain/get",
+                    get(
+                        "management-account",
+                        buildJsonObject {
+                            put("id", "domain-one")
+                            put("name", "local.test")
+                        },
+                    ),
+                ),
+            )
+            val directory = createTempDirectory("stalwart-dashboard-readiness").toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                catalog.put(
+                    LocalAccountRecord(
+                        provider = Provider.STALWART,
+                        address = "stale-address@local.test",
+                        password = null,
+                        protocols = listOf(MailProtocol.JMAP),
+                        providerAccountId = "c",
+                    ),
+                )
+                val provider = StalwartDashboardProvider(
+                    adapter = StalwartProductAdapter(
+                        baseUri = BASE_URI,
+                        managementCredentialProvider = StalwartManagementCredentialProvider {
+                            GateCredential.basic(
+                                "manager@local.test",
+                                "management".toCharArray(),
+                            )
+                        },
+                        accountCredentialCatalog = LocalStalwartCredentialCatalog(catalog),
+                        transport = transport,
+                    ),
+                    catalog = catalog,
+                )
+
+                val account = provider.listAccounts().single()
+
+                assertEquals("alice@local.test", account.address)
+                assertEquals("c", account.providerAccountId)
+                assertEquals(listOf(MailProtocol.JMAP, MailProtocol.SMTP), account.protocols)
+                assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, account.credentialReadiness)
+                assertTrue(account.readinessMessage?.isNotBlank() == true)
+                assertEquals(ProviderAvailability.DEGRADED, provider.providerStatus().availability)
+
+                val adoption = provider.adoptPassword(
+                    account.address,
+                    AdoptPasswordRequest("supplied-password"),
+                )
+                assertTrue(!adoption.operation.success)
+                assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, adoption.readiness)
+                assertTrue(
+                    !provider.probeAuthentication(
+                        AuthenticationProbeRequest(
+                            address = account.address,
+                            provider = Provider.STALWART,
+                            protocol = AuthenticationProtocol.JMAP,
+                            credentialOverride = "supplied-password",
+                        ),
+                    ).success,
+                )
+                assertEquals(null, catalog.findByProviderAccountId(Provider.STALWART, "c")?.password)
+                transport.assertExhausted()
+                provider.close()
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+
     @Test
     fun logSelectorCarriesTheCanonicalAddressAndProviderAccountId() = runBlocking {
         val transport = ArrivalTransport(

@@ -17,10 +17,47 @@ enum class MailProtocol {
 }
 
 @Serializable
+enum class CredentialReadiness {
+    READY,
+    PASSWORD_REQUIRED,
+    AUTHENTICATION_FAILED,
+    PROVIDER_UNAVAILABLE,
+}
+
+@Serializable
+enum class ProviderAvailability {
+    READY,
+    DEGRADED,
+    UNAVAILABLE,
+    UPGRADE_REQUIRED,
+}
+
+@Serializable
+data class ProviderStatus(
+    val provider: Provider,
+    val availability: ProviderAvailability,
+    val message: String? = null,
+)
+
+@Serializable
+enum class AuthenticationProtocol {
+    IMAP,
+    POP3,
+    SMTP,
+    JMAP,
+    OAUTH_IMAP,
+    OAUTH_SMTP,
+}
+
+@Serializable
 data class AccountInfo(
     val address: String,
     val provider: Provider,
     val protocols: List<MailProtocol>,
+    val credentialReadiness: CredentialReadiness,
+    val providerAccountId: String? = null,
+    val readinessMessage: String? = null,
+    val stale: Boolean = false,
     val enabled: Boolean = true,
 )
 
@@ -36,7 +73,45 @@ data class CreateAccountRequest(
 data class ChangePasswordRequest(val newPassword: String)
 
 @Serializable
-data class AccountListResponse(val accounts: List<AccountInfo>)
+data class AdoptPasswordRequest(val password: String)
+
+@Serializable
+data class CredentialUpdateResponse(
+    val address: String,
+    val provider: Provider,
+    val readiness: CredentialReadiness,
+    val operation: OperationResponse,
+)
+
+@Serializable
+data class AuthenticationProbeRequest(
+    val address: String,
+    val provider: Provider,
+    val protocol: AuthenticationProtocol,
+    val credentialOverride: String? = null,
+)
+
+@Serializable
+data class AuthenticationProbeResponse(
+    val address: String,
+    val provider: Provider,
+    val protocol: AuthenticationProtocol,
+    val success: Boolean,
+    val providerResponse: String,
+    val correlatedLogs: List<String>,
+)
+
+@Serializable
+data class AccountListResponse(
+    val accounts: List<AccountInfo>,
+    val providerStatuses: List<ProviderStatus>,
+) {
+    init {
+        require(providerStatuses.map(ProviderStatus::provider) == Provider.entries) {
+            "Provider statuses must contain DOVECOT and STALWART exactly once in that order"
+        }
+    }
+}
 
 @Serializable
 enum class LogService {

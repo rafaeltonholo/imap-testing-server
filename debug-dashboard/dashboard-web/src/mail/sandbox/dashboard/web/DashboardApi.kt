@@ -15,7 +15,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AccountListResponse
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
 import mail.sandbox.dashboard.contract.ChangePasswordRequest
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.CreateFolderRequest
 import mail.sandbox.dashboard.contract.FolderInfo
@@ -69,8 +73,23 @@ internal class DashboardApi {
     suspend fun changePassword(
         target: AccountTarget,
         request: ChangePasswordRequest,
-    ): OperationResponse = put(
+    ): CredentialUpdateResponse = put(
         "${accountRoute(target)}/password",
+        json.encodeToString(request),
+    )
+
+    suspend fun adoptPassword(
+        target: AccountTarget,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = post(
+        "${accountRoute(target)}/password/verify",
+        json.encodeToString(request),
+    )
+
+    suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse = post(
+        Routes.AUTHENTICATION_PROBES,
         json.encodeToString(request),
     )
 
@@ -460,7 +479,7 @@ internal class DashboardController(
     suspend fun changePassword(newPassword: String) = operation("Changing password") {
         val target = requireNotNull(selectedTarget)
         val result = api.changePassword(target, ChangePasswordRequest(newPassword))
-        lastReceipt = result.message
+        lastReceipt = result.operation.message
         refreshAccountLogs()
     }
 

@@ -142,8 +142,7 @@ internal class ProviderAuthenticationProbe(
             ProviderAuthenticationMechanism.XOAUTH2,
             ProviderAuthenticationMechanism.OAUTHBEARER,
             -> credentials.tokenOverride
-        }?.takeIf(String::isNotEmpty)
-            ?: return AuthenticationOutcome.MissingCredentials("Credentials are required")
+        } ?: return AuthenticationOutcome.MissingCredentials("Credentials are required")
 
         require(
             request.protocol != ProviderAuthenticationProtocol.POP3 ||
@@ -455,8 +454,9 @@ private fun String.indicatesMissingAccount(): Boolean {
         .any(normalized::contains)
 }
 
-private fun boundDiagnostic(value: String, secret: String): String = value
-    .replace(secret, "[redacted]")
+private fun boundDiagnostic(value: String, secret: String): String = (
+    if (secret.isEmpty()) value else value.replace(secret, "[redacted]")
+)
     .map { character -> if (character.isISOControl()) ' ' else character }
     .joinToString("")
     .trim()

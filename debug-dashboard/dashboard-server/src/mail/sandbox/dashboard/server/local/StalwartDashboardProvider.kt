@@ -1,10 +1,14 @@
 package mail.sandbox.dashboard.server.local
 
 import java.net.URI
-import java.security.MessageDigest
 import java.nio.file.Path
 import kotlinx.coroutines.delay
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.FolderInfo
 import mail.sandbox.dashboard.contract.GenerateMessageRequest
@@ -15,8 +19,9 @@ import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.server.api.DashboardNotFoundException
-import mail.sandbox.dashboard.server.gate.stalwart.GateBootstrap
 import mail.sandbox.dashboard.server.gate.stalwart.GateCredential
 import mail.sandbox.dashboard.server.gate.stalwart.StalwartGateSecretFiles
 import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartAccountCredentialCatalog
@@ -29,26 +34,32 @@ import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductPr
 internal class StalwartDashboardProvider(
     private val adapter: StalwartProductAdapter,
     private val catalog: LocalAccountCatalog,
-    private val fixtureCredentialSource: StalwartFixtureCredentialSource? = null,
     private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.STALWART),
 ) : LocalProviderOperations, AutoCloseable {
     override val provider: Provider = Provider.STALWART
 
+    override fun providerStatus(): ProviderStatus = ProviderStatus(
+        provider = provider,
+        availability = ProviderAvailability.DEGRADED,
+        message = TEMPORARY_UNAVAILABLE_MESSAGE,
+    )
+
     override suspend fun listAccounts(): List<AccountInfo> {
         val accounts = adapter.listAccounts()
-        synchronizeCredentials(accounts.map { it.id to it.address })
         return accounts.map { account ->
-            val record = catalog.find(provider, account.address)
             AccountInfo(
                 address = account.address,
                 provider = provider,
-                protocols = record?.protocols ?: account.enabledProtocols.mapNotNull {
+                protocols = account.enabledProtocols.mapNotNull {
                     when (it) {
                         StalwartProductProtocol.JMAP -> MailProtocol.JMAP
                         StalwartProductProtocol.SMTP -> MailProtocol.SMTP
                         StalwartProductProtocol.IMAP -> null
                     }
-                },
+                }.sortedBy(MailProtocol::ordinal),
+                credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+                providerAccountId = account.id,
+                readinessMessage = TEMPORARY_UNAVAILABLE_MESSAGE,
             )
         }
     }
@@ -67,12 +78,32 @@ internal class StalwartDashboardProvider(
         val account = adapter.createAccount(
             StalwartCreateAccount(
                 address = candidate.address,
-                password = candidate.password,
+                password = requireNotNull(candidate.password),
                 enabledProtocols = protocols,
             ),
         )
-        catalog.put(candidate.copy(address = account.address, providerAccountId = account.id))
-        return AccountInfo(account.address, provider, candidate.protocols)
+        catalog.put(
+            candidate.copy(
+                address = account.address,
+                password = null,
+                protocols = account.enabledProtocols.mapNotNull { protocol ->
+                    when (protocol) {
+                        StalwartProductProtocol.JMAP -> MailProtocol.JMAP
+                        StalwartProductProtocol.SMTP -> MailProtocol.SMTP
+                        StalwartProductProtocol.IMAP -> null
+                    }
+                }.sortedBy(MailProtocol::ordinal),
+                providerAccountId = account.id,
+            ),
+        )
+        return AccountInfo(
+            address = account.address,
+            provider = provider,
+            protocols = candidate.protocols,
+            credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+            providerAccountId = account.id,
+            readinessMessage = TEMPORARY_UNAVAILABLE_MESSAGE,
+        )
     }
 
     override suspend fun dashboardLogAccount(address: String): DashboardLogAccount {
@@ -86,18 +117,26 @@ internal class StalwartDashboardProvider(
         catalog.remove(provider, account.second)
     }
 
-    override suspend fun changePassword(address: String, newPassword: String) {
-        val account = account(address)
-        val record = catalog.find(provider, account.second)
-            ?: throw DashboardNotFoundException(
-                "The Stalwart Account is not registered with a local credential",
-            )
-        val updated = catalog.validated(
-            record.copy(password = newPassword, providerAccountId = account.first),
-        )
-        adapter.changePassword(account.first, updated.password)
-        catalog.put(updated)
-    }
+    override suspend fun adoptPassword(
+        address: String,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = unavailableCredentialUpdate(address, "verify")
+
+    override suspend fun changePassword(
+        address: String,
+        newPassword: String,
+    ): CredentialUpdateResponse = unavailableCredentialUpdate(address, "change")
+
+    override suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse = AuthenticationProbeResponse(
+        address = request.address,
+        provider = provider,
+        protocol = request.protocol,
+        success = false,
+        providerResponse = TEMPORARY_UNAVAILABLE_MESSAGE,
+        correlatedLogs = emptyList(),
+    )
 
     override suspend fun listFolders(address: String): List<FolderInfo> {
         val accountId = account(address).first
@@ -262,7 +301,12 @@ internal class StalwartDashboardProvider(
                 envelopeFrom = canonicalAddress,
                 envelopeRecipient = canonicalAddress,
                 rawMessage = message.rawEml,
-                credentials = LocalSmtpCredentials(canonicalAddress, record.password),
+                credentials = LocalSmtpCredentials(
+                    canonicalAddress,
+                    requireNotNull(record.password) {
+                        "A verified Stalwart password is required for SMTP delivery"
+                    },
+                ),
             )
             repeat(MESSAGE_ARRIVAL_ATTEMPTS) { attempt ->
                 val created = adapter.listMessages(accountId, inbox.id)
@@ -291,18 +335,9 @@ internal class StalwartDashboardProvider(
 
     private suspend fun account(address: String): Pair<String, String> {
         val accounts = adapter.listAccounts()
-        synchronizeCredentials(accounts.map { it.id to it.address })
         val account = accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }
             ?: throw DashboardNotFoundException("Stalwart Account was not found")
         return account.id to account.address
-    }
-
-    private fun synchronizeCredentials(accounts: List<Pair<String, String>>) {
-        catalog.retainProviderAccountIds(
-            provider,
-            accounts.mapTo(linkedSetOf()) { it.first },
-        )
-        seedFixtureCredentials(accounts)
     }
 
     private fun productProtocols(protocols: List<MailProtocol>): Set<StalwartProductProtocol> {
@@ -318,42 +353,27 @@ internal class StalwartDashboardProvider(
         }
     }
 
-    private fun seedFixtureCredentials(accounts: List<Pair<String, String>>) {
-        val source = fixtureCredentialSource ?: return
-        val fixtures = accounts.filter { (_, address) ->
-            address == GateBootstrap.FIRST_USER_ADDRESS ||
-                address == GateBootstrap.SECOND_USER_ADDRESS
-        }
-        if (fixtures.isEmpty()) return
-        source.load().use { credentials ->
-            fixtures.forEach { (id, address) ->
-                val password = when (address) {
-                    GateBootstrap.FIRST_USER_ADDRESS -> credentials.firstPassword
-                    GateBootstrap.SECOND_USER_ADDRESS -> credentials.secondPassword
-                    else -> error("Fixture Account filter is exhaustive")
-                }
-                val current = LocalAccountRecord(
-                    provider = provider,
-                    address = address,
-                    password = password,
-                    protocols = DEFAULT_PROTOCOLS,
-                    providerAccountId = id,
-                    providerGeneration = credentials.generation,
-                )
-                val existing = catalog.find(provider, address)
-                if (existing?.providerGeneration != credentials.generation) {
-                    catalog.put(current)
-                }
-            }
-        }
-    }
-
     private companion object {
         val DEFAULT_PROTOCOLS = listOf(MailProtocol.JMAP, MailProtocol.SMTP)
         val ALLOWED_PROTOCOLS = DEFAULT_PROTOCOLS.toSet()
         const val MESSAGE_ARRIVAL_ATTEMPTS = 40
         const val MESSAGE_ARRIVAL_DELAY_MILLIS = 100L
+        const val TEMPORARY_UNAVAILABLE_MESSAGE =
+            "Stalwart ordinary authentication is unavailable until the normal provider adapter is active"
     }
+
+    private fun unavailableCredentialUpdate(
+        address: String,
+        action: String,
+    ): CredentialUpdateResponse = CredentialUpdateResponse(
+        address = address,
+        provider = provider,
+        readiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+        operation = OperationResponse(
+            success = false,
+            message = "Stalwart password $action is unavailable: $TEMPORARY_UNAVAILABLE_MESSAGE",
+        ),
+    )
 }
 
 internal class LocalStalwartCredentialCatalog(
@@ -361,7 +381,9 @@ internal class LocalStalwartCredentialCatalog(
 ) : StalwartAccountCredentialCatalog {
     override suspend fun find(accountId: String): StalwartAccountLogin? =
         catalog.findByProviderAccountId(Provider.STALWART, accountId)?.let { record ->
-            StalwartAccountLogin(accountId, record.address, record.password)
+            record.password?.let { password ->
+                StalwartAccountLogin(accountId, record.address, password)
+            }
         }
 
     override suspend fun save(login: StalwartAccountLogin) {
@@ -373,7 +395,6 @@ internal class LocalStalwartCredentialCatalog(
                 password = login.password,
                 protocols = existing?.protocols ?: listOf(MailProtocol.JMAP, MailProtocol.SMTP),
                 providerAccountId = login.accountId,
-                providerGeneration = existing?.providerGeneration,
             ),
         )
     }
@@ -402,45 +423,6 @@ internal class GateFixtureManagementCredentialProvider(
     )
 }
 
-internal class StalwartFixtureCredentialSource(
-    private val dashboardRoot: Path,
-    private val fixtureSecrets: Path,
-) {
-    fun load(): LoadedStalwartFixtureCredentials =
-        StalwartGateSecretFiles.readFixtureSecrets(
-            projectRoot = dashboardRoot,
-            environment = mapOf(
-                "STALWART_GATE_FIXTURE_SECRETS_FILE" to fixtureSecrets.toString(),
-            ),
-        ).use { secrets ->
-            val firstPassword = secrets.firstUserPassword.concatToString()
-            val secondPassword = secrets.secondUserPassword.concatToString()
-            LoadedStalwartFixtureCredentials(
-                firstPassword = firstPassword,
-                secondPassword = secondPassword,
-                generation = fixtureGeneration(firstPassword, secondPassword),
-            )
-        }
-
-    private fun fixtureGeneration(firstPassword: String, secondPassword: String): String {
-        val bytes = "$firstPassword\u0000$secondPassword".toByteArray(Charsets.UTF_8)
-        return try {
-            MessageDigest.getInstance("SHA-256").digest(bytes)
-                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-        } finally {
-            bytes.fill(0)
-        }
-    }
-}
-
-internal class LoadedStalwartFixtureCredentials(
-    val firstPassword: String,
-    val secondPassword: String,
-    val generation: String,
-) : AutoCloseable {
-    override fun close() = Unit
-}
-
 internal fun createStalwartDashboardProvider(
     repositoryRoot: Path,
     catalog: LocalAccountCatalog,
@@ -465,9 +447,5 @@ internal fun createStalwartDashboardProvider(
             accountCredentialCatalog = credentials,
         ),
         catalog = catalog,
-        fixtureCredentialSource = StalwartFixtureCredentialSource(
-            dashboardRoot,
-            fixtureSecrets,
-        ),
     )
 }

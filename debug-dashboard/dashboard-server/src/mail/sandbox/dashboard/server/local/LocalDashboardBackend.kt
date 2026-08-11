@@ -1,9 +1,16 @@
 package mail.sandbox.dashboard.server.local
 
 import java.nio.file.Path
+import kotlinx.coroutines.delay
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AccountListResponse
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.ChangePasswordRequest
+import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.CreateFolderRequest
 import mail.sandbox.dashboard.contract.FolderInfo
@@ -19,6 +26,8 @@ import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.server.api.DashboardBackend
 import mail.sandbox.dashboard.server.api.DashboardNotFoundException
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotProductAdapter
@@ -28,13 +37,40 @@ internal interface LocalProviderOperations {
 
     suspend fun listAccounts(): List<AccountInfo>
 
+    fun providerStatus(): ProviderStatus = ProviderStatus(
+        provider = provider,
+        availability = ProviderAvailability.READY,
+    )
+
     suspend fun createAccount(request: CreateAccountRequest): AccountInfo
 
     suspend fun dashboardLogAccount(address: String): DashboardLogAccount
 
     suspend fun deleteAccount(address: String)
 
-    suspend fun changePassword(address: String, newPassword: String)
+    suspend fun adoptPassword(
+        address: String,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = unavailableCredentialUpdate(
+        address,
+        "Password verification is unavailable for ${provider.name}",
+    )
+
+    suspend fun changePassword(
+        address: String,
+        newPassword: String,
+    ): CredentialUpdateResponse
+
+    suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse = AuthenticationProbeResponse(
+        address = request.address,
+        provider = request.provider,
+        protocol = request.protocol,
+        success = false,
+        providerResponse = "Authentication probes are unavailable for ${provider.name}",
+        correlatedLogs = emptyList(),
+    )
 
     suspend fun listFolders(address: String): List<FolderInfo>
 
@@ -64,12 +100,25 @@ internal interface LocalProviderOperations {
         request: GenerateMessageRequest,
         messages: List<GeneratedMessage>,
     ): List<String>
+
+    private fun unavailableCredentialUpdate(
+        address: String,
+        message: String,
+    ): CredentialUpdateResponse = CredentialUpdateResponse(
+        address = address,
+        provider = provider,
+        readiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+        operation = OperationResponse(success = false, message = message),
+    )
 }
 
 internal class LocalDashboardBackend(
     providers: Map<Provider, LocalProviderOperations>,
     private val logSource: DashboardLogSource,
     private val messageGenerator: MessageGenerator = MessageGenerator(),
+    private val cachedAccounts: () -> List<LocalAccountRecord> = { emptyList() },
+    private val authenticationLogPollAttempts: Int = 3,
+    private val authenticationLogPollDelayMillis: Long = 50,
 ) : DashboardBackend, AutoCloseable {
     private val providers: Map<Provider, LocalProviderOperations> = providers.toMap()
 
@@ -78,13 +127,60 @@ internal class LocalDashboardBackend(
         require(this.providers.all { (key, value) -> key == value.provider }) {
             "Dashboard provider map is inconsistent"
         }
+        require(authenticationLogPollAttempts in 1..10) {
+            "Authentication log polling must be bounded"
+        }
+        require(authenticationLogPollDelayMillis in 0..1_000) {
+            "Authentication log polling delay must be bounded"
+        }
     }
 
-    override suspend fun listAccounts(): AccountListResponse = AccountListResponse(
-        accounts = providers.values
-            .flatMap { it.listAccounts() }
-            .sortedWith(compareBy(AccountInfo::address, { it.provider.ordinal })),
-    )
+    override suspend fun listAccounts(): AccountListResponse {
+        val cached = cachedAccounts()
+        val accounts = mutableListOf<AccountInfo>()
+        val statuses = mutableListOf<ProviderStatus>()
+        Provider.entries.forEach { provider ->
+            val operations = providers[provider]
+            if (operations == null) {
+                val message = "${provider.displayName()} is not configured"
+                statuses += ProviderStatus(provider, ProviderAvailability.UNAVAILABLE, message)
+                accounts += staleAccounts(cached, provider, message)
+            } else {
+                val result = runCatching {
+                    val live = operations.listAccounts()
+                    require(live.all { it.provider == provider }) {
+                        "${provider.displayName()} returned an account for another provider"
+                    }
+                    val status = operations.providerStatus()
+                    require(status.provider == provider) {
+                        "${provider.displayName()} returned an inconsistent provider status"
+                    }
+                    live to status
+                }
+                result.onSuccess { (live, status) ->
+                    accounts += live
+                    statuses += status
+                }.onFailure { failure ->
+                    val message = failure.message
+                        ?.take(PROVIDER_STATUS_MESSAGE_LIMIT)
+                        ?.ifBlank { null }
+                        ?: "${provider.displayName()} account listing failed"
+                    statuses += ProviderStatus(
+                        provider = provider,
+                        availability = ProviderAvailability.UNAVAILABLE,
+                        message = message,
+                    )
+                    accounts += staleAccounts(cached, provider, message)
+                }
+            }
+        }
+        return AccountListResponse(
+            accounts = accounts.sortedWith(
+                compareBy(AccountInfo::address, { it.provider.ordinal }),
+            ),
+            providerStatuses = statuses,
+        )
+    }
 
     override suspend fun createAccount(request: CreateAccountRequest): AccountInfo =
         operations(request.provider).createAccount(request)
@@ -97,13 +193,43 @@ internal class LocalDashboardBackend(
         return success("Account deleted from ${provider.displayName()}")
     }
 
+    override suspend fun adoptPassword(
+        address: String,
+        provider: Provider,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = operations(provider).adoptPassword(address, request)
+
     override suspend fun changePassword(
         address: String,
         provider: Provider,
         request: ChangePasswordRequest,
-    ): OperationResponse {
+    ): CredentialUpdateResponse =
         operations(provider).changePassword(address, request.newPassword)
-        return success("Password changed on ${provider.displayName()}")
+
+    override suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse {
+        val operations = operations(request.provider)
+        val logAccount = operations.dashboardLogAccount(request.address)
+        val service = request.logService()
+        val cursor = logSource.snapshot(service, logAccount, AUTHENTICATION_LOG_LIMIT)
+        val response = operations.probeAuthentication(request).redact(request.credentialOverride)
+        var correlated = emptyList<String>()
+        repeat(authenticationLogPollAttempts) { attempt ->
+            if (attempt > 0 && authenticationLogPollDelayMillis > 0) {
+                delay(authenticationLogPollDelayMillis)
+            }
+            correlated = logSource.readAfter(
+                service = service,
+                account = logAccount,
+                cursor = cursor,
+                limit = AUTHENTICATION_LOG_LIMIT,
+            ).lines.map { line -> line.redact(request.credentialOverride) }
+            if (correlated.isNotEmpty()) {
+                return response.copy(correlatedLogs = correlated.takeLast(AUTHENTICATION_LOG_LIMIT))
+            }
+        }
+        return response.copy(correlatedLogs = correlated)
     }
 
     override suspend fun logs(service: LogService): LogResponse = logSource.read(service)
@@ -225,8 +351,42 @@ internal class LocalDashboardBackend(
                     ),
                 ),
                 logSource = DockerComposeLogSource(repositoryRoot),
+                cachedAccounts = catalog::list,
             )
         }
+
+        private const val AUTHENTICATION_LOG_LIMIT = 500
+        private const val PROVIDER_STATUS_MESSAGE_LIMIT = 240
+    }
+
+    private fun staleAccounts(
+        cached: List<LocalAccountRecord>,
+        provider: Provider,
+        message: String,
+    ): List<AccountInfo> = cached.filter { it.provider == provider }.map { record ->
+        AccountInfo(
+            address = record.address,
+            provider = record.provider,
+            protocols = record.protocols,
+            credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+            providerAccountId = record.providerAccountId,
+            readinessMessage = message,
+            stale = true,
+        )
+    }
+}
+
+private fun AuthenticationProbeRequest.logService(): LogService = when (provider) {
+    Provider.STALWART -> LogService.STALWART
+    Provider.DOVECOT -> when (protocol) {
+        AuthenticationProtocol.SMTP,
+        AuthenticationProtocol.OAUTH_SMTP,
+        -> LogService.POSTFIX
+        AuthenticationProtocol.IMAP,
+        AuthenticationProtocol.POP3,
+        AuthenticationProtocol.OAUTH_IMAP,
+        -> LogService.DOVECOT
+        AuthenticationProtocol.JMAP -> error("Dovecot does not support JMAP probes")
     }
 }
 
@@ -234,3 +394,14 @@ private fun Provider.displayName(): String = when (this) {
     Provider.DOVECOT -> "Dovecot"
     Provider.STALWART -> "Stalwart"
 }
+
+private fun AuthenticationProbeResponse.redact(credential: String?): AuthenticationProbeResponse =
+    copy(
+        providerResponse = providerResponse.redact(credential),
+        correlatedLogs = correlatedLogs.map { line -> line.redact(credential) },
+    )
+
+private fun String.redact(credential: String?): String = credential
+    ?.takeIf(String::isNotEmpty)
+    ?.let { replace(it, "[redacted]") }
+    ?: this

@@ -4,6 +4,7 @@ object Routes {
     const val ACCOUNTS = "/api/v1/accounts"
     const val LOGS = "/api/v1/logs"
     const val GENERATE_MESSAGE = "/api/v1/messages/generate"
+    const val AUTHENTICATION_PROBES = "/api/v1/authentication-probes"
 
     const val GATE_PROBE = "/api/v1/gate/probe"
     const val GATE_EVENTS = "/api/v1/gate/events"
@@ -13,6 +14,9 @@ object Routes {
 
     fun accountPassword(address: String, provider: Provider): String =
         "${account(address, provider)}/password"
+
+    fun accountPasswordVerification(address: String, provider: Provider): String =
+        "${accountPassword(address, provider)}/verify"
 
     fun folders(address: String, provider: Provider): String =
         "${account(address, provider)}/folders"

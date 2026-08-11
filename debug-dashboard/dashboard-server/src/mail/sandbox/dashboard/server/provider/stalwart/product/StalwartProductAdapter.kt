@@ -66,11 +66,9 @@ internal class StalwartProductAdapter(
             }
             accounts.mapNotNull { account ->
                 val id = account.requiredString("id")
-                val address = accountCredentialCatalog.find(id)?.address ?: run {
-                    val domain = domains[account.requiredString("domainId")]
-                        ?: malformed("Account referenced an absent Domain")
-                    "${account.requiredString("name")}@$domain"
-                }
+                val domain = domains[account.requiredString("domainId")]
+                    ?: malformed("Account referenced an absent Domain")
+                val address = "${account.requiredString("name")}@$domain"
                 if (address.equals(MANAGEMENT_ADDRESS, ignoreCase = true)) {
                     return@mapNotNull null
                 }
@@ -133,12 +131,6 @@ internal class StalwartProductAdapter(
                 creationId = ACCOUNT_CREATION_ID,
             )
         }
-        val login = StalwartAccountLogin(
-            accountId = accountId,
-            address = request.address,
-            password = request.password,
-        )
-        accountCredentialCatalog.save(login)
         return StalwartProductAccount(
             id = accountId,
             address = request.address,
@@ -149,10 +141,11 @@ internal class StalwartProductAdapter(
     suspend fun changePassword(accountId: String, newPassword: String) {
         require(accountId.isNotBlank()) { "Account ID is absent" }
         requirePassword(newPassword, "New password")
-        val login = accountCredentialCatalog.find(accountId)
-            ?: throw StalwartProductException(
+        if (accountCredentialCatalog.find(accountId) == null) {
+            throw StalwartProductException(
                 "No local credential is registered for the Stalwart Account",
             )
+        }
         withManagementClient { client, managementAccountId ->
             val account = registryGetObjects(
                 client = client,
@@ -185,7 +178,6 @@ internal class StalwartProductAdapter(
                 objectId = accountId,
             )
         }
-        accountCredentialCatalog.save(login.copy(password = newPassword))
     }
 
     suspend fun deleteAccount(accountId: String) {

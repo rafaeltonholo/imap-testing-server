@@ -15,6 +15,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.ChangePasswordRequest
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.CreateFolderRequest
@@ -55,6 +58,24 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
                 requiredPath("address"),
                 requiredProvider(),
                 decodeRequest<ChangePasswordRequest>().validated(),
+            )
+        }
+    }
+
+    post("${Routes.ACCOUNTS}/{address}/providers/{provider}/password/verify") {
+        call.respondFromBackend {
+            backend.adoptPassword(
+                requiredPath("address"),
+                requiredProvider(),
+                decodeRequest<AdoptPasswordRequest>().validated(),
+            )
+        }
+    }
+
+    post(Routes.AUTHENTICATION_PROBES) {
+        call.respondFromBackend {
+            backend.probeAuthentication(
+                decodeRequest<AuthenticationProbeRequest>().validated(),
             )
         }
     }
@@ -225,14 +246,59 @@ private suspend fun ApplicationCall.respondError(
 
 private fun CreateAccountRequest.validated(): CreateAccountRequest {
     require(address.isNotBlank()) { "Account address is required" }
-    require(password.isNotBlank()) { "Account password is required" }
+    password.requirePassword("Account password")
     require(protocols.isNotEmpty()) { "At least one protocol is required" }
     return this
 }
 
 private fun ChangePasswordRequest.validated(): ChangePasswordRequest {
-    require(newPassword.isNotBlank()) { "New password is required" }
+    newPassword.requirePassword("New password")
     return this
+}
+
+private fun AdoptPasswordRequest.validated(): AdoptPasswordRequest {
+    password.requirePassword("Account password")
+    return this
+}
+
+private fun AuthenticationProbeRequest.validated(): AuthenticationProbeRequest {
+    require(address.isNotBlank()) { "Account address is required" }
+    credentialOverride?.requireBoundedSecret("Credential override", allowBlank = true)
+    if (
+        protocol == AuthenticationProtocol.OAUTH_IMAP ||
+        protocol == AuthenticationProtocol.OAUTH_SMTP
+    ) {
+        require(credentialOverride != null) { "OAuth probes require a credential override" }
+    }
+    val supported = when (provider) {
+        Provider.DOVECOT -> setOf(
+            AuthenticationProtocol.IMAP,
+            AuthenticationProtocol.POP3,
+            AuthenticationProtocol.SMTP,
+            AuthenticationProtocol.OAUTH_IMAP,
+            AuthenticationProtocol.OAUTH_SMTP,
+        )
+        Provider.STALWART -> setOf(
+            AuthenticationProtocol.JMAP,
+            AuthenticationProtocol.SMTP,
+        )
+    }
+    require(protocol in supported) {
+        "$protocol authentication probes are not supported by $provider"
+    }
+    return this
+}
+
+private fun String.requirePassword(label: String) {
+    requireBoundedSecret(label, allowBlank = false)
+}
+
+private fun String.requireBoundedSecret(label: String, allowBlank: Boolean) {
+    if (!allowBlank) require(isNotBlank()) { "$label is required" }
+    require(length <= MAX_CREDENTIAL_LENGTH) { "$label is too large" }
+    require(none { it == '\u0000' || it == '\r' || it == '\n' }) {
+        "$label contains an unsupported delimiter"
+    }
 }
 
 private fun CreateFolderRequest.validated(): CreateFolderRequest {
@@ -279,3 +345,5 @@ private fun GenerateMessageRequest.validated(): GenerateMessageRequest {
     }
     return this
 }
+
+private const val MAX_CREDENTIAL_LENGTH = 4_096

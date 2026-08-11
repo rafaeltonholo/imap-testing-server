@@ -40,12 +40,34 @@ internal data class DashboardLogAccount(
     val providerAccountId: String? = null,
 )
 
+internal data class DashboardLogCursor(
+    val lines: List<String>,
+)
+
 internal interface DashboardLogSource {
     fun read(
         service: LogService,
         account: DashboardLogAccount? = null,
         limit: Int = 500,
     ): LogResponse
+
+    fun snapshot(
+        service: LogService,
+        account: DashboardLogAccount,
+        limit: Int = 500,
+    ): DashboardLogCursor = DashboardLogCursor(read(service, account, limit).lines)
+
+    fun readAfter(
+        service: LogService,
+        account: DashboardLogAccount,
+        cursor: DashboardLogCursor,
+        limit: Int = 500,
+    ): LogResponse {
+        val current = read(service, account, limit)
+        val overlap = (minOf(cursor.lines.size, current.lines.size) downTo 0)
+            .first { size -> cursor.lines.takeLast(size) == current.lines.take(size) }
+        return current.copy(lines = current.lines.drop(overlap))
+    }
 }
 
 internal class DockerComposeLogSource(

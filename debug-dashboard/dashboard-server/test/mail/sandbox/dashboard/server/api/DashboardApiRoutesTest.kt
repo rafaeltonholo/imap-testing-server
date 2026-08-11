@@ -16,7 +16,13 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AccountListResponse
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.ChangePasswordRequest
+import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.CreateFolderRequest
 import mail.sandbox.dashboard.contract.FolderInfo
@@ -35,6 +41,8 @@ import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.contract.Routes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -65,9 +73,25 @@ class DashboardApiRoutesTest {
             )
             assertResponse(
                 HttpStatusCode.OK,
-                backend.operation,
+                backend.credentialUpdate,
                 client.put(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART)) {
                     jsonBody(backend.passwordRequest)
+                },
+            )
+            assertResponse(
+                HttpStatusCode.OK,
+                backend.credentialUpdate,
+                client.post(
+                    Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                ) {
+                    jsonBody(backend.adoptRequest)
+                },
+            )
+            assertResponse(
+                HttpStatusCode.OK,
+                backend.probeResponse,
+                client.post(Routes.AUTHENTICATION_PROBES) {
+                    jsonBody(backend.probeRequest)
                 },
             )
             assertResponse(
@@ -139,6 +163,12 @@ class DashboardApiRoutesTest {
                     Provider.STALWART,
                     backend.passwordRequest,
                 ),
+                DashboardCall.AdoptPassword(
+                    TEST_ADDRESS,
+                    Provider.STALWART,
+                    backend.adoptRequest,
+                ),
+                DashboardCall.ProbeAuthentication(backend.probeRequest),
                 DashboardCall.Logs(LogService.STALWART),
                 DashboardCall.AccountLogs(TEST_ADDRESS, Provider.STALWART),
                 DashboardCall.ListFolders(TEST_ADDRESS, Provider.STALWART),
@@ -170,6 +200,118 @@ class DashboardApiRoutesTest {
                 ),
                 DashboardCall.GenerateMessage(backend.generateRequest),
             ),
+            backend.calls,
+        )
+    }
+
+    @Test
+    fun passwordRoutesRejectBlankOversizedAndDelimitedSecretsBeforeDispatch() {
+        val backend = RecordingDashboardBackend()
+        val invalidSecrets = listOf(
+            "",
+            "   ",
+            "x".repeat(4_097),
+            "line\nbreak",
+            "line\rbreak",
+            "nul\u0000byte",
+        )
+
+        testApplication {
+            application { routing { dashboardApiRoutes(backend) } }
+
+            invalidSecrets.forEach { secret ->
+                val adopt = client.post(
+                    Routes.accountPasswordVerification(TEST_ADDRESS, Provider.DOVECOT),
+                ) {
+                    jsonBody(AdoptPasswordRequest(secret))
+                }
+                val reset = client.put(Routes.accountPassword(TEST_ADDRESS, Provider.DOVECOT)) {
+                    jsonBody(ChangePasswordRequest(secret))
+                }
+                assertEquals(HttpStatusCode.BadRequest, adopt.status)
+                assertEquals(HttpStatusCode.BadRequest, reset.status)
+            }
+        }
+
+        assertTrue(backend.calls.isEmpty())
+    }
+
+    @Test
+    fun probeValidationAllowsExplicitEmptyButRejectsMissingOauthAndUnsupportedMatrix() {
+        val backend = RecordingDashboardBackend()
+        val emptyPassword = AuthenticationProbeRequest(
+            address = TEST_ADDRESS,
+            provider = Provider.DOVECOT,
+            protocol = AuthenticationProtocol.IMAP,
+            credentialOverride = "",
+        )
+        val missingOauth = emptyPassword.copy(
+            protocol = AuthenticationProtocol.OAUTH_IMAP,
+            credentialOverride = null,
+        )
+        val unsupported = listOf(
+            emptyPassword.copy(protocol = AuthenticationProtocol.JMAP),
+            emptyPassword.copy(
+                provider = Provider.STALWART,
+                protocol = AuthenticationProtocol.IMAP,
+            ),
+        )
+
+        testApplication {
+            application { routing { dashboardApiRoutes(backend) } }
+
+            assertEquals(
+                HttpStatusCode.OK,
+                client.post(Routes.AUTHENTICATION_PROBES) { jsonBody(emptyPassword) }.status,
+            )
+            assertEquals(
+                HttpStatusCode.BadRequest,
+                client.post(Routes.AUTHENTICATION_PROBES) { jsonBody(missingOauth) }.status,
+            )
+            unsupported.forEach { request ->
+                assertEquals(
+                    HttpStatusCode.BadRequest,
+                    client.post(Routes.AUTHENTICATION_PROBES) { jsonBody(request) }.status,
+                )
+            }
+        }
+
+        assertEquals(
+            listOf<DashboardCall>(DashboardCall.ProbeAuthentication(emptyPassword)),
+            backend.calls,
+        )
+    }
+
+    @Test
+    fun probeRejectsOversizedAndDelimitedOverridesButReturnsFailedAuthenticationAsHttpOk() {
+        val backend = RecordingDashboardBackend()
+        val token = "request-only-token"
+        val failed = backend.probeRequest.copy(credentialOverride = token)
+        val invalid = listOf(
+            "x".repeat(4_097),
+            "line\nbreak",
+            "line\rbreak",
+            "nul\u0000byte",
+        )
+
+        testApplication {
+            application { routing { dashboardApiRoutes(backend) } }
+
+            invalid.forEach { override ->
+                val response = client.post(Routes.AUTHENTICATION_PROBES) {
+                    jsonBody(backend.probeRequest.copy(credentialOverride = override))
+                }
+                assertEquals(HttpStatusCode.BadRequest, response.status)
+            }
+            val response = client.post(Routes.AUTHENTICATION_PROBES) { jsonBody(failed) }
+            assertEquals(HttpStatusCode.OK, response.status)
+            val body = response.bodyAsText()
+            assertEquals(false, Json.decodeFromString<AuthenticationProbeResponse>(body).success)
+            assertTrue(token !in body)
+        }
+
+        assertEquals(
+            listOf<DashboardCall>(DashboardCall.ProbeAuthentication(failed)),
             backend.calls,
         )
     }
@@ -216,6 +358,10 @@ class DashboardApiRoutesTest {
                 client.put(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART)) {
                     malformedJsonBody()
                 },
+                client.post(
+                    Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                ) { malformedJsonBody() },
+                client.post(Routes.AUTHENTICATION_PROBES) { malformedJsonBody() },
                 client.post(Routes.folders(TEST_ADDRESS, Provider.STALWART)) {
                     malformedJsonBody()
                 },
@@ -374,6 +520,12 @@ private sealed interface DashboardCall {
         val provider: Provider,
         val request: ChangePasswordRequest,
     ) : DashboardCall
+    data class AdoptPassword(
+        val address: String,
+        val provider: Provider,
+        val request: AdoptPasswordRequest,
+    ) : DashboardCall
+    data class ProbeAuthentication(val request: AuthenticationProbeRequest) : DashboardCall
     data class Logs(val service: LogService) : DashboardCall
     data class AccountLogs(val address: String, val provider: Provider) : DashboardCall
     data class ListFolders(val address: String, val provider: Provider) : DashboardCall
@@ -411,9 +563,16 @@ private class RecordingDashboardBackend : DashboardBackend {
         address = TEST_ADDRESS,
         password = "test-password",
         provider = Provider.STALWART,
-        protocols = listOf(MailProtocol.IMAP, MailProtocol.JMAP, MailProtocol.SMTP),
+        protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
     )
     val passwordRequest = ChangePasswordRequest("replacement-password")
+    val adoptRequest = AdoptPasswordRequest("existing-password")
+    val probeRequest = AuthenticationProbeRequest(
+        address = TEST_ADDRESS,
+        provider = Provider.STALWART,
+        protocol = AuthenticationProtocol.JMAP,
+        credentialOverride = "request-password",
+    )
     val folderRequest = CreateFolderRequest("Issues")
     val mutationRequest = MutateMessagesRequest(
         account = TEST_ADDRESS,
@@ -434,9 +593,31 @@ private class RecordingDashboardBackend : DashboardBackend {
         address = TEST_ADDRESS,
         provider = Provider.STALWART,
         protocols = createRequest.protocols,
+        credentialReadiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+        providerAccountId = "account-42",
     )
-    val accountList = AccountListResponse(listOf(createdAccount))
+    val accountList = AccountListResponse(
+        accounts = listOf(createdAccount),
+        providerStatuses = listOf(
+            ProviderStatus(Provider.DOVECOT, ProviderAvailability.READY),
+            ProviderStatus(Provider.STALWART, ProviderAvailability.DEGRADED),
+        ),
+    )
     val operation = OperationResponse(success = true, message = "done")
+    val credentialUpdate = CredentialUpdateResponse(
+        address = TEST_ADDRESS,
+        provider = Provider.STALWART,
+        readiness = CredentialReadiness.READY,
+        operation = operation,
+    )
+    val probeResponse = AuthenticationProbeResponse(
+        address = TEST_ADDRESS,
+        provider = Provider.STALWART,
+        protocol = AuthenticationProtocol.JMAP,
+        success = false,
+        providerResponse = "authentication failed",
+        correlatedLogs = listOf("new account-filtered line"),
+    )
     val globalLogs = LogResponse(LogService.STALWART, lines = listOf("server ready"))
     val accountLogs = LogResponse(
         service = LogService.STALWART,
@@ -494,13 +675,33 @@ private class RecordingDashboardBackend : DashboardBackend {
         operation,
     )
 
+    override suspend fun adoptPassword(
+        address: String,
+        provider: Provider,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = record(
+        DashboardCall.AdoptPassword(address, provider, request),
+        credentialUpdate,
+    )
+
     override suspend fun changePassword(
         address: String,
         provider: Provider,
         request: ChangePasswordRequest,
-    ): OperationResponse = record(
+    ): CredentialUpdateResponse = record(
         DashboardCall.ChangePassword(address, provider, request),
-        operation,
+        credentialUpdate,
+    )
+
+    override suspend fun probeAuthentication(
+        request: AuthenticationProbeRequest,
+    ): AuthenticationProbeResponse = record(
+        DashboardCall.ProbeAuthentication(request),
+        probeResponse.copy(
+            address = request.address,
+            provider = request.provider,
+            protocol = request.protocol,
+        ),
     )
 
     override suspend fun logs(service: LogService): LogResponse = record(
