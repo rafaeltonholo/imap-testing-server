@@ -9,7 +9,6 @@ import java.time.Duration
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import mail.sandbox.dashboard.server.gate.dovecot.DovecotDockerRouting
 
 internal data class DovecotCommandRequest(
     val argv: List<String>,
@@ -41,15 +40,19 @@ internal fun interface DovecotCommandRunner {
 /** Runs only Docker Compose commands scoped to this repository's Dovecot service. */
 internal class JvmDovecotCommandRunner(
     private val repositoryRoot: Path,
-    private val dockerRouting: DovecotDockerRouting = DovecotDockerRouting.localDefault(),
     private val processStarter: ((DovecotCommandRequest) -> Process)? = null,
 ) : DovecotCommandRunner {
     override fun run(request: DovecotCommandRequest): DovecotCommandResult {
         requireApprovedRequest(request)
+        val routedRequest = request.copy(argv = rootComposeCommand(request.argv))
         val process = try {
-            processStarter?.invoke(request) ?: ProcessBuilder(request.argv)
+            processStarter?.invoke(routedRequest) ?: ProcessBuilder(routedRequest.argv)
                 .directory(repositoryRoot.toFile())
-                .also { builder -> dockerRouting.applyTo(builder.environment()) }
+                .also { builder ->
+                    builder.environment().keys
+                        .filter { key -> key.startsWith("COMPOSE_") }
+                        .forEach(builder.environment()::remove)
+                }
                 .start()
         } catch (failure: Exception) {
             throw IllegalStateException("Could not start the local Dovecot command", failure)
@@ -101,6 +104,8 @@ internal class JvmDovecotCommandRunner(
         require(
             repositoryRoot.isAbsolute &&
                 repositoryRoot.normalize() == repositoryRoot &&
+                !Files.isSymbolicLink(repositoryRoot) &&
+                Files.isDirectory(repositoryRoot, LinkOption.NOFOLLOW_LINKS) &&
                 Files.isRegularFile(
                     repositoryRoot.resolve("docker-compose.yml"),
                     LinkOption.NOFOLLOW_LINKS,
@@ -131,6 +136,14 @@ internal class JvmDovecotCommandRunner(
             argv[4] == "--tail" &&
             argv[5].toIntOrNull() in 1..MAXIMUM_LOG_LINES &&
             argv[6] == "dovecot"
+
+    private fun rootComposeCommand(argv: List<String>): List<String> = buildList {
+        add("docker")
+        add("compose")
+        add("-f")
+        add(repositoryRoot.resolve("docker-compose.yml").toString())
+        addAll(argv.drop(2))
+    }
 
     private fun readBounded(input: InputStream, maximumBytes: Int): ByteArray {
         val retained = ByteArrayOutputStream(minOf(maximumBytes + 1, READ_BUFFER_BYTES))

@@ -1,9 +1,10 @@
 package mail.sandbox.dashboard.server.provider.dovecot
 
-import mail.sandbox.dashboard.server.gate.dovecot.EligibilityAddress
-import mail.sandbox.dashboard.server.gate.dovecot.EligibilityPaths
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.time.Duration
 
 internal enum class DovecotProtocol {
@@ -68,9 +69,10 @@ internal class DovecotProductAdapter(
     fun createAccount(address: String, password: ByteArray): DovecotAccount {
         val validatedAddress = requireLocalAddress(address)
         requirePassword(password)
-        accounts.create(validatedAddress, password)
+        accounts.createVerified(validatedAddress, password) {
+            verifyAccountPresent(validatedAddress)
+        }
         try {
-            reloadAuthentication()
             val existing = listFolders(validatedAddress).mapTo(hashSetOf()) { it.name }
             val missing = DEFAULT_MAILBOXES.filterNot(existing::contains)
             if (missing.isNotEmpty()) {
@@ -86,8 +88,9 @@ internal class DovecotProductAdapter(
             }
         } catch (failure: Exception) {
             runCatching {
-                accounts.delete(validatedAddress)
-                reloadAuthentication()
+                accounts.deleteVerified(validatedAddress) {
+                    verifyAccountAbsent(validatedAddress)
+                }
             }
             throw failure
         }
@@ -97,13 +100,16 @@ internal class DovecotProductAdapter(
     fun changePassword(address: String, password: ByteArray) {
         val validatedAddress = requireLocalAddress(address)
         requirePassword(password)
-        accounts.changePassword(validatedAddress, password)
-        reloadAuthentication()
+        accounts.changePasswordVerified(validatedAddress, password) {
+            verifyAccountPresent(validatedAddress)
+        }
     }
 
     fun deleteAccount(address: String) {
-        accounts.delete(requireLocalAddress(address))
-        reloadAuthentication()
+        val validatedAddress = requireLocalAddress(address)
+        accounts.deleteVerified(validatedAddress) {
+            verifyAccountAbsent(validatedAddress)
+        }
     }
 
     fun logs(lines: Int = 200): List<String> {
@@ -446,7 +452,11 @@ internal class DovecotProductAdapter(
     }
 
     private fun requireLocalAddress(address: String): String {
-        val canonical = EligibilityAddress.requireCanonical(address)
+        val canonical = try {
+            requireCanonicalDovecotAddress(address)
+        } catch (failure: DovecotUsersFileException) {
+            throw IllegalArgumentException(failure.message, failure)
+        }
         require(canonical.substringAfter('@') == LOCAL_DOMAIN) {
             "Dovecot account must use local.test"
         }
@@ -503,29 +513,69 @@ internal class DovecotProductAdapter(
 
     private fun doveadm(vararg arguments: String): List<String> = DOVEADM_PREFIX + arguments
 
-    private fun reloadAuthentication() {
-        execute(doveadm("reload"))
+    private fun verifyAccountPresent(address: String) {
+        execute(doveadm("user", address))
+    }
+
+    private fun verifyAccountAbsent(address: String) {
+        val result = runner.run(
+            DovecotCommandRequest(
+                argv = doveadm("user", address),
+                timeout = COMMAND_TIMEOUT,
+                maximumOutputBytes = COMMAND_OUTPUT_BYTES,
+            ),
+        )
+        if (result.timedOut || result.exitCode != DOVEADM_NO_SUCH_USER) {
+            throw DovecotCommandException("Dovecot did not confirm account removal")
+        }
     }
 
     private fun account(address: String): DovecotAccount =
         DovecotAccount(address, setOf(DovecotProtocol.Imap, DovecotProtocol.Pop3))
 
     companion object {
-        fun production(): DovecotProductAdapter {
-            val paths = EligibilityPaths.production()
-            return using(paths)
-        }
+        fun production(repositoryRoot: Path = discoverRepositoryRoot()): DovecotProductAdapter =
+            using(repositoryRoot)
 
-        fun dashboard(): DovecotProductAdapter {
-            val paths = EligibilityPaths.dashboardProvider()
-            return using(paths)
-        }
+        fun dashboard(repositoryRoot: Path = discoverRepositoryRoot()): DovecotProductAdapter =
+            using(repositoryRoot)
 
-        private fun using(paths: EligibilityPaths): DovecotProductAdapter {
+        private fun using(repositoryRoot: Path): DovecotProductAdapter {
+            val root = repositoryRoot.toAbsolutePath().normalize()
+            require(
+                root == repositoryRoot &&
+                    !Files.isSymbolicLink(root) &&
+                    Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) &&
+                    Files.isRegularFile(
+                        root.resolve("docker-compose.yml"),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ),
+            ) {
+                "Dovecot repository root is invalid"
+            }
             return DovecotProductAdapter(
-                accounts = EligibilityDovecotAccountRegistry.production(paths),
-                runner = JvmDovecotCommandRunner(paths.repositoryRoot),
+                accounts = UsersFileDovecotAccountRegistry.production(root),
+                runner = JvmDovecotCommandRunner(root),
             )
+        }
+
+        private fun discoverRepositoryRoot(): Path {
+            var candidate = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
+            repeat(MAXIMUM_ROOT_SEARCH_DEPTH) {
+                if (Files.isRegularFile(
+                        candidate.resolve("docker-compose.yml"),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ) && Files.isDirectory(
+                        candidate.resolve("debug-dashboard"),
+                        LinkOption.NOFOLLOW_LINKS,
+                    )
+                ) {
+                    return candidate
+                }
+                candidate = candidate.parent
+                    ?: throw IllegalStateException("Could not locate the mail sandbox repository")
+            }
+            throw IllegalStateException("Could not locate the mail sandbox repository")
         }
 
         private val DOVEADM_PREFIX = listOf(
@@ -556,6 +606,8 @@ internal class DovecotProductAdapter(
         private const val MESSAGE_LIST_OUTPUT_BYTES = 4 * 1024 * 1024
         private const val RAW_MESSAGE_OUTPUT_BYTES = 8 * 1024 * 1024
         private const val MAXIMUM_ERROR_CHARACTERS = 512
+        private const val MAXIMUM_ROOT_SEARCH_DEPTH = 4
+        private const val DOVEADM_NO_SUCH_USER = 67
         private val REQUIRED_EML_HEADERS = setOf(
             "from", "to", "date", "subject", "message-id",
         )

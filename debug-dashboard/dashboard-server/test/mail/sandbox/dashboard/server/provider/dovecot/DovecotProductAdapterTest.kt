@@ -1,10 +1,11 @@
 package mail.sandbox.dashboard.server.provider.dovecot
 
-import mail.sandbox.dashboard.server.gate.dovecot.EligibilityFile
-import mail.sandbox.dashboard.server.gate.dovecot.EligibilityPasswordHasher
-import mail.sandbox.dashboard.server.gate.dovecot.EligibilityPaths
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
@@ -16,9 +17,15 @@ import kotlin.test.assertTrue
 
 class DovecotProductAdapterTest {
     @Test
-    fun accountsAreManagedThroughTheEligibilityRegistry() {
+    fun accountsAreManagedThroughTheCanonicalRegistryAndVerifiedWithoutReload() {
         val registry = RecordingAccountRegistry()
-        val runner = RecordingRunner(*Array(5) { DovecotCommandResult.success() })
+        val runner = RecordingRunner(
+            DovecotCommandResult.success(),
+            DovecotCommandResult.success(),
+            DovecotCommandResult.success(),
+            DovecotCommandResult.success(),
+            missingUser(),
+        )
         val adapter = DovecotProductAdapter(registry, runner)
         val firstPassword = "first-pass".toByteArray()
         val secondPassword = "second-pass".toByteArray()
@@ -44,7 +51,7 @@ class DovecotProductAdapterTest {
         )
         assertEquals(
             listOf(
-                doveadm("reload"),
+                doveadm("user", "alice@local.test"),
                 doveadm("mailbox", "list", "-u", "alice@local.test"),
                 doveadm(
                     "mailbox",
@@ -56,15 +63,16 @@ class DovecotProductAdapterTest {
                     "INBOX.Drafts",
                     "INBOX.Trash",
                 ),
-                doveadm("reload"),
-                doveadm("reload"),
+                doveadm("user", "alice@local.test"),
+                doveadm("user", "alice@local.test"),
             ),
             runner.requests.map(DovecotCommandRequest::argv),
         )
+        assertTrue(runner.requests.none { "reload" in it.argv })
     }
 
     @Test
-    fun failedMailboxBootstrapRollsBackTheNewEligibilityAccount() {
+    fun failedMailboxBootstrapRollsBackTheNewCanonicalAccount() {
         val registry = RecordingAccountRegistry()
         val runner = RecordingRunner(
             DovecotCommandResult.success(),
@@ -75,7 +83,7 @@ class DovecotProductAdapterTest {
                 stdout = ByteArray(0),
                 stderr = "mail home unavailable".toByteArray(),
             ),
-            DovecotCommandResult.success(),
+            missingUser(),
         )
         val adapter = DovecotProductAdapter(registry, runner)
 
@@ -100,7 +108,7 @@ class DovecotProductAdapterTest {
             DovecotCommandResult.success(),
             DovecotCommandResult.success(),
             DovecotCommandResult.success(),
-            DovecotCommandResult.success(),
+            missingUser(),
             DovecotCommandResult.success(),
             DovecotCommandResult.success(retained),
         )
@@ -121,7 +129,7 @@ class DovecotProductAdapterTest {
         assertEquals(6, runner.requests.size)
         assertEquals(
             listOf(
-                doveadm("reload"),
+                doveadm("user", "alice@local.test"),
                 doveadm("mailbox", "list", "-u", "alice@local.test"),
                 doveadm(
                     "mailbox",
@@ -133,8 +141,8 @@ class DovecotProductAdapterTest {
                     "INBOX.Drafts",
                     "INBOX.Trash",
                 ),
-                doveadm("reload"),
-                doveadm("reload"),
+                doveadm("user", "alice@local.test"),
+                doveadm("user", "alice@local.test"),
                 doveadm("mailbox", "list", "-u", "alice@local.test"),
             ),
             runner.requests.map { it.argv },
@@ -508,33 +516,73 @@ class DovecotProductAdapterTest {
     }
 
     @Test
-    fun eligibilityRegistryHashesAddsResetsAndRemovesAccounts() {
+    fun usersFileRegistryStoresPlainPasswordsAndRemovesOnlyAuthentication() {
         val root = createTempDirectory("dovecot-product-accounts").toRealPath()
         try {
-            root.resolve("debug-dashboard").createDirectories()
-            root.resolve("config").createDirectories()
-            root.resolve("docker-compose.yml").writeText("services: {}\n")
-            root.resolve("debug-dashboard/project.yaml").writeText("modules: []\n")
-            root.resolve("config/users.seed").writeText("seed@local.test\n")
-            val file = EligibilityFile(EligibilityPaths.testing(root))
-            val seenPasswords = mutableListOf<String>()
-            val registry = EligibilityDovecotAccountRegistry(
-                file,
-                EligibilityPasswordHasher { password ->
-                    seenPasswords += password.withBytes {
-                        String(it, StandardCharsets.UTF_8)
-                    }
-                    HASH
-                },
-            )
+            val users = root.resolve("config/users")
+            users.parent.createDirectories()
+            val mailbox = root.resolve("vmail/alice@local.test/Maildir").createDirectories()
+            val sentinel = mailbox.resolve("message").also { it.writeText("preserve") }
+            val registry = UsersFileDovecotAccountRegistry(DovecotUsersFile(users))
 
             registry.create("alice@local.test", "first".toByteArray())
             registry.changePassword("alice@local.test", "second".toByteArray())
             assertEquals(listOf("alice@local.test"), registry.list())
+            assertEquals(
+                "alice@local.test:{PLAIN}second::::::\n",
+                users.toFile().readText(),
+            )
             registry.delete("alice@local.test")
 
-            assertEquals(listOf("first", "second"), seenPasswords)
             assertEquals(emptyList(), registry.list())
+            assertEquals("preserve", sentinel.toFile().readText())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun jvmRunnerRoutesDoveadmAndLogsThroughOnlyTheRootComposeFile() {
+        val root = createTempDirectory("dovecot-root-routing").toRealPath()
+        try {
+            root.resolve("docker-compose.yml").writeText("services: {}\n")
+            val captured = mutableListOf<DovecotCommandRequest>()
+            val runner = JvmDovecotCommandRunner(root) { request ->
+                captured += request
+                CompletedProcess()
+            }
+
+            runner.run(DovecotCommandRequest(doveadm("user", "*")))
+            runner.run(
+                DovecotCommandRequest(
+                    listOf(
+                        "docker", "compose", "logs", "--no-color", "--tail", "20",
+                        "dovecot",
+                    ),
+                ),
+            )
+
+            val compose = root.resolve("docker-compose.yml").toString()
+            assertEquals(
+                listOf(
+                    "docker", "compose", "-f", compose,
+                    "exec", "-T", "dovecot", "doveadm", "user", "*",
+                ),
+                captured[0].argv,
+            )
+            assertEquals(
+                listOf(
+                    "docker", "compose", "-f", compose,
+                    "logs", "--no-color", "--tail", "20", "dovecot",
+                ),
+                captured[1].argv,
+            )
+            captured.flatMap(DovecotCommandRequest::argv).forEach { argument ->
+                assertTrue("mail-sandbox-dashboard" !in argument)
+                assertTrue("docker-compose.local-providers.yml" !in argument)
+                assertTrue("dovecot-operator" !in argument)
+                assertTrue("eligibility" !in argument)
+            }
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -542,6 +590,13 @@ class DovecotProductAdapterTest {
 
     private fun doveadm(vararg arguments: String): List<String> =
         listOf("docker", "compose", "exec", "-T", "dovecot", "doveadm") + arguments
+
+    private fun missingUser(): DovecotCommandResult = DovecotCommandResult(
+        exitCode = 67,
+        timedOut = false,
+        stdout = ByteArray(0),
+        stderr = "user doesn't exist".toByteArray(),
+    )
 
     private fun mailboxStatus(state: DovecotMailboxState): String =
         "mailbox: INBOX\nguid: ${state.mailboxGuid}\nuidvalidity: ${state.uidValidity}\n"
@@ -558,10 +613,28 @@ class DovecotProductAdapterTest {
         "Hello",
     ).joinToString(lineEnding)
 
-    private companion object {
-        const val HASH =
-            "{ARGON2ID}\$argon2id\$v=19\$m=65536,t=3,p=1\$YWJjZA\$ZWZnaA"
-    }
+}
+
+private class CompletedProcess : Process() {
+    private val stdin = ByteArrayOutputStream()
+
+    override fun getOutputStream(): OutputStream = stdin
+
+    override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+    override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+    override fun waitFor(): Int = 0
+
+    override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = true
+
+    override fun exitValue(): Int = 0
+
+    override fun destroy() = Unit
+
+    override fun destroyForcibly(): Process = this
+
+    override fun isAlive(): Boolean = false
 }
 
 private sealed interface AccountCall {

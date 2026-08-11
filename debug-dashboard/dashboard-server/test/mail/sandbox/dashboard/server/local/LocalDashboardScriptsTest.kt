@@ -70,12 +70,12 @@ class LocalDashboardScriptsTest {
     }
 
     @Test
-    fun localBackendUsesTheDedicatedDovecotEligibilityAuthority() {
+    fun localBackendRoutesDovecotThroughItsValidatedRepositoryRoot() {
         val source = dashboardRoot.resolve(
             "dashboard-server/src/mail/sandbox/dashboard/server/local/LocalDashboardBackend.kt",
         ).readText()
 
-        assertTrue("DovecotProductAdapter.dashboard()" in source)
+        assertTrue("DovecotProductAdapter.dashboard(repositoryRoot)" in source)
     }
 
     @Test

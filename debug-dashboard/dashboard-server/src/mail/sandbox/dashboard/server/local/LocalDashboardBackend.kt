@@ -215,7 +215,7 @@ internal class LocalDashboardBackend(
             return LocalDashboardBackend(
                 providers = mapOf(
                     Provider.DOVECOT to DovecotDashboardProvider(
-                        adapter = DovecotProductAdapter.dashboard(),
+                        adapter = DovecotProductAdapter.dashboard(repositoryRoot),
                         catalog = catalog,
                     ),
                     Provider.STALWART to createStalwartDashboardProvider(
