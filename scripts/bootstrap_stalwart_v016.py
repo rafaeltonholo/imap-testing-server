@@ -4831,7 +4831,6 @@ FRESH_RECOVERY_ENV_RELATIVE = (
     / "stalwart"
     / "fresh-recovery.env"
 )
-FRESH_FAILURE_MARKER = ".mail-sandbox-fresh-initialization-failed"
 
 
 def _fresh_compose_prefix(repository: Path, *, recovery: bool) -> list[str]:
@@ -5316,27 +5315,10 @@ class _ProductionFreshRuntime:
         return self._runtime_state.publish_current_receipt(repository)
 
     def mark_invalid(self, repository: Path) -> None:
-        store = repository / "stalwart-data"
         try:
-            store.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        marker = store / FRESH_FAILURE_MARKER
-        try:
-            descriptor = os.open(
-                marker,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            return
-        except OSError:
+            self._runtime_state.publish_failure_marker(repository)
+        except (AttributeError, ValueError):
             raise BootstrapError("fresh failure marker could not be written") from None
-        try:
-            os.write(descriptor, b"invalid\n")
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
 
 
 def production_fresh_initialization_dependencies(

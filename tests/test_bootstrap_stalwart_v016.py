@@ -3938,6 +3938,28 @@ class FreshInitializationTest(unittest.TestCase):
                 ],
             )
 
+    def test_production_failure_marker_uses_runtime_state_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            publish = mock.Mock(
+                return_value=(
+                    root
+                    / "stalwart-data"
+                    / ".mail-sandbox-fresh-initialization-failed"
+                ),
+            )
+            runtime = bootstrap._ProductionFreshRuntime(
+                migration=object(),
+                registry=object(),
+                runtime_state=SimpleNamespace(
+                    publish_failure_marker=publish,
+                ),
+            )
+
+            runtime.mark_invalid(root)
+
+            publish.assert_called_once_with(root)
+
     def test_rendered_root_definition_is_exact_image_ports_and_mounts(
         self,
     ) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -44,15 +45,22 @@ if SCRIPT_PATH.exists():
         IMPORT_ERROR = exc
 
 
-def compose_text(image: str) -> str:
+def current_compose_text() -> str:
     return f"""services:
   stalwart:
-    image: {image}
-    restart: unless-stopped
+    image: {CURRENT_IMAGE}
+    container_name: stalwart-dev
     user: "2000:2000"
+    restart: unless-stopped
     ports:
-      - "127.0.0.1:8443:8080"
-      - "127.0.0.1:8587:587"
+      - target: 8080
+        published: "8443"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 587
+        published: "8587"
+        host_ip: 127.0.0.1
+        protocol: tcp
     environment:
       STALWART_PUBLIC_URL: http://127.0.0.1:8443
     volumes:
@@ -65,9 +73,79 @@ def compose_text(image: str) -> str:
       - type: bind
         source: ./stalwart-data
         target: /var/lib/stalwart
+        read_only: false
         bind:
           create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8080/healthz/ready
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
 """
+
+
+def legacy_compose_text() -> str:
+    return f"""services:
+  stalwart:
+    image: {LEGACY_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "8443:8443"   # JMAP HTTP
+    volumes:
+      - ./stalwart/config.toml:/opt/stalwart/etc/config.toml:ro
+      - ./stalwart-data:/opt/stalwart/data
+    environment:
+      - ADMIN_SECRET=secret
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8443"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+"""
+
+
+def prepare_current_repository(root: Path) -> Path:
+    (root / "stalwart").mkdir()
+    (root / "debug-dashboard" / ".runtime" / "stalwart").mkdir(
+        parents=True,
+    )
+    (root / "stalwart" / "config.json").write_bytes(CONFIG_BYTES)
+    (root / "docker-compose.yml").write_text(
+        current_compose_text(),
+        encoding="utf-8",
+    )
+    store = root / "stalwart-data"
+    store.mkdir()
+    (store / "CURRENT").write_bytes(b"fixture")
+    return store
+
+
+def bind_receipt_to_compose(receipt: Path, compose: str) -> None:
+    envelope = json.loads(receipt.read_text(encoding="utf-8"))
+    payload = envelope["payload"]
+    payload["compose_sha256"] = hashlib.sha256(compose.encode()).hexdigest()
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    envelope["payload_sha256"] = hashlib.sha256(canonical_payload).hexdigest()
+    receipt.write_bytes(
+        json.dumps(
+            envelope,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n",
+    )
 
 
 def snapshot_tree(root: Path) -> tuple[tuple[str, int, int, bytes | None], ...]:
@@ -113,8 +191,20 @@ class RuntimeStateClassificationTest(unittest.TestCase):
         (self.root / "stalwart" / "config.json").write_bytes(CONFIG_BYTES)
 
     def write_compose(self, image: str) -> None:
+        if image == CURRENT_IMAGE:
+            content = current_compose_text()
+        elif image == LEGACY_IMAGE:
+            content = legacy_compose_text()
+        else:
+            self.fail(f"unsupported fixture image: {image}")
         (self.root / "docker-compose.yml").write_text(
-            compose_text(image),
+            content,
+            encoding="utf-8",
+        )
+
+    def write_compose_content(self, content: str) -> None:
+        (self.root / "docker-compose.yml").write_text(
+            content,
             encoding="utf-8",
         )
 
@@ -151,6 +241,213 @@ class RuntimeStateClassificationTest(unittest.TestCase):
             runtime_state.classify_repository(self.root),
             runtime_state.RuntimeState.MIGRATION_REQUIRED,
         )
+
+    def test_legacy_service_stops_before_following_top_level_section(self) -> None:
+        self.write_compose_content(
+            legacy_compose_text()
+            + "\nnetworks:\n"
+            + "  operator-ingress:\n"
+            + "    driver: bridge\n",
+        )
+        self.make_nonempty_store()
+
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.MIGRATION_REQUIRED,
+        )
+
+    def test_current_service_stops_before_following_top_level_section(self) -> None:
+        self.write_compose_content(
+            current_compose_text()
+            + "\nnetworks:\n"
+            + "  operator-ingress:\n"
+            + "    driver: bridge\n",
+        )
+        self.make_nonempty_store()
+
+        self.assertIsNotNone(runtime_state._compose_kind(self.root))
+        runtime_state.publish_current_receipt(self.root)
+
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.CURRENT,
+        )
+
+    def test_legacy_requires_the_exact_frozen_service_model(self) -> None:
+        self.make_nonempty_store()
+        canonical = legacy_compose_text()
+        contradictions = {
+            "current-style-port": canonical.replace(
+                '      - "8443:8443"   # JMAP HTTP',
+                '      - "127.0.0.1:8443:8080"',
+            ),
+            "extra-port": canonical.replace(
+                "    volumes:\n",
+                '      - "127.0.0.1:8587:587"\n    volumes:\n',
+            ),
+            "wrong-config-mount": canonical.replace(
+                "/opt/stalwart/etc/config.toml:ro",
+                "/etc/stalwart/config.toml:ro",
+            ),
+            "extra-environment": canonical.replace(
+                "      - ADMIN_SECRET=secret\n",
+                "      - ADMIN_SECRET=secret\n      - EXTRA=value\n",
+            ),
+            "network-mode": canonical.replace(
+                "    restart: unless-stopped\n",
+                "    restart: unless-stopped\n    network_mode: host\n",
+            ),
+        }
+
+        for label, content in contradictions.items():
+            with self.subTest(label=label):
+                self.write_compose_content(content)
+                self.assertEqual(
+                    runtime_state.classify_repository(self.root),
+                    runtime_state.RuntimeState.INVALID,
+                )
+
+    def test_current_model_rejects_extra_or_contradictory_service_fields(
+        self,
+    ) -> None:
+        canonical = current_compose_text()
+        contradictions = {
+            "broad-port": canonical.replace(
+                "        host_ip: 127.0.0.1\n",
+                "        host_ip: 0.0.0.0\n",
+                1,
+            ),
+            "extra-port": canonical.replace(
+                "    environment:\n",
+                "      - target: 25\n"
+                "        published: \"8025\"\n"
+                "        host_ip: 127.0.0.1\n"
+                "        protocol: tcp\n"
+                "    environment:\n",
+            ),
+            "extra-mount": canonical.replace(
+                "    healthcheck:\n",
+                "      - type: bind\n"
+                "        source: ./extra\n"
+                "        target: /extra\n"
+                "        read_only: true\n"
+                "        bind:\n"
+                "          create_host_path: false\n"
+                "    healthcheck:\n",
+            ),
+            "extra-environment": canonical.replace(
+                "      STALWART_PUBLIC_URL: http://127.0.0.1:8443\n",
+                "      STALWART_PUBLIC_URL: http://127.0.0.1:8443\n"
+                "      EXTRA: value\n",
+            ),
+            "network-mode": canonical.replace(
+                "    restart: unless-stopped\n",
+                "    restart: unless-stopped\n    network_mode: host\n",
+            ),
+        }
+
+        for label, content in contradictions.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    prepare_current_repository(root)
+                    receipt = runtime_state.publish_current_receipt(root)
+                    (root / "docker-compose.yml").write_text(
+                        content,
+                        encoding="utf-8",
+                    )
+                    bind_receipt_to_compose(receipt, content)
+                    self.assertEqual(
+                        runtime_state.classify_repository(root),
+                        runtime_state.RuntimeState.INVALID,
+                    )
+                    receipt.unlink()
+                    with self.assertRaises(ValueError):
+                        runtime_state.publish_current_receipt(root)
+
+    def test_failure_marker_overrides_a_real_current_receipt(self) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        self.make_nonempty_store()
+        runtime_state.publish_current_receipt(self.root)
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.CURRENT,
+        )
+        self.assertTrue(
+            hasattr(runtime_state, "publish_failure_marker"),
+            "runtime state must own the shared failure-marker publisher",
+        )
+
+        marker = runtime_state.publish_failure_marker(self.root)
+
+        self.assertEqual(
+            marker,
+            self.root
+            / "stalwart-data"
+            / ".mail-sandbox-fresh-initialization-failed",
+        )
+        self.assertEqual(marker.read_bytes(), b"invalid\n")
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        self.assertEqual(runtime_state.publish_failure_marker(self.root), marker)
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.INVALID,
+        )
+
+    def test_any_failure_marker_type_is_invalid(self) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        store = self.make_nonempty_store()
+        runtime_state.publish_current_receipt(self.root)
+        marker = store / ".mail-sandbox-fresh-initialization-failed"
+        outside = self.root / "outside-marker"
+
+        for kind in ("file", "directory", "symlink"):
+            with self.subTest(kind=kind):
+                try:
+                    if kind == "file":
+                        marker.write_bytes(b"anything")
+                    elif kind == "directory":
+                        marker.mkdir()
+                    else:
+                        outside.write_bytes(b"outside")
+                        marker.symlink_to(outside)
+                    self.assertEqual(
+                        runtime_state.classify_repository(self.root),
+                        runtime_state.RuntimeState.INVALID,
+                    )
+                finally:
+                    if marker.is_symlink() or marker.is_file():
+                        marker.unlink()
+                    elif marker.exists():
+                        marker.rmdir()
+                    if outside.exists():
+                        outside.unlink()
+
+    def test_receipt_publication_refuses_any_failure_marker_presence(self) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        store = self.make_nonempty_store()
+        marker = store / ".mail-sandbox-fresh-initialization-failed"
+        outside = self.root / "outside-marker"
+
+        for kind in ("file", "directory", "symlink"):
+            with self.subTest(kind=kind):
+                try:
+                    if kind == "file":
+                        marker.write_bytes(b"anything")
+                    elif kind == "directory":
+                        marker.mkdir()
+                    else:
+                        outside.write_bytes(b"outside")
+                        marker.symlink_to(outside)
+                    with self.assertRaises(ValueError):
+                        runtime_state.publish_current_receipt(self.root)
+                finally:
+                    if marker.is_symlink() or marker.is_file():
+                        marker.unlink()
+                    elif marker.exists():
+                        marker.rmdir()
+                    if outside.exists():
+                        outside.unlink()
 
     def test_current_requires_valid_receipt_bound_to_image_config_and_store(self) -> None:
         self.write_compose(CURRENT_IMAGE)
@@ -222,6 +519,34 @@ class RuntimeStateClassificationTest(unittest.TestCase):
                 else:
                     path.write_bytes(outside.read_bytes())
                     outside.unlink()
+
+    def test_symlinked_config_or_receipt_ancestor_is_invalid_and_unpublishable(
+        self,
+    ) -> None:
+        ancestor_relatives = (
+            Path("stalwart"),
+            Path("debug-dashboard"),
+            Path("debug-dashboard/.runtime"),
+            Path("debug-dashboard/.runtime/stalwart"),
+        )
+        for relative in ancestor_relatives:
+            with self.subTest(ancestor=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    prepare_current_repository(root)
+                    receipt = runtime_state.publish_current_receipt(root)
+                    target = root / relative
+                    outside = target.with_name(f"{target.name}-outside")
+                    target.rename(outside)
+                    target.symlink_to(outside, target_is_directory=True)
+
+                    self.assertEqual(
+                        runtime_state.classify_repository(root),
+                        runtime_state.RuntimeState.INVALID,
+                    )
+                    receipt.unlink()
+                    with self.assertRaises(ValueError):
+                        runtime_state.publish_current_receipt(root)
 
     def test_classification_performs_no_filesystem_mutation(self) -> None:
         self.write_compose(CURRENT_IMAGE)
