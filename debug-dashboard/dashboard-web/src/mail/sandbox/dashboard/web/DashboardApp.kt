@@ -85,6 +85,9 @@ import kotlinx.coroutines.await
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
+import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.CreateAccountRequest
 import mail.sandbox.dashboard.contract.FolderInfo
 import mail.sandbox.dashboard.contract.GateEvent
@@ -99,6 +102,8 @@ import mail.sandbox.dashboard.contract.MessageDeliveryMode
 import mail.sandbox.dashboard.contract.MessageSourceType
 import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.contract.Routes
 import mail.sandbox.dashboard.contract.gate.GateAction
 import mail.sandbox.dashboard.contract.gate.GateRoute
@@ -160,12 +165,23 @@ private enum class NarrowStage(val label: String) {
     Accounts("Accounts"),
     Mailbox("Mailbox"),
     Message("Message"),
+    Authentication("Authentication"),
     Trace("Trace"),
 }
 
 private enum class TraceMode(val label: String) {
     Account("Account trace"),
     Server("Server logs"),
+}
+
+private enum class PasswordActionMode(val label: String) {
+    VERIFY("Verify existing password"),
+    RESET("Reset password"),
+}
+
+private enum class ProbeCredentialSource(val label: String) {
+    REMEMBERED("Remembered credential"),
+    OVERRIDE("Request override"),
 }
 
 @OptIn(ExperimentalWasmJsInterop::class)
@@ -283,7 +299,7 @@ private fun DashboardSurface(
     var narrowStage by remember { mutableStateOf(NarrowStage.Accounts) }
     var traceMode by remember { mutableStateOf(TraceMode.Account) }
     var createAccountOpen by remember { mutableStateOf(false) }
-    var passwordOpen by remember { mutableStateOf(false) }
+    var passwordMode by remember { mutableStateOf<PasswordActionMode?>(null) }
     var accountDeleteOpen by remember { mutableStateOf(false) }
     var createFolderOpen by remember { mutableStateOf(false) }
     var folderPendingDelete by remember { mutableStateOf<FolderInfo?>(null) }
@@ -310,6 +326,10 @@ private fun DashboardSurface(
                 onGenerate = { generateOpen = true },
                 onRefresh = { scope.launch { controller.refreshAccounts() } },
             )
+            ProviderStatusRail(
+                statuses = controller.providerStatuses,
+                compact = !wide,
+            )
 
             if (wide) {
                 Row(
@@ -334,9 +354,10 @@ private fun DashboardSurface(
                     ) {
                         AccountHeader(
                             controller = controller,
-                            onPassword = { passwordOpen = true },
+                            onVerifyPassword = { passwordMode = PasswordActionMode.VERIFY },
+                            onResetPassword = { passwordMode = PasswordActionMode.RESET },
                             onDelete = { accountDeleteOpen = true },
-                            onRefresh = { scope.launch { controller.refreshWorkspace() } },
+                            onRefresh = { scope.launch { controller.refreshAccounts() } },
                         )
                         Row(
                             modifier = Modifier
@@ -376,7 +397,13 @@ private fun DashboardSurface(
                                     },
                                     onDelete = { messageDeleteOpen = true },
                                     modifier = Modifier
-                                        .weight(0.58f)
+                                        .weight(0.40f)
+                                        .fillMaxWidth(),
+                                )
+                                AuthenticationProbePane(
+                                    controller = controller,
+                                    modifier = Modifier
+                                        .weight(0.26f)
                                         .fillMaxWidth(),
                                 )
                                 TracePane(
@@ -390,7 +417,7 @@ private fun DashboardSurface(
                                         scope.launch { controller.refreshGlobalLogs(service) }
                                     },
                                     modifier = Modifier
-                                        .weight(0.42f)
+                                        .weight(0.34f)
                                         .fillMaxWidth(),
                                 )
                             }
@@ -428,9 +455,10 @@ private fun DashboardSurface(
                         ) {
                             AccountHeader(
                                 controller = controller,
-                                onPassword = { passwordOpen = true },
+                                onVerifyPassword = { passwordMode = PasswordActionMode.VERIFY },
+                                onResetPassword = { passwordMode = PasswordActionMode.RESET },
                                 onDelete = { accountDeleteOpen = true },
-                                onRefresh = { scope.launch { controller.refreshWorkspace() } },
+                                onRefresh = { scope.launch { controller.refreshAccounts() } },
                             )
                             MailboxPane(
                                 controller = controller,
@@ -465,6 +493,11 @@ private fun DashboardSurface(
                             modifier = Modifier.fillMaxSize(),
                         )
 
+                        NarrowStage.Authentication -> AuthenticationProbePane(
+                            controller = controller,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+
                         NarrowStage.Trace -> TracePane(
                             controller = controller,
                             mode = traceMode,
@@ -493,14 +526,20 @@ private fun DashboardSurface(
             },
         )
     }
-    if (passwordOpen) {
+    passwordMode?.let { initialMode ->
         PasswordDialog(
             target = controller.selectedTarget,
+            initialMode = initialMode,
             busy = controller.busyLabel != null,
-            onDismiss = { passwordOpen = false },
-            onSubmit = { password ->
-                passwordOpen = false
-                scope.launch { controller.changePassword(password) }
+            onDismiss = { passwordMode = null },
+            onSubmit = { mode, password ->
+                passwordMode = null
+                scope.launch {
+                    when (mode) {
+                        PasswordActionMode.VERIFY -> controller.adoptPassword(password)
+                        PasswordActionMode.RESET -> controller.changePassword(password)
+                    }
+                }
             },
         )
     }
@@ -711,7 +750,9 @@ private fun ProductHeader(
             ShellButton("Refresh", enabled = controller.busyLabel == null, onClick = onRefresh)
             ShellButton(
                 "Generate message",
-                enabled = controller.accounts.isNotEmpty() && controller.busyLabel == null,
+                enabled = controller.accounts.any {
+                    it.credentialReadiness == CredentialReadiness.READY
+                } && controller.busyLabel == null,
                 onClick = onGenerate,
             )
             Button(
@@ -728,6 +769,98 @@ private fun ProductHeader(
     }
     controller.busyLabel?.let { BusyBand(it) }
     controller.operationError?.let { ErrorState(it) }
+}
+
+@Composable
+private fun ProviderStatusRail(
+    statuses: List<ProviderStatus>,
+    compact: Boolean,
+) {
+    val statusByProvider = statuses.associateBy(ProviderStatus::provider)
+    val modifier = Modifier
+        .fillMaxWidth()
+        .padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
+    if (compact) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Provider.entries.forEach { provider ->
+                ProviderStatusBanner(
+                    provider = provider,
+                    status = statusByProvider[provider],
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    } else {
+        Row(
+            modifier = modifier,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Provider.entries.forEach { provider ->
+                ProviderStatusBanner(
+                    provider = provider,
+                    status = statusByProvider[provider],
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProviderStatusBanner(
+    provider: Provider,
+    status: ProviderStatus?,
+    modifier: Modifier = Modifier,
+) {
+    val availability = status?.availability
+    val label = when (availability) {
+        ProviderAvailability.READY -> "Ready"
+        ProviderAvailability.DEGRADED -> "Degraded"
+        ProviderAvailability.UNAVAILABLE -> "Unavailable"
+        ProviderAvailability.UPGRADE_REQUIRED -> "Upgrade required"
+        null -> "Checking"
+    }
+    val background = when (availability) {
+        ProviderAvailability.READY -> GreenWash
+        ProviderAvailability.DEGRADED,
+        ProviderAvailability.UPGRADE_REQUIRED,
+        -> StalwartWash
+        ProviderAvailability.UNAVAILABLE -> ErrorWash
+        null -> PanelFog
+    }
+    val lampHealthy = availability == ProviderAvailability.READY
+    Row(
+        modifier = modifier
+            .background(background)
+            .border(1.dp, provider.channelColor())
+            .padding(horizontal = 9.dp, vertical = 6.dp)
+            .semantics {
+                contentDescription =
+                    "Provider status ${provider.displayName()}: ${label.lowercase()}"
+                liveRegion = LiveRegionMode.Polite
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        StatusLamp(
+            healthy = lampHealthy,
+            label = "${provider.displayName()} · $label",
+            labelColor = InstrumentGraphite,
+        )
+        status?.message?.takeIf(String::isNotBlank)?.let { message ->
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                color = InstrumentGraphite,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
 }
 
 @Composable
@@ -867,7 +1000,7 @@ private fun ProviderChannelButton(
         Box(
             Modifier
                 .width(5.dp)
-                .height(44.dp)
+                .height(76.dp)
                 .background(channel),
         )
         OutlinedButton(
@@ -879,17 +1012,154 @@ private fun ProviderChannelButton(
             border = BorderStroke(1.dp, if (selected) channel else PanelFogDark),
             modifier = Modifier
                 .weight(1f)
-                .height(44.dp)
+                .heightIn(min = 76.dp)
                 .semantics { this.selected = selected },
+            contentPadding = ButtonDefaults.TextButtonContentPadding,
         ) {
-            Column(Modifier.fillMaxWidth()) {
-                Text(account.provider.displayName(), fontWeight = FontWeight.SemiBold)
-                Text(
-                    account.protocols.joinToString(" + ") { it.name },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                )
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        account.provider.displayName(),
+                        modifier = Modifier.weight(1f),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    ReadinessBadge(account.credentialReadiness)
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    account.protocols.forEach { protocol ->
+                        ProtocolChip(protocol = protocol, stale = account.stale)
+                    }
+                }
+                if (account.stale) {
+                    StaleMarker()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadinessBadge(readiness: CredentialReadiness) {
+    val label = readiness.displayName()
+    val background = when (readiness) {
+        CredentialReadiness.READY -> GreenWash
+        CredentialReadiness.PASSWORD_REQUIRED -> StalwartWash
+        CredentialReadiness.AUTHENTICATION_FAILED -> ErrorWash
+        CredentialReadiness.PROVIDER_UNAVAILABLE -> PanelFogDark
+    }
+    val content = when (readiness) {
+        CredentialReadiness.READY -> VerifiedGreen
+        CredentialReadiness.PASSWORD_REQUIRED -> InstrumentGraphite
+        CredentialReadiness.AUTHENTICATION_FAILED -> RecorderCursorRed
+        CredentialReadiness.PROVIDER_UNAVAILABLE -> SilkscreenGray
+    }
+    Text(
+        text = label,
+        modifier = Modifier
+            .background(background, RoundedCornerShape(50))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .semantics {
+                contentDescription = "Readiness ${readiness.name.lowercase()}"
+            },
+        color = content,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun StaleMarker() {
+    Text(
+        text = "Stale snapshot",
+        modifier = Modifier
+            .border(1.dp, SilkscreenGray, RoundedCornerShape(50))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .semantics { contentDescription = "Stale provider snapshot" },
+        color = SilkscreenGray,
+        fontSize = 10.sp,
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun ProtocolChip(
+    protocol: MailProtocol,
+    stale: Boolean,
+) {
+    val evidence = if (stale) "cached" else "live"
+    Text(
+        text = protocol.name,
+        modifier = Modifier
+            .background(if (stale) PanelFog else RecorderPaper)
+            .border(1.dp, if (stale) SilkscreenGray else InstrumentGraphite, RoundedCornerShape(2.dp))
+            .padding(horizontal = 5.dp, vertical = 2.dp)
+            .semantics {
+                contentDescription = "Protocol ${protocol.name}: $evidence"
+            },
+        color = if (stale) SilkscreenGray else InstrumentGraphite,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 10.sp,
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun ReadinessNotice(
+    account: AccountInfo,
+    enabled: Boolean,
+    onVerifyPassword: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val message = account.readinessMessage?.takeIf(String::isNotBlank)
+        ?: account.credentialReadiness.defaultMessage()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                if (account.credentialReadiness == CredentialReadiness.AUTHENTICATION_FAILED) {
+                    ErrorWash
+                } else {
+                    PanelFog
+                },
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            color = InstrumentGraphite,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        when (account.credentialReadiness) {
+            CredentialReadiness.PASSWORD_REQUIRED,
+            CredentialReadiness.AUTHENTICATION_FAILED,
+            -> TextButton(onClick = onVerifyPassword, enabled = enabled) {
+                Text("Verify existing password")
+            }
+            CredentialReadiness.PROVIDER_UNAVAILABLE ->
+                TextButton(onClick = onRefresh, enabled = enabled) { Text("Retry provider") }
+            CredentialReadiness.READY -> {
+                if (account.stale) {
+                    TextButton(onClick = onRefresh, enabled = enabled) { Text("Refresh provider") }
+                }
             }
         }
     }
@@ -898,7 +1168,8 @@ private fun ProviderChannelButton(
 @Composable
 private fun AccountHeader(
     controller: DashboardController,
-    onPassword: () -> Unit,
+    onVerifyPassword: () -> Unit,
+    onResetPassword: () -> Unit,
     onDelete: () -> Unit,
     onRefresh: () -> Unit,
 ) {
@@ -917,54 +1188,81 @@ private fun AccountHeader(
                 color = SilkscreenGray,
             )
         } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    Modifier
-                        .width(6.dp)
-                        .height(66.dp)
-                        .background(account.provider.channelColor()),
-                )
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                ) {
-                    Text(
-                        account.address,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        "${account.provider.displayName()} · ${account.protocols.joinToString(" / ") { it.name }}",
-                        color = SilkscreenGray,
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+            Column(Modifier.fillMaxWidth()) {
                 Row(
-                    modifier = Modifier
-                        .padding(8.dp)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedButton(
-                        onClick = onRefresh,
+                    Box(
+                        Modifier
+                            .width(6.dp)
+                            .height(88.dp)
+                            .background(account.provider.channelColor()),
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            Text(
+                                account.address,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            ReadinessBadge(account.credentialReadiness)
+                            if (account.stale) StaleMarker()
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            account.protocols.forEach { protocol ->
+                                ProtocolChip(protocol = protocol, stale = account.stale)
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .padding(8.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onRefresh,
+                            enabled = controller.busyLabel == null,
+                        ) { Text("Refresh") }
+                        OutlinedButton(
+                            onClick = onVerifyPassword,
+                            enabled = controller.busyLabel == null,
+                        ) { Text("Verify existing password") }
+                        OutlinedButton(
+                            onClick = onResetPassword,
+                            enabled = controller.busyLabel == null,
+                        ) { Text("Reset password") }
+                        TextButton(
+                            onClick = onDelete,
+                            enabled = controller.busyLabel == null,
+                            colors = ButtonDefaults.textButtonColors(contentColor = RecorderCursorRed),
+                        ) { Text("Delete account") }
+                    }
+                }
+                if (account.credentialReadiness != CredentialReadiness.READY || account.stale) {
+                    ReadinessNotice(
+                        account = account,
                         enabled = controller.busyLabel == null,
-                    ) { Text("Refresh") }
-                    OutlinedButton(
-                        onClick = onPassword,
-                        enabled = controller.busyLabel == null,
-                    ) { Text("Change password") }
-                    TextButton(
-                        onClick = onDelete,
-                        enabled = controller.busyLabel == null,
-                        colors = ButtonDefaults.textButtonColors(contentColor = RecorderCursorRed),
-                    ) { Text("Delete account") }
+                        onVerifyPassword = onVerifyPassword,
+                        onRefresh = onRefresh,
+                    )
                 }
             }
         }
@@ -991,11 +1289,15 @@ private fun CompactAccountSummary(account: AccountInfo?) {
         )
         Column(Modifier.weight(1f)) {
             Text(account.address, fontFamily = FontFamily.Monospace, maxLines = 1)
-            Text(
-                account.provider.displayName(),
-                color = SilkscreenGray,
-                style = MaterialTheme.typography.bodySmall,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(
+                    account.provider.displayName(),
+                    color = SilkscreenGray,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                ReadinessBadge(account.credentialReadiness)
+                if (account.stale) StaleMarker()
+            }
         }
     }
 }
@@ -1092,12 +1394,13 @@ private fun FolderPane(
         headerAction = {
             TextButton(
                 onClick = onCreate,
-                enabled = controller.selectedTarget != null && controller.busyLabel == null,
+                enabled = controller.mailActionsEnabled && controller.busyLabel == null,
             ) { Text("New") }
         },
     ) {
         when {
             controller.selectedTarget == null -> EmptyState("No account selected", "Choose an account channel first.")
+            !controller.mailActionsEnabled -> MailReadinessEmptyState(controller.selectedAccount)
             controller.workspaceLoading && controller.folders.isEmpty() -> LoadingState("Reading folders")
             controller.folders.isEmpty() -> EmptyState(
                 "No folders returned",
@@ -1184,6 +1487,7 @@ private fun MessagesPane(
             ) {
                 when {
                     controller.selectedTarget == null -> EmptyState("No account selected", "Choose an account channel first.")
+                    !controller.mailActionsEnabled -> MailReadinessEmptyState(controller.selectedAccount)
                     controller.workspaceLoading && controller.messages.isEmpty() -> LoadingState("Reading messages")
                     controller.messages.isEmpty() -> EmptyState(
                         "This folder is empty",
@@ -1292,6 +1596,8 @@ private fun MessageReaderPane(
 ) {
     WorkZone(label = "Message reader + operations", modifier = modifier) {
         when {
+            controller.selectedTarget != null && !controller.mailActionsEnabled ->
+                MailReadinessEmptyState(controller.selectedAccount)
             controller.messageLoading -> LoadingState("Reading message body")
             controller.selectedMessage == null -> EmptyState(
                 "No message selected",
@@ -1302,6 +1608,7 @@ private fun MessageReaderPane(
                 folders = controller.folders,
                 destinationFolderId = destinationFolderId,
                 busy = controller.busyLabel != null,
+                mailActionsEnabled = controller.mailActionsEnabled,
                 onDestinationChanged = onDestinationChanged,
                 onAction = onAction,
                 onDelete = onDelete,
@@ -1316,6 +1623,7 @@ private fun ColumnScope.MessageReader(
     folders: List<FolderInfo>,
     destinationFolderId: String?,
     busy: Boolean,
+    mailActionsEnabled: Boolean,
     onDestinationChanged: (String?) -> Unit,
     onAction: (MessageAction, String?) -> Unit,
     onDelete: () -> Unit,
@@ -1369,7 +1677,7 @@ private fun ColumnScope.MessageReader(
         ) {
             OperationButton(
                 label = if (message.isRead) "Mark unread" else "Mark read",
-                enabled = !busy,
+                enabled = mailActionsEnabled && !busy,
                 onClick = {
                     onAction(
                         if (message.isRead) MessageAction.MARK_UNREAD else MessageAction.MARK_READ,
@@ -1379,7 +1687,7 @@ private fun ColumnScope.MessageReader(
             )
             OperationButton(
                 label = if (message.isFlagged) "Unflag" else "Flag",
-                enabled = !busy,
+                enabled = mailActionsEnabled && !busy,
                 onClick = {
                     onAction(
                         if (message.isFlagged) MessageAction.UNFLAG else MessageAction.FLAG,
@@ -1387,12 +1695,12 @@ private fun ColumnScope.MessageReader(
                     )
                 },
             )
-            OperationButton("Trash", enabled = !busy) {
+            OperationButton("Trash", enabled = mailActionsEnabled && !busy) {
                 onAction(MessageAction.TRASH, null)
             }
             TextButton(
                 onClick = onDelete,
-                enabled = !busy,
+                enabled = mailActionsEnabled && !busy,
                 colors = ButtonDefaults.textButtonColors(contentColor = RecorderCursorRed),
             ) { Text("Delete permanently") }
         }
@@ -1423,11 +1731,11 @@ private fun ColumnScope.MessageReader(
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OperationButton(
                     "Move",
-                    enabled = selectedDestination != null && !busy,
+                    enabled = mailActionsEnabled && selectedDestination != null && !busy,
                 ) { onAction(MessageAction.MOVE, selectedDestination) }
                 OperationButton(
                     "Copy",
-                    enabled = selectedDestination != null && !busy,
+                    enabled = mailActionsEnabled && selectedDestination != null && !busy,
                 ) { onAction(MessageAction.COPY, selectedDestination) }
             }
         }
@@ -1686,6 +1994,22 @@ private fun EmptyState(
 }
 
 @Composable
+private fun MailReadinessEmptyState(account: AccountInfo?) {
+    val readiness = account?.credentialReadiness ?: return
+    val title = readiness.displayName()
+    val detail = when (readiness) {
+        CredentialReadiness.READY -> "Mail operations are ready. Refresh the selected provider."
+        CredentialReadiness.PASSWORD_REQUIRED ->
+            "Verify the existing password or reset it before reading or changing mailbox state."
+        CredentialReadiness.AUTHENTICATION_FAILED ->
+            "The remembered password no longer authenticates. Verify or reset it, then retry."
+        CredentialReadiness.PROVIDER_UNAVAILABLE ->
+            "The provider could not verify this account. Retry the provider before using mail operations."
+    }
+    EmptyState(title = title, detail = detail)
+}
+
+@Composable
 private fun StatusLamp(
     healthy: Boolean,
     label: String,
@@ -1716,9 +2040,11 @@ private fun SelectionButton(
     selected: Boolean,
     onClick: () -> Unit,
     compact: Boolean = false,
+    enabled: Boolean = true,
 ) {
     OutlinedButton(
         onClick = onClick,
+        enabled = enabled,
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = if (selected) InstrumentGraphite else RecorderPaper,
             contentColor = if (selected) RecorderPaper else InstrumentGraphite,
@@ -1764,10 +2090,13 @@ private fun CreateAccountDialog(
     var password by remember { mutableStateOf("") }
     var provider by remember { mutableStateOf(Provider.DOVECOT) }
     var protocols by remember {
-        mutableStateOf(setOf(MailProtocol.IMAP, MailProtocol.SMTP))
+        mutableStateOf(STALWART_SELECTABLE_PROTOCOLS.toSet())
     }
-    val allowed = provider.allowedProtocols()
-    val canCreate = address.isNotBlank() && password.isNotBlank() && protocols.isNotEmpty() && !busy
+    val requestedProtocols = provider.creationProtocols(protocols)
+    val canCreate = address.isNotBlank() &&
+        password.isNotBlank() &&
+        requestedProtocols.isNotEmpty() &&
+        !busy
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1791,7 +2120,7 @@ private fun CreateAccountDialog(
                             selected = provider == candidate,
                             onClick = {
                                 provider = candidate
-                                protocols = candidate.defaultProtocols()
+                                protocols = STALWART_SELECTABLE_PROTOCOLS.toSet()
                             },
                         )
                     }
@@ -1813,21 +2142,44 @@ private fun CreateAccountDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text("Client protocol profile", fontWeight = FontWeight.SemiBold)
-                Text(
-                    "Choose the protocols this account is meant to exercise. The dashboard " +
-                        "uses this profile for actions and guidance; provider-internal mailbox " +
-                        "access may remain enabled for diagnostics.",
-                    color = SilkscreenGray,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                allowed.forEach { protocol ->
-                    ProtocolToggle(
-                        protocol = protocol,
-                        checked = protocol in protocols,
-                        onCheckedChange = { checked ->
-                            protocols = if (checked) protocols + protocol else protocols - protocol
-                        },
-                    )
+                when (provider) {
+                    Provider.DOVECOT -> {
+                        Text(
+                            "Dovecot fixed account capabilities",
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Every Dovecot account uses the server-wide IMAP, POP3, and SMTP test profile.",
+                            color = SilkscreenGray,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            DOVECOT_FIXED_PROTOCOLS.forEach { protocol ->
+                                ProtocolChip(protocol = protocol, stale = false)
+                            }
+                        }
+                    }
+                    Provider.STALWART -> {
+                        Text(
+                            "Select the enforced Stalwart account permissions. At least one is required.",
+                            color = SilkscreenGray,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        STALWART_SELECTABLE_PROTOCOLS.forEach { protocol ->
+                            ProtocolToggle(
+                                protocol = protocol,
+                                checked = protocol in protocols,
+                                onCheckedChange = { checked ->
+                                    protocols = if (checked) protocols + protocol else protocols - protocol
+                                },
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -1839,7 +2191,7 @@ private fun CreateAccountDialog(
                             address = address.trim(),
                             password = password,
                             provider = provider,
-                            protocols = allowed.filter(protocols::contains),
+                            protocols = provider.creationProtocols(protocols),
                         ),
                     )
                 },
@@ -1878,21 +2230,63 @@ private fun ProtocolToggle(
 @Composable
 private fun PasswordDialog(
     target: AccountTarget?,
+    initialMode: PasswordActionMode,
     busy: Boolean,
     onDismiss: () -> Unit,
-    onSubmit: (String) -> Unit,
+    onSubmit: (PasswordActionMode, String) -> Unit,
 ) {
+    var mode by remember(initialMode) { mutableStateOf(initialMode) }
     var password by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { DialogTitle("Change account password", target?.provider) },
+        title = { DialogTitle("Account password", target?.provider) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(target?.displayName ?: "No account selected", fontFamily = FontFamily.Monospace)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    SelectionButton(
+                        label = "Verify existing password",
+                        selected = mode == PasswordActionMode.VERIFY,
+                        onClick = {
+                            mode = PasswordActionMode.VERIFY
+                            password = ""
+                        },
+                    )
+                    SelectionButton(
+                        label = "Reset password",
+                        selected = mode == PasswordActionMode.RESET,
+                        onClick = {
+                            mode = PasswordActionMode.RESET
+                            password = ""
+                        },
+                    )
+                }
+                Text(
+                    if (mode == PasswordActionMode.VERIFY) {
+                        "Verify the account's current ordinary password and remember it for this local dashboard."
+                    } else {
+                        "Replace the provider password, verify the new ordinary login, and remember it locally."
+                    },
+                    color = SilkscreenGray,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("New password") },
+                    label = {
+                        Text(
+                            if (mode == PasswordActionMode.VERIFY) {
+                                "Existing password"
+                            } else {
+                                "New password"
+                            },
+                        )
+                    },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                 )
@@ -1900,12 +2294,241 @@ private fun PasswordDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSubmit(password) },
+                onClick = { onSubmit(mode, password) },
                 enabled = password.isNotBlank() && target != null && !busy,
-            ) { Text("Change password") }
+            ) { Text(mode.label) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun AuthenticationProbePane(
+    controller: DashboardController,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    val account = controller.selectedAccount
+    val supportedProtocols = account?.supportedAuthenticationProtocols().orEmpty()
+    var protocol by remember(account?.target()) {
+        mutableStateOf(supportedProtocols.firstOrNull())
+    }
+    var credentialSource by remember(account?.target(), account?.credentialReadiness) {
+        mutableStateOf(
+            if (account?.credentialReadiness == CredentialReadiness.PASSWORD_REQUIRED) {
+                ProbeCredentialSource.OVERRIDE
+            } else {
+                ProbeCredentialSource.REMEMBERED
+            },
+        )
+    }
+    var credentialOverride by remember(account?.target()) { mutableStateOf("") }
+    val selectedProtocol = protocol?.takeIf(supportedProtocols::contains)
+        ?: supportedProtocols.firstOrNull()
+    val protocolRequiresOverride = selectedProtocol?.requiresOverride() == true
+    val rememberedAvailable = account != null &&
+        account.credentialReadiness != CredentialReadiness.PASSWORD_REQUIRED &&
+        !protocolRequiresOverride
+    val usesOverride = credentialSource == ProbeCredentialSource.OVERRIDE || !rememberedAvailable
+    val canProbe = account != null &&
+        selectedProtocol != null &&
+        (!usesOverride || credentialOverride.isNotBlank()) &&
+        !controller.authenticationProbeLoading
+
+    WorkZone(label = "Authentication probe", modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+                .verticalScroll(rememberScrollState())
+                .semantics { contentDescription = "Authentication probe panel" },
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            when {
+                account == null -> EmptyState(
+                    title = "No account selected",
+                    detail = "Choose one provider channel to reproduce an authentication exchange.",
+                )
+                supportedProtocols.isEmpty() -> EmptyState(
+                    title = "No explicit probes available",
+                    detail = "This provider channel does not report a supported authentication protocol.",
+                )
+                else -> {
+                    Text(
+                        "${account.provider.displayName()} · ${account.address}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "Protocol",
+                        color = SilkscreenGray,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        supportedProtocols.forEach { candidate ->
+                            SelectionButton(
+                                label = candidate.displayName(),
+                                selected = candidate == selectedProtocol,
+                                onClick = {
+                                    protocol = candidate
+                                    if (candidate.requiresOverride()) {
+                                        credentialSource = ProbeCredentialSource.OVERRIDE
+                                    }
+                                    credentialOverride = ""
+                                },
+                                compact = true,
+                            )
+                        }
+                    }
+                    Text(
+                        "Credential",
+                        color = SilkscreenGray,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        SelectionButton(
+                            label = "Remembered credential",
+                            selected = !usesOverride,
+                            enabled = rememberedAvailable,
+                            onClick = {
+                                credentialSource = ProbeCredentialSource.REMEMBERED
+                                credentialOverride = ""
+                            },
+                            compact = true,
+                        )
+                        SelectionButton(
+                            label = "Request override",
+                            selected = usesOverride,
+                            onClick = { credentialSource = ProbeCredentialSource.OVERRIDE },
+                            compact = true,
+                        )
+                    }
+                    if (usesOverride) {
+                        OutlinedTextField(
+                            value = credentialOverride,
+                            onValueChange = { credentialOverride = it },
+                            label = {
+                                Text(
+                                    if (selectedProtocol?.requiresOverride() == true) {
+                                        "OAuth token override"
+                                    } else {
+                                        "Password override"
+                                    },
+                                )
+                            },
+                            supportingText = {
+                                Text("Used for this probe only; never remembered or shown in evidence.")
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            val requestedProtocol = requireNotNull(selectedProtocol)
+                            val override = credentialOverride.takeIf { usesOverride }
+                            credentialOverride = ""
+                            scope.launch {
+                                controller.probeAuthentication(
+                                    protocol = requestedProtocol,
+                                    credentialOverride = override,
+                                )
+                            }
+                        },
+                        enabled = canProbe,
+                    ) { Text("Run authentication probe") }
+                    if (
+                        account.credentialReadiness == CredentialReadiness.PASSWORD_REQUIRED &&
+                        credentialOverride.isBlank() &&
+                        !controller.authenticationProbeLoading
+                    ) {
+                        Text(
+                            "Password required: enter a request override to keep this diagnostic available.",
+                            color = SilkscreenGray,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            if (controller.authenticationProbeLoading) {
+                LoadingState("Waiting for bounded provider response")
+            }
+            controller.authenticationProbeError?.let { ErrorState(it) }
+            controller.authenticationProbe?.let { ProbeResult(it) }
+        }
+    }
+}
+
+@Composable
+private fun ProbeResult(result: AuthenticationProbeResponse) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (result.success) GreenWash else ErrorWash)
+            .border(1.dp, if (result.success) VerifiedGreen else RecorderCursorRed)
+            .padding(8.dp)
+            .semantics {
+                liveRegion = LiveRegionMode.Polite
+                contentDescription = if (result.success) "Authentication probe passed" else "Authentication probe failed"
+            },
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            if (result.success) "Probe passed" else "Probe failed",
+            color = if (result.success) VerifiedGreen else RecorderCursorRed,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "${result.provider.displayName()} · ${result.protocol.displayName()}",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            result.providerResponse.ifBlank { "No provider response was returned." },
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            lineHeight = 14.sp,
+            maxLines = 8,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            "Correlated account logs",
+            color = SilkscreenGray,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        Surface(
+            color = DeepGraphite,
+            contentColor = RecorderPaper,
+            shape = MaterialTheme.shapes.extraSmall,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = result.correlatedLogs.takeIf(List<String>::isNotEmpty)
+                    ?.joinToString("\n")
+                    ?: "No correlated log lines were captured.",
+                modifier = Modifier.padding(7.dp),
+                color = ShellLabel,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                maxLines = 8,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
 }
 
 @Composable
@@ -1950,7 +2573,13 @@ private fun GenerateMessageDialog(
     onDismiss: () -> Unit,
     onGenerate: (GenerateMessageRequest) -> Unit,
 ) {
-    var target by remember { mutableStateOf(selectedTarget ?: accounts.firstOrNull()?.target()) }
+    val readyAccounts = accounts.filter {
+        it.credentialReadiness == CredentialReadiness.READY
+    }
+    val initialTarget = selectedTarget
+        ?.takeIf { selected -> readyAccounts.any { it.target() == selected } }
+        ?: readyAccounts.firstOrNull()?.target()
+    var target by remember { mutableStateOf(initialTarget) }
     var sourceType by remember { mutableStateOf(MessageSourceType.TEXT) }
     var deliveryMode by remember { mutableStateOf(MessageDeliveryMode.DIRECT_APPEND) }
     var subject by remember { mutableStateOf("Dashboard reproduction") }
@@ -1965,6 +2594,7 @@ private fun GenerateMessageDialog(
     val smtpAvailable = MailProtocol.SMTP in targetAccount?.protocols.orEmpty()
     val usesDirectAppend = deliveryMode == MessageDeliveryMode.DIRECT_APPEND
     val canGenerate = target != null &&
+        targetAccount?.credentialReadiness == CredentialReadiness.READY &&
         (!needsContent || content.isNotBlank()) && seedValid &&
         (usesDirectAppend || smtpAvailable) && !busy
     val targetUsesLoadedFolders = target == selectedTarget
@@ -1989,6 +2619,7 @@ private fun GenerateMessageDialog(
                     ProviderTargetChoice(
                         account = account,
                         selected = target == account.target(),
+                        enabled = account.credentialReadiness == CredentialReadiness.READY,
                         onClick = {
                             target = account.target()
                             if (MailProtocol.SMTP !in account.protocols) {
@@ -2003,7 +2634,7 @@ private fun GenerateMessageDialog(
                     DeliveryPathChoice(
                         mode = MessageDeliveryMode.DIRECT_APPEND,
                         selected = usesDirectAppend,
-                        enabled = target != null,
+                        enabled = targetAccount?.credentialReadiness == CredentialReadiness.READY,
                         onClick = { deliveryMode = MessageDeliveryMode.DIRECT_APPEND },
                     )
                     DeliveryPathChoice(
@@ -2208,6 +2839,7 @@ private fun DeliveryPathChoice(
 private fun ProviderTargetChoice(
     account: AccountInfo,
     selected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     Row(
@@ -2215,7 +2847,7 @@ private fun ProviderTargetChoice(
             .fillMaxWidth()
             .background(if (selected) account.provider.channelWash() else RecorderPaper)
             .border(1.dp, if (selected) account.provider.channelColor() else PanelFogDark)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .semantics {
                 this.selected = selected
                 role = Role.Button
@@ -2228,8 +2860,19 @@ private fun ProviderTargetChoice(
                 .height(48.dp)
                 .background(account.provider.channelColor()),
         )
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            Text(account.address, fontFamily = FontFamily.Monospace)
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(account.address, modifier = Modifier.weight(1f), fontFamily = FontFamily.Monospace)
+                ReadinessBadge(account.credentialReadiness)
+            }
             Text(
                 "${account.provider.displayName()} · ${account.protocols.joinToString(" + ") { it.name }}",
                 color = SilkscreenGray,
@@ -2314,14 +2957,67 @@ private fun Provider.channelWash(): Color = when (this) {
     Provider.STALWART -> StalwartWash
 }
 
-private fun Provider.allowedProtocols(): List<MailProtocol> = when (this) {
-    Provider.DOVECOT -> listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP)
-    Provider.STALWART -> listOf(MailProtocol.JMAP, MailProtocol.SMTP)
+private val DOVECOT_FIXED_PROTOCOLS = listOf(
+    MailProtocol.IMAP,
+    MailProtocol.POP3,
+    MailProtocol.SMTP,
+)
+
+private val STALWART_SELECTABLE_PROTOCOLS = listOf(
+    MailProtocol.JMAP,
+    MailProtocol.SMTP,
+)
+
+private fun Provider.creationProtocols(selected: Set<MailProtocol>): List<MailProtocol> = when (this) {
+    Provider.DOVECOT -> DOVECOT_FIXED_PROTOCOLS
+    Provider.STALWART -> STALWART_SELECTABLE_PROTOCOLS.filter(selected::contains)
 }
 
-private fun Provider.defaultProtocols(): Set<MailProtocol> = when (this) {
-    Provider.DOVECOT -> setOf(MailProtocol.IMAP, MailProtocol.SMTP)
-    Provider.STALWART -> setOf(MailProtocol.JMAP, MailProtocol.SMTP)
+private fun AccountInfo.supportedAuthenticationProtocols(): List<AuthenticationProtocol> = when (provider) {
+    Provider.DOVECOT -> buildList {
+        if (MailProtocol.IMAP in protocols) add(AuthenticationProtocol.IMAP)
+        if (MailProtocol.POP3 in protocols) add(AuthenticationProtocol.POP3)
+        if (MailProtocol.SMTP in protocols) add(AuthenticationProtocol.SMTP)
+        if (MailProtocol.IMAP in protocols) add(AuthenticationProtocol.OAUTH_IMAP)
+        if (MailProtocol.SMTP in protocols) add(AuthenticationProtocol.OAUTH_SMTP)
+    }
+    Provider.STALWART -> buildList {
+        if (MailProtocol.JMAP in protocols) add(AuthenticationProtocol.JMAP)
+        if (MailProtocol.SMTP in protocols) add(AuthenticationProtocol.SMTP)
+    }
+}
+
+private fun AuthenticationProtocol.displayName(): String = when (this) {
+    AuthenticationProtocol.IMAP -> "IMAP password"
+    AuthenticationProtocol.POP3 -> "POP3 password"
+    AuthenticationProtocol.SMTP -> "SMTP password"
+    AuthenticationProtocol.JMAP -> "JMAP password"
+    AuthenticationProtocol.OAUTH_IMAP -> "IMAP OAuth"
+    AuthenticationProtocol.OAUTH_SMTP -> "SMTP OAuth"
+}
+
+private fun AuthenticationProtocol.requiresOverride(): Boolean = when (this) {
+    AuthenticationProtocol.OAUTH_IMAP,
+    AuthenticationProtocol.OAUTH_SMTP,
+    -> true
+    else -> false
+}
+
+private fun CredentialReadiness.displayName(): String = when (this) {
+    CredentialReadiness.READY -> "Ready"
+    CredentialReadiness.PASSWORD_REQUIRED -> "Password required"
+    CredentialReadiness.AUTHENTICATION_FAILED -> "Authentication failed"
+    CredentialReadiness.PROVIDER_UNAVAILABLE -> "Provider unavailable"
+}
+
+private fun CredentialReadiness.defaultMessage(): String = when (this) {
+    CredentialReadiness.READY -> "Ordinary account authentication is ready."
+    CredentialReadiness.PASSWORD_REQUIRED ->
+        "Supply and verify the existing password, or reset it to a known local test value."
+    CredentialReadiness.AUTHENTICATION_FAILED ->
+        "The remembered password failed ordinary account authentication."
+    CredentialReadiness.PROVIDER_UNAVAILABLE ->
+        "Credential readiness could not be verified because this provider is unavailable."
 }
 
 private fun MailProtocol.description(): String = when (this) {
