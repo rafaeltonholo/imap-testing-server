@@ -32,17 +32,23 @@ class DovecotBaselineConfigAuditTest {
     }
 
     @Test
-    fun dashboardRelevantPublicationsUseOnlyTheReviewedLoopbackMappings() {
+    fun ordinaryMailPortsSupportLanDevicesAndKeepDashboardLoopbackAliases() {
         assertEquals(
             mapOf(
                 "dovecot" to listOf(
+                    "0.0.0.0:143:31143",
+                    "0.0.0.0:993:31993",
+                    "0.0.0.0:110:31110",
+                    "0.0.0.0:995:31995",
                     "127.0.0.1:1143:31143",
                     "127.0.0.1:1993:31993",
                     "127.0.0.1:1110:31110",
                     "127.0.0.1:1995:31995",
                 ),
                 "postfix" to listOf(
-                    "127.0.0.1:1025:25",
+                    "0.0.0.0:1025:25",
+                    "0.0.0.0:465:465",
+                    "0.0.0.0:587:587",
                     "127.0.0.1:1465:465",
                     "127.0.0.1:1587:587",
                 ),
