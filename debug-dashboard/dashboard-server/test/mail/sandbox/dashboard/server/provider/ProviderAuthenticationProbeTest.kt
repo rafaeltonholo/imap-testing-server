@@ -332,6 +332,38 @@ class ProviderAuthenticationProbeTest {
     }
 
     @Test
+    fun failureRaisedByAnInjectedJakartaSmtpTransportIsTypedAndClosedWithoutSending() {
+        lateinit var transport: RecordingJakartaTransport
+        val connector = JakartaProviderAuthenticationConnector(
+            JakartaProviderAuthenticationConnectionFactory(
+                storeFactory = JakartaAuthenticationStoreFactory { _, _ ->
+                    error("Mail store must not be created for an SMTP probe")
+                },
+                transportFactory = JakartaAuthenticationTransportFactory { session ->
+                    RecordingJakartaTransport(
+                        session,
+                        AuthenticationFailedException("authentication failed"),
+                    ).also { transport = it }
+                },
+            ),
+        )
+        val attempt = ProviderAuthenticationAttempt(
+            protocol = ProviderAuthenticationProtocol.SMTP,
+            mechanism = ProviderAuthenticationMechanism.PASSWORD,
+            endpoint = ProviderAuthenticationEndpoint("127.0.0.1", 1587, startTls = true),
+            address = "alice@local.test",
+            secret = "wrong-password",
+            authenticateOnly = true,
+        )
+
+        assertIs<ProviderAuthenticationTransportOutcome.WrongPassword>(
+            connector.authenticate(attempt),
+        )
+        assertEquals(0, transport.sendCount)
+        assertEquals(1, transport.closeCount)
+    }
+
+    @Test
     fun oauthBearerSaslClientUsesOnlyTheRequestScopedAddressAndToken() {
         val client = OAuthBearerSaslClientFactory().createSaslClient(
             mechanisms = arrayOf("OAUTHBEARER"),
@@ -447,6 +479,7 @@ private class RecordingJakartaStore(
 
 private class RecordingJakartaTransport(
     session: Session,
+    private val failure: Exception? = null,
 ) : Transport(session, URLName("smtp", null, -1, null, null, null)) {
     var connectCall: JakartaConnectCall? = null
     var closeCount: Int = 0
@@ -461,6 +494,7 @@ private class RecordingJakartaTransport(
         password: String?,
     ): Boolean {
         connectCall = JakartaConnectCall(host, port, user, password)
+        failure?.let { throw it }
         return true
     }
 

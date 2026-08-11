@@ -27,9 +27,7 @@ internal class DovecotDashboardProvider(
     private val adapter: DovecotProductAdapter,
     private val catalog: LocalAccountCatalog,
     private val mailboxClient: DovecotMailboxClient = DovecotImapClient(
-        accountExists = { address ->
-            adapter.listAccounts().any { account -> account.address == address }
-        },
+        accountExists = DovecotAccountExistence(adapter)::contains,
     ),
     private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.POSTFIX),
 ) : LocalProviderOperations {
@@ -345,6 +343,13 @@ internal class DovecotDashboardProvider(
         const val MESSAGE_ARRIVAL_ATTEMPTS = 40
         const val MESSAGE_ARRIVAL_DELAY_MILLIS = 100L
     }
+}
+
+internal class DovecotAccountExistence(
+    private val adapter: DovecotProductAdapter,
+) {
+    fun contains(address: String): Boolean =
+        adapter.listAccounts().any { account -> account.address == address }
 }
 
 internal fun messageIdentity(value: String?): String? = value

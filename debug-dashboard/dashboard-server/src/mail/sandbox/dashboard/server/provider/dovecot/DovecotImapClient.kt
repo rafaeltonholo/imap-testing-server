@@ -390,7 +390,7 @@ private class JakartaDovecotImapStoreFactory(
     }
 }
 
-private class JakartaDovecotImapStore(
+internal class JakartaDovecotImapStore(
     private val store: IMAPStore,
     private val settings: DovecotImapConnectionSettings,
 ) : DovecotImapStore {

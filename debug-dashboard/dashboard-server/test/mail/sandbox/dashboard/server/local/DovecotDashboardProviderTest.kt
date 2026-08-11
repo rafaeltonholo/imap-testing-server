@@ -21,6 +21,8 @@ import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandRequest
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandResult
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotCommandRunner
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotFolder
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotImapClient
+import mail.sandbox.dashboard.server.provider.dovecot.DovecotImapStoreFactory
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotMailboxClient
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotMailboxState
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotMessageCommand
@@ -260,6 +262,33 @@ class DovecotDashboardProviderTest {
         } finally {
             directory.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun defaultMailboxAccountLookupUsesTheCanonicalDovecotRegistry() {
+        val adapter = DovecotProductAdapter(
+            MutablePlainAccountRegistry("password"),
+            QueueRunner(),
+        )
+        val lookup = DovecotAccountExistence(adapter)
+        val client = DovecotImapClient(
+            storeFactory = DovecotImapStoreFactory {
+                error("Authentication classification must not open a mailbox store")
+            },
+            authenticationProbe = {
+                AuthenticationOutcome.WrongPassword("generic authentication failure")
+            },
+            accountExists = lookup::contains,
+        )
+
+        assertTrue(
+            client.probe(AccountCredentials("alice@local.test", "wrong-password")) is
+                AuthenticationOutcome.WrongPassword,
+        )
+        assertTrue(
+            client.probe(AccountCredentials("missing@local.test", "wrong-password")) is
+                AuthenticationOutcome.MissingAccount,
+        )
     }
 
     @Test
