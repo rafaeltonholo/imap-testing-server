@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -16,9 +17,6 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 
 SERVER_PATH = Path(__file__).with_name("server.py")
-KOTLIN_WHITESPACE_FIXTURE_PATH = SERVER_PATH.with_name(
-    "kotlin-whitespace-fixture.txt",
-)
 PASSWD_SHAPE_CORPUS_PATH = SERVER_PATH.parent.parent.joinpath(
     "debug-dashboard",
     "dashboard-server",
@@ -29,6 +27,19 @@ PASSWD_SHAPE_CORPUS_PATH = SERVER_PATH.parent.parent.joinpath(
 SERVER_SPEC = importlib.util.spec_from_file_location("oauth2_mock_server", SERVER_PATH)
 server = importlib.util.module_from_spec(SERVER_SPEC)
 SERVER_SPEC.loader.exec_module(server)
+
+
+def load_canonical_users_file():
+    repository_root = SERVER_PATH.parent.parent
+    original_path = sys.path.copy()
+    try:
+        sys.path.insert(0, str(repository_root))
+        return importlib.import_module("scripts.users_file")
+    finally:
+        sys.path[:] = original_path
+
+
+canonical_users_file = load_canonical_users_file()
 
 
 VALID_PASSWORD_FIELD = "{PLAIN}secret"
@@ -413,10 +424,8 @@ class EligibilityReaderTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_reads_canonical_entries_comments_and_blank_lines(self):
+    def test_reads_only_canonically_serialized_entries(self):
         self.write_authority(
-            "# generated authority\n"
-            "\n"
             f"{eligibility_record('eligible@local.test')}\n"
             f"{eligibility_record('second.user+tag@local.test')}\n"
         )
@@ -426,6 +435,100 @@ class EligibilityReaderTest(unittest.TestCase):
         self.assertTrue(reader.is_eligible("second.user+tag@local.test"))
         self.assertFalse(reader.is_eligible("absent@local.test"))
         self.assertFalse(reader.is_eligible("ELIGIBLE@local.test"))
+
+    def test_noncanonical_serialization_fails_closed(self):
+        canonical = f"{eligibility_record('eligible@local.test')}\n"
+        invalid_documents = (
+            ("comment", f"# generated authority\n{canonical}"),
+            ("leading-blank", f"\n{canonical}"),
+            ("trailing-blank", f"{canonical}\n"),
+            (
+                "middle-blank",
+                f"{canonical}\n{eligibility_record('second@local.test')}\n",
+            ),
+            ("missing-final-newline", canonical.removesuffix("\n")),
+            ("carriage-return", canonical.replace("\n", "\r\n")),
+            ("unicode-next-line", canonical.replace("\n", "\u0085")),
+            ("unicode-line-separator", canonical.replace("\n", "\u2028")),
+            ("unicode-paragraph-separator", canonical.replace("\n", "\u2029")),
+        )
+
+        for case_id, document in invalid_documents:
+            with self.subTest(case_id=case_id):
+                self.write_authority(document)
+                reader = server.EligibilityReader(self.authority)
+                self.assertEqual(
+                    server.EligibilityResult.UNAVAILABLE,
+                    reader.eligibility("eligible@local.test"),
+                )
+
+    def test_oauth_parser_matches_canonical_users_file_parser(self):
+        long_password = "p" * 5000
+        long_password_field = (
+            f"{server.EligibilityReader.PLAIN_PREFIX}{long_password}"
+        )
+        special_address = "a!#$%&'*+/=?^_`{|}~-b@sub.local.test"
+        valid_documents = (
+            ("empty", ""),
+            (
+                "special-local-characters",
+                f"{eligibility_record(special_address)}\n",
+            ),
+            (
+                "long-password",
+                f"{eligibility_record('long@local.test', long_password_field)}\n",
+            ),
+            (
+                "formerly-protected-local-part",
+                f"{eligibility_record('dashboard-management@local.test')}\n",
+            ),
+            (
+                "multiple-records",
+                f"{eligibility_record('first@local.test')}\n"
+                f"{eligibility_record('second@local.test')}\n",
+            ),
+        )
+        invalid_documents = (
+            ("single-label-domain", f"{eligibility_record('a@localhost')}\n"),
+            ("uppercase", f"{eligibility_record('A@local.test')}\n"),
+            ("leading-dot", f"{eligibility_record('.a@local.test')}\n"),
+            ("comment", f"# comment\n{eligibility_record('a@local.test')}\n"),
+            ("blank-record", f"\n{eligibility_record('a@local.test')}\n"),
+            ("missing-newline", eligibility_record("a@local.test")),
+            ("extra-newline", f"{eligibility_record('a@local.test')}\n\n"),
+            (
+                "duplicate",
+                f"{eligibility_record('a@local.test')}\n"
+                f"{eligibility_record('a@local.test')}\n",
+            ),
+        )
+        reader = server.EligibilityReader(self.authority)
+
+        for case_id, document in (*valid_documents, *invalid_documents):
+            with self.subTest(case_id=case_id):
+                try:
+                    canonical_records = canonical_users_file.parse_records(document)
+                except canonical_users_file.UsersFileError:
+                    with self.assertRaises(ValueError):
+                        reader._parse(document)
+                else:
+                    self.assertEqual(
+                        {record.address for record in canonical_records},
+                        reader._parse(document),
+                    )
+
+    def test_parser_errors_do_not_disclose_plaintext_passwords(self):
+        plaintext = "plaintext-must-not-escape"
+        malformed = eligibility_record(
+            "eligible@local.test",
+            f"{server.EligibilityReader.PLAIN_PREFIX}{plaintext}",
+        )
+        reader = server.EligibilityReader(self.authority)
+
+        with self.assertRaises(ValueError) as raised:
+            reader._parse(malformed)
+
+        self.assertNotIn(plaintext, str(raised.exception))
 
     def test_malformed_authority_fails_closed_for_every_identity(self):
         malformed_authorities = (
@@ -688,7 +791,7 @@ class EligibilityReaderTest(unittest.TestCase):
             "passwd-shape corpus must cover each populated userdb column once",
         )
 
-    def test_protected_authority_identities_and_subaddresses_fail_closed(self):
+    def test_old_protected_names_are_valid_authority_addresses(self):
         protected_addresses = (
             "dashboard-management@local.test",
             "dashboard-management+tag@local.test",
@@ -701,16 +804,15 @@ class EligibilityReaderTest(unittest.TestCase):
         for protected_address in protected_addresses:
             with self.subTest(protected_address=protected_address):
                 self.write_authority(
-                    f"{eligibility_record('eligible@local.test')}\n"
                     f"{eligibility_record(protected_address)}\n",
                 )
                 reader = server.EligibilityReader(self.authority)
 
                 self.assertEqual(
-                    server.EligibilityResult.UNAVAILABLE,
-                    reader.eligibility("eligible@local.test"),
+                    server.EligibilityResult.ELIGIBLE,
+                    reader.eligibility(protected_address),
                 )
-                self.assertFalse(
+                self.assertTrue(
                     server.EligibilityReader._is_canonical_address(
                         protected_address,
                     ),
@@ -800,64 +902,6 @@ class EligibilityReaderTest(unittest.TestCase):
                 self.authority.unlink(missing_ok=True)
                 self.authority.write_bytes(contents)
                 os.chmod(self.authority, 0o600)
-                self.assertFalse(reader.is_eligible("eligible@local.test"))
-
-    def test_blank_and_comment_parsing_matches_kotlin_whitespace_fixture(self):
-        records = []
-        for line in KOTLIN_WHITESPACE_FIXTURE_PATH.read_text(
-            encoding="ascii",
-        ).splitlines():
-            if not line or line.startswith("#"):
-                continue
-            encoded, expected = line.split(" ")
-            bounds = [int(value, 16) for value in encoded.split("-")]
-            records.append(
-                (range(bounds[0], bounds[-1] + 1), expected == "true"),
-            )
-        expected_whitespace = {
-            code_point
-            for code_points, expected in records
-            if expected
-            for code_point in code_points
-        }
-        for code_points, expected in records:
-            if not expected:
-                self.assertTrue(
-                    expected_whitespace.isdisjoint(code_points),
-                    "conflicting Kotlin whitespace fixture record",
-                )
-
-        for code_point in range(0x10000):
-            self.assertEqual(
-                code_point in expected_whitespace,
-                server.EligibilityReader._is_kotlin_whitespace(
-                    chr(code_point),
-                ),
-                f"unexpected classification for U+{code_point:04X}",
-            )
-
-        for prefix in ("\u0009", "\u00A0", "\u2007", "\u3000"):
-            with self.subTest(accepted_comment=ord(prefix)):
-                self.write_authority(
-                    f"{prefix}\n"
-                    f"{prefix}# Kotlin whitespace comment\n"
-                    f"{eligibility_record('eligible@local.test')}\n",
-                )
-                reader = server.EligibilityReader(self.authority)
-                self.assertTrue(reader.is_eligible("eligible@local.test"))
-
-        for malformed in (
-            "\u0085",
-            "\u0085# Python-only whitespace must not start a comment",
-            "\u180E# non-whitespace must not start a comment",
-            "\uFEFF# non-whitespace must not start a comment",
-        ):
-            with self.subTest(rejected_prefix=f"U+{ord(malformed[0]):04X}"):
-                self.write_authority(
-                    f"{malformed}\n"
-                    f"{eligibility_record('eligible@local.test')}\n",
-                )
-                reader = server.EligibilityReader(self.authority)
                 self.assertFalse(reader.is_eligible("eligible@local.test"))
 
     def write_authority(self, contents):

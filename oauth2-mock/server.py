@@ -107,15 +107,17 @@ class EligibilityReader:
     """Read the current Dovecot passwd-file authority without caching it."""
 
     MAX_FILE_BYTES = 1024 * 1024
-    MAX_ADDRESS_LENGTH = 254
-    MAX_LOCAL_PART_LENGTH = 64
-    MAX_DOMAIN_LENGTH = 253
-    MAX_PASSWORD_FIELD_LENGTH = 4 * 1024
-    PASSWD_DELIMITER_COUNT = 7
     EMPTY_USERDB_FIELDS = "::::::"
     PLAIN_PREFIX = "{PLAIN}"
-    LOCAL_PART = re.compile(r"[a-z0-9](?:[a-z0-9._+%-]{0,62}[a-z0-9])?")
-    DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+    LOCAL_PART_PATTERN = (
+        r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
+        r"(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+    )
+    DOMAIN_LABEL_PATTERN = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+    ADDRESS = re.compile(
+        rf"{LOCAL_PART_PATTERN}@{DOMAIN_LABEL_PATTERN}"
+        rf"(?:\.{DOMAIN_LABEL_PATTERN})+",
+    )
 
     def __init__(self, path=ELIGIBILITY_FILE):
         self._path = Path(path)
@@ -193,96 +195,42 @@ class EligibilityReader:
         )
 
     def _parse(self, contents):
-        if "\r" in contents:
-            raise ValueError("eligibility authority contains a carriage return")
-        raw_lines = contents.split("\n")
-        if contents.endswith("\n"):
-            raw_lines.pop()
         addresses = set()
-        for raw_line in raw_lines:
-            if (
-                self._is_kotlin_blank(raw_line)
-                or self._trim_kotlin_start(raw_line).startswith("#")
-            ):
-                continue
-            if (
-                raw_line.count(":") != self.PASSWD_DELIMITER_COUNT
-                or not raw_line.endswith(self.EMPTY_USERDB_FIELDS)
-            ):
+        canonical_lines = []
+        for raw_line in contents.splitlines():
+            fields = raw_line.split(":")
+            if len(fields) != 8 or any(fields[2:]):
                 raise ValueError("eligibility authority entry is invalid")
-            credential_fields = raw_line[: -len(self.EMPTY_USERDB_FIELDS)]
-            address, password_field = credential_fields.split(":", 1)
+            address, password_field = fields[:2]
+            canonical_address = address.casefold()
             if (
                 not self._is_canonical_address(address)
                 or not self._is_canonical_password_field(password_field)
-                or address in addresses
+                or canonical_address in addresses
             ):
                 raise ValueError("eligibility authority entry is invalid")
-            addresses.add(address)
+            addresses.add(canonical_address)
+            canonical_lines.append(
+                f"{address}:{password_field}{self.EMPTY_USERDB_FIELDS}",
+            )
+        canonical_document = "".join(f"{line}\n" for line in canonical_lines)
+        if contents != canonical_document:
+            raise ValueError("eligibility authority is not canonically serialized")
         return addresses
 
     @classmethod
-    def _is_kotlin_blank(cls, value):
-        return all(cls._is_kotlin_whitespace(character) for character in value)
-
-    @classmethod
-    def _trim_kotlin_start(cls, value):
-        start = 0
-        while start < len(value) and cls._is_kotlin_whitespace(value[start]):
-            start += 1
-        return value[start:]
-
-    @staticmethod
-    def _is_kotlin_whitespace(character):
-        code_point = ord(character)
-        return (
-            0x0009 <= code_point <= 0x000D
-            or 0x001C <= code_point <= 0x0020
-            or code_point == 0x00A0
-            or code_point == 0x1680
-            or 0x2000 <= code_point <= 0x200A
-            or 0x2028 <= code_point <= 0x2029
-            or code_point == 0x202F
-            or code_point == 0x205F
-            or code_point == 0x3000
-        )
-
-    @classmethod
     def _is_canonical_address(cls, address):
-        if not isinstance(address, str):
-            return False
-        if (
-            not 1 <= len(address) <= cls.MAX_ADDRESS_LENGTH
-            or address != address.lower()
-            or any(
-                ord(character) < 0x21 or ord(character) > 0x7E
-                for character in address
-            )
-            or address.count("@") != 1
-            or any(character in address for character in ':;/\\"()<>')
-        ):
-            return False
-        local_part, domain = address.split("@", 1)
-        if (
-            not 1 <= len(local_part) <= cls.MAX_LOCAL_PART_LENGTH
-            or not cls.LOCAL_PART.fullmatch(local_part)
-            or ".." in local_part
-            or not 1 <= len(domain) <= cls.MAX_DOMAIN_LENGTH
-            or (
-                domain == LOCAL_MAIL_DOMAIN
-                and local_part.split("+", 1)[0] in PROTECTED_LOCAL_PARTS
-            )
-        ):
-            return False
-        labels = domain.split(".")
-        return bool(labels) and all(cls.DOMAIN_LABEL.fullmatch(label) for label in labels)
+        return (
+            isinstance(address, str)
+            and address == address.casefold()
+            and cls.ADDRESS.fullmatch(address) is not None
+        )
 
     @classmethod
     def _is_canonical_password_field(cls, password_field):
         if (
             not isinstance(password_field, str)
             or not password_field.startswith(cls.PLAIN_PREFIX)
-            or len(password_field) > cls.MAX_PASSWORD_FIELD_LENGTH
         ):
             return False
         password = password_field.removeprefix(cls.PLAIN_PREFIX)
