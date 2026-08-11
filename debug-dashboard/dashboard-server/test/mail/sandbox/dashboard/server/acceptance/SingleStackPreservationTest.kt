@@ -15,13 +15,22 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
 import mail.sandbox.dashboard.contract.CredentialReadiness
 import mail.sandbox.dashboard.contract.FolderInfo
+import mail.sandbox.dashboard.contract.LogResponse
+import mail.sandbox.dashboard.contract.LogService
 import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.MessageSummary
 import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.server.local.LocalDashboardBackend
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationAttempt
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationConnector
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProbe
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationTransportOutcome
 
 class SingleStackPreservationTest {
     @Test
@@ -267,6 +276,173 @@ class SingleStackPreservationTest {
     }
 
     @Test
+    fun globalAndAccountLogEvidenceRejectsShapeOnlyResponses() {
+        val services = listOf(
+            LogService.DOVECOT,
+            LogService.POSTFIX,
+            LogService.OAUTH2,
+            LogService.STALWART,
+        )
+        val serviceLogs = services.associateWith { service ->
+            LogResponse(service, lines = listOf("${service.name.lowercase()} ready"))
+        }
+        val allLogs = LogResponse(
+            LogService.ALL,
+            lines = services.map { service ->
+                "[${service.name.lowercase()}] ${service.name.lowercase()} ready"
+            },
+        )
+
+        requireFunctionalGlobalLogs(allLogs, serviceLogs)
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalGlobalLogs(allLogs.copy(lines = emptyList()), serviceLogs)
+        }
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalGlobalLogs(
+                allLogs.copy(lines = allLogs.lines.filterNot { it.startsWith("[stalwart]") }),
+                serviceLogs,
+            )
+        }
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalGlobalLogs(
+                allLogs,
+                serviceLogs + (LogService.POSTFIX to LogResponse(LogService.POSTFIX, lines = emptyList())),
+            )
+        }
+
+        val account = AccountInfo(
+            address = "acceptance@local.test",
+            provider = Provider.DOVECOT,
+            protocols = listOf(MailProtocol.IMAP),
+            credentialReadiness = CredentialReadiness.READY,
+        )
+        val correlatedLine = "dovecot | auth: acceptance@local.test succeeded"
+        val probe = AuthenticationProbeResponse(
+            address = account.address,
+            provider = account.provider,
+            protocol = AuthenticationProtocol.IMAP,
+            success = true,
+            providerResponse = "Authentication succeeded",
+            correlatedLogs = listOf(correlatedLine),
+        )
+        val accountLogs = LogResponse(
+            service = LogService.DOVECOT,
+            account = account.address,
+            lines = listOf("[dovecot] $correlatedLine"),
+        )
+
+        requireFunctionalAccountLogs(account, accountLogs, probe)
+        val stalwartAccount = generatedAccount(Provider.STALWART)
+        val stalwartLine = "stalwart | accountId = 42 authentication rejected"
+        requireFunctionalAccountLogs(
+            stalwartAccount,
+            LogResponse(
+                service = LogService.STALWART,
+                account = stalwartAccount.address,
+                lines = listOf(stalwartLine),
+            ),
+            probe.copy(
+                address = stalwartAccount.address,
+                provider = Provider.STALWART,
+                protocol = AuthenticationProtocol.JMAP,
+                correlatedLogs = listOf(stalwartLine),
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalAccountLogs(account, accountLogs.copy(lines = emptyList()), probe)
+        }
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalAccountLogs(
+                account,
+                accountLogs.copy(lines = listOf("[dovecot] unrelated account")),
+                probe,
+            )
+        }
+    }
+
+    @Test
+    fun deletedCredentialVerifierUsesProviderEndpointsAndRejectsWeakEvidence() {
+        val attempts = mutableListOf<ProviderAuthenticationAttempt>()
+        val verifier = DirectDeletedAccountCredentialVerifier(
+            ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector { attempt ->
+                    attempts += attempt
+                    ProviderAuthenticationTransportOutcome.MissingAccount("Account was not found")
+                },
+            ),
+        )
+        val dovecot = generatedAccount(Provider.DOVECOT)
+        val stalwart = generatedAccount(Provider.STALWART)
+
+        verifier.requireRejected(dovecot, "former-dovecot-password")
+        verifier.requireRejected(stalwart, "former-stalwart-password")
+
+        assertEquals(ProviderAuthenticationProtocol.IMAP, attempts[0].protocol)
+        assertEquals(1143, attempts[0].endpoint.port)
+        assertTrue(attempts[0].endpoint.startTls)
+        assertEquals(ProviderAuthenticationProtocol.SMTP, attempts[1].protocol)
+        assertEquals(8587, attempts[1].endpoint.port)
+        assertFalse(attempts[1].endpoint.startTls)
+        assertTrue(attempts.all { it.address.endsWith("@local.test") })
+
+        val genericWrongPassword = DirectDeletedAccountCredentialVerifier(
+            ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector {
+                    ProviderAuthenticationTransportOutcome.WrongPassword("Authentication rejected")
+                },
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            genericWrongPassword.requireRejected(dovecot, "former-password")
+        }
+        assertFailsWith<IllegalStateException> {
+            genericWrongPassword.requireRejected(stalwart, "former-password")
+        }
+
+        val canonicalRejections = DirectDeletedAccountCredentialVerifier(
+            ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector { attempt ->
+                    when (attempt.protocol) {
+                        ProviderAuthenticationProtocol.IMAP ->
+                            ProviderAuthenticationTransportOutcome.WrongPassword(
+                                "[AUTHENTICATIONFAILED] Authentication failed",
+                            )
+                        ProviderAuthenticationProtocol.SMTP ->
+                            ProviderAuthenticationTransportOutcome.WrongPassword(
+                                "535 5.7.8 Authentication credentials invalid",
+                            )
+                        ProviderAuthenticationProtocol.POP3 -> error("Unexpected POP3 deletion probe")
+                    }
+                },
+            ),
+        )
+        canonicalRejections.requireRejected(dovecot, "former-dovecot-password")
+        canonicalRejections.requireRejected(stalwart, "former-stalwart-password")
+
+        val authenticated = DirectDeletedAccountCredentialVerifier(
+            ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector {
+                    ProviderAuthenticationTransportOutcome.Authenticated("Unexpected success")
+                },
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            authenticated.requireRejected(dovecot, "still-valid-password")
+        }
+
+        val unavailable = DirectDeletedAccountCredentialVerifier(
+            ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector {
+                    ProviderAuthenticationTransportOutcome.Unavailable("Connection refused")
+                },
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            unavailable.requireRejected(stalwart, "unproved-password")
+        }
+    }
+
+    @Test
     fun liveRunnerIsOptInSelectsOnlyTheLiveClassAndNeverStartsCompose() {
         val repositoryRoot = generateSequence(
             Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize(),
@@ -284,6 +460,17 @@ class SingleStackPreservationTest {
         assertFalse("docker-compose up" in script)
         assertFalse("COMPOSE_PROJECT_NAME=" in script)
     }
+
+    private fun generatedAccount(provider: Provider): AccountInfo = AccountInfo(
+        address = "dashboard-acceptance-${provider.name.lowercase()}@local.test",
+        provider = provider,
+        protocols = when (provider) {
+            Provider.DOVECOT -> listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP)
+            Provider.STALWART -> listOf(MailProtocol.JMAP, MailProtocol.SMTP)
+        },
+        credentialReadiness = CredentialReadiness.READY,
+        providerAccountId = if (provider == Provider.STALWART) "account-id" else null,
+    )
 
     private class TestRoot(
         users: ByteArray? = canonicalUsers("existing@local.test", "existing-password"),

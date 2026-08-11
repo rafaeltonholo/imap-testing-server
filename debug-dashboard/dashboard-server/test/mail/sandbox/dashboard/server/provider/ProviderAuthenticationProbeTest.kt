@@ -9,11 +9,15 @@ import jakarta.mail.Session
 import jakarta.mail.Store
 import jakarta.mail.Transport
 import jakarta.mail.URLName
+import java.io.EOFException
+import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CancellationException
 import java.util.Properties
 import javax.security.auth.callback.NameCallback
 import javax.security.auth.callback.PasswordCallback
+import javax.net.ssl.SSLException
+import javax.security.sasl.SaslException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -174,14 +178,16 @@ class ProviderAuthenticationProbeTest {
                 endpointOverride = ProviderAuthenticationEndpoint(
                     host = "127.0.0.1",
                     port = 8587,
-                    startTls = true,
+                    startTls = false,
                 ),
             ),
         )
 
         assertIs<AuthenticationOutcome.Authenticated>(outcome)
-        assertEquals(8587, connector.attempts.single().endpoint.port)
-        assertTrue(connector.attempts.single().authenticateOnly)
+        val attempt = connector.attempts.single()
+        assertEquals(8587, attempt.endpoint.port)
+        assertFalse(attempt.endpoint.startTls)
+        assertTrue(attempt.authenticateOnly)
     }
 
     @Test
@@ -294,6 +300,158 @@ class ProviderAuthenticationProbeTest {
                 .authenticate(passwordAttempt()),
         )
         assertEquals(1, wrappedTimeoutFactory.created.single().closeCount)
+    }
+
+    @Test
+    fun authenticationFailuresWithNestedTimeoutsAreTimedOutBeforeCredentialRejection() {
+        val secret = "timeout-secret"
+        val failures = listOf(
+            AuthenticationFailedException(
+                "authentication failed for $secret",
+                SocketTimeoutException("read timed out"),
+            ),
+            AuthenticationFailedException("authentication failed for $secret").apply {
+                setNextException(
+                    MessagingException("provider exchange failed").apply {
+                        setNextException(SocketTimeoutException("read timed out"))
+                    },
+                )
+            },
+        )
+
+        failures.forEach { failure ->
+            val factory = RecordingConnectionFactory(failure)
+            val outcome = ProviderAuthenticationProbe(
+                JakartaProviderAuthenticationConnector(factory),
+            ).probe(
+                ProviderAuthenticationRequest(
+                    ProviderAuthenticationProtocol.IMAP,
+                    ProviderAuthenticationMechanism.PASSWORD,
+                    AccountCredentials("alice@local.test", secret),
+                ),
+            )
+
+            assertIs<AuthenticationOutcome.TimedOut>(outcome)
+            assertFalse(secret in outcome.diagnostic)
+            assertEquals(1, factory.created.single().closeCount)
+        }
+    }
+
+    @Test
+    fun standardizedTemporaryAuthenticationFailuresAreUnavailableBeforeCredentialRejection() {
+        val secret = "unavailable-secret"
+        val failures = listOf(
+            ProviderAuthenticationProtocol.IMAP to AuthenticationFailedException(
+                "[UNAVAILABLE] Temporary authentication failure for $secret",
+            ),
+            ProviderAuthenticationProtocol.SMTP to AuthenticationFailedException(
+                "454 4.7.0 Temporary authentication failure for $secret",
+            ),
+            ProviderAuthenticationProtocol.SMTP to AuthenticationFailedException(
+                "",
+                MessagingException(
+                    "421 4.3.0 Authentication service unavailable for $secret",
+                ),
+            ),
+            ProviderAuthenticationProtocol.SMTP to AuthenticationFailedException(
+                "Authentication temporarily unavailable for $secret",
+            ),
+            ProviderAuthenticationProtocol.SMTP to AuthenticationFailedException(
+                "authentication failed for $secret",
+                ConnectException("connection refused"),
+            ),
+        )
+
+        failures.forEach { (protocol, failure) ->
+            val factory = RecordingConnectionFactory(failure)
+            val outcome = ProviderAuthenticationProbe(
+                JakartaProviderAuthenticationConnector(factory),
+            ).probe(
+                ProviderAuthenticationRequest(
+                    protocol,
+                    ProviderAuthenticationMechanism.PASSWORD,
+                    AccountCredentials("alice@local.test", secret),
+                ),
+            )
+
+            assertIs<AuthenticationOutcome.Unavailable>(outcome)
+            assertFalse(secret in outcome.diagnostic)
+            assertEquals(1, factory.created.single().closeCount)
+        }
+    }
+
+    @Test
+    fun nestedNonSaslIoFailuresAreUnavailableBeforeCredentialRejection() {
+        listOf(
+            EOFException("provider closed the authentication exchange"),
+            SSLException("TLS peer shut down during authentication"),
+        ).forEach { nestedFailure ->
+            val factory = RecordingConnectionFactory(
+                AuthenticationFailedException("authentication failed", nestedFailure),
+            )
+
+            val outcome = JakartaProviderAuthenticationConnector(factory)
+                .authenticate(passwordAttempt())
+
+            assertIs<ProviderAuthenticationTransportOutcome.Unavailable>(outcome)
+            assertEquals(1, factory.created.single().closeCount)
+        }
+    }
+
+    @Test
+    fun explicitServerFailureResponseCodesAreUnavailableBeforeCredentialRejection() {
+        listOf(
+            "[SERVERBUG] Internal server error",
+            "[SYS/TEMP] Temporary server problem",
+        ).forEach { diagnostic ->
+            val factory = RecordingConnectionFactory(
+                AuthenticationFailedException(diagnostic),
+            )
+
+            val outcome = JakartaProviderAuthenticationConnector(factory)
+                .authenticate(passwordAttempt())
+
+            assertIs<ProviderAuthenticationTransportOutcome.Unavailable>(outcome)
+            assertEquals(diagnostic, outcome.diagnostic)
+            assertEquals(1, factory.created.single().closeCount)
+        }
+    }
+
+    @Test
+    fun genericTemporaryWordingDoesNotOverrideDefinitiveCredentialOutcomes() {
+        val temporaryWrongPassword = RecordingConnectionFactory(
+            AuthenticationFailedException("temporary password rejected"),
+        )
+        val missingAccount = RecordingConnectionFactory(
+            AuthenticationFailedException("unknown user"),
+        )
+
+        assertIs<ProviderAuthenticationTransportOutcome.WrongPassword>(
+            JakartaProviderAuthenticationConnector(temporaryWrongPassword)
+                .authenticate(passwordAttempt()),
+        )
+        assertIs<ProviderAuthenticationTransportOutcome.MissingAccount>(
+            JakartaProviderAuthenticationConnector(missingAccount)
+                .authenticate(passwordAttempt()),
+        )
+        assertEquals(1, temporaryWrongPassword.created.single().closeCount)
+        assertEquals(1, missingAccount.created.single().closeCount)
+    }
+
+    @Test
+    fun nestedSaslFailureRemainsADefinitiveCredentialRejection() {
+        val factory = RecordingConnectionFactory(
+            AuthenticationFailedException(
+                "authentication failed",
+                SaslException("invalid credentials"),
+            ),
+        )
+
+        val outcome = JakartaProviderAuthenticationConnector(factory)
+            .authenticate(passwordAttempt())
+
+        assertIs<ProviderAuthenticationTransportOutcome.WrongPassword>(outcome)
+        assertEquals(1, factory.created.single().closeCount)
     }
 
     @Test

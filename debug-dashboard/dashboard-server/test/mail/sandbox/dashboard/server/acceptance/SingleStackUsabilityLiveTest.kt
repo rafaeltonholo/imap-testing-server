@@ -55,6 +55,13 @@ import mail.sandbox.dashboard.contract.Routes
 import mail.sandbox.dashboard.server.api.DashboardApiError
 import mail.sandbox.dashboard.server.api.dashboardApiRoutes
 import mail.sandbox.dashboard.server.local.LocalDashboardBackend
+import mail.sandbox.dashboard.server.provider.AccountCredentials
+import mail.sandbox.dashboard.server.provider.AuthenticationOutcome
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationEndpoint
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationMechanism
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProbe
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationRequest
 
 /**
  * Explicitly selected, destructive-to-generated-resources-only acceptance against the root stack.
@@ -74,7 +81,7 @@ class SingleStackUsabilityLiveTest {
             testApplication {
                 application { routing { dashboardApiRoutes(backend) } }
                 val api = LiveDashboardApi(client)
-                api.assertRootLogsLoad()
+                api.assertRootLogsFunctional()
                 val initial = api.listAccounts()
                 assertEquals(
                     Provider.entries,
@@ -107,23 +114,30 @@ class SingleStackUsabilityLiveTest {
     }
 }
 
-private class LiveDashboardApi(private val client: HttpClient) {
+private class LiveDashboardApi(
+    private val client: HttpClient,
+    private val deletedCredentialVerifier: DirectDeletedAccountCredentialVerifier =
+        DirectDeletedAccountCredentialVerifier(),
+) {
     suspend fun listAccounts(): AccountListResponse =
         client.get(Routes.ACCOUNTS).decode(HttpStatusCode.OK)
 
-    suspend fun assertRootLogsLoad() {
-        listOf(
+    suspend fun assertRootLogsFunctional() {
+        val services = listOf(
             LogService.DOVECOT,
             LogService.POSTFIX,
             LogService.OAUTH2,
             LogService.STALWART,
-        ).forEach { service ->
-            val response = client.get(
+        )
+        val serviceLogs = services.associateWith { service ->
+            client.get(
                 "${Routes.LOGS}?service=${service.name}",
             ).decode<LogResponse>(HttpStatusCode.OK)
-            assertEquals(service, response.service)
-            assertEquals(null, response.account)
         }
+        val allLogs = client.get(
+            "${Routes.LOGS}?service=${LogService.ALL.name}",
+        ).decode<LogResponse>(HttpStatusCode.OK)
+        requireFunctionalGlobalLogs(allLogs, serviceLogs)
     }
 
     suspend fun runProviderWorkflow(
@@ -164,15 +178,6 @@ private class LiveDashboardApi(private val client: HttpClient) {
                     afterCreate.accounts.any { it.sameIdentity(identity) }
                 },
                 "Creating an acceptance account must not hide pre-existing inventory",
-            )
-
-            val accountLogs = client.get(
-                withProviderId(Routes.accountLogs(address, provider), providerAccountId),
-            ).decode<LogResponse>(HttpStatusCode.OK)
-            assertEquals(address, accountLogs.account)
-            assertEquals(
-                if (provider == Provider.DOVECOT) LogService.DOVECOT else LogService.STALWART,
-                accountLogs.service,
             )
 
             val folderA = createFolder(
@@ -257,6 +262,16 @@ private class LiveDashboardApi(private val client: HttpClient) {
                 rememberedPassword = originalPassword,
                 wrongPassword = wrongPassword,
             )
+            val accountLogProbe = assertProbe(
+                account,
+                account.primaryProtocol(),
+                credentialOverride = null,
+                expectedSuccess = true,
+            )
+            val accountLogs = client.get(
+                withProviderId(Routes.accountLogs(address, provider), providerAccountId),
+            ).decode<LogResponse>(HttpStatusCode.OK)
+            requireFunctionalAccountLogs(account, accountLogs, accountLogProbe)
 
             val adoption = client.post(
                 withProviderId(
@@ -326,6 +341,7 @@ private class LiveDashboardApi(private val client: HttpClient) {
             deleteAccount(environment, account)
             accountDeleted = true
             assertFalse(listAccounts().accounts.any { it.sameIdentity(account) })
+            deletedCredentialVerifier.requireRejected(account, changedPassword)
             assertAuthenticationRemoved(account)
             val afterDelete = listAccounts()
             assertTrue(
@@ -598,6 +614,120 @@ private class LiveDashboardApi(private val client: HttpClient) {
                 account.providerAccountId,
             ),
         ).decode<OperationResponse>(HttpStatusCode.OK).also { assertTrue(it.success, it.message) }
+    }
+}
+
+internal fun requireFunctionalGlobalLogs(
+    allLogs: LogResponse,
+    serviceLogs: Map<LogService, LogResponse>,
+) {
+    val expectedServices = listOf(
+        LogService.DOVECOT,
+        LogService.POSTFIX,
+        LogService.OAUTH2,
+        LogService.STALWART,
+    )
+    check(allLogs.service == LogService.ALL && allLogs.account == null) {
+        "Global logs must identify the unscoped ALL service"
+    }
+    check(allLogs.lines.isNotEmpty()) { "Global ALL logs must contain provider output" }
+    check(serviceLogs.keys == expectedServices.toSet()) {
+        "Global log proof must include every root mail service exactly once"
+    }
+    expectedServices.forEach { service ->
+        val response = requireNotNull(serviceLogs[service])
+        check(response.service == service && response.account == null) {
+            "Global ${service.name} logs returned inconsistent metadata"
+        }
+        check(response.lines.isNotEmpty()) {
+            "Global ${service.name} logs must contain provider output"
+        }
+        val prefix = "[${service.name.lowercase()}] "
+        check(allLogs.lines.any { combined ->
+            combined.startsWith(prefix) && response.lines.any { line -> combined == prefix + line }
+        }) {
+            "Global ALL logs did not aggregate observable ${service.name} output"
+        }
+    }
+}
+
+internal fun requireFunctionalAccountLogs(
+    account: AccountInfo,
+    logs: LogResponse,
+    probe: AuthenticationProbeResponse,
+) {
+    val expectedService = when (account.provider) {
+        Provider.DOVECOT -> LogService.DOVECOT
+        Provider.STALWART -> LogService.STALWART
+    }
+    check(logs.service == expectedService && logs.account == account.address) {
+        "Account logs returned inconsistent provider identity"
+    }
+    check(
+        probe.address == account.address &&
+            probe.provider == account.provider &&
+            probe.success &&
+            probe.correlatedLogs.isNotEmpty(),
+    ) {
+        "Account log proof requires a successful, independently correlated authentication probe"
+    }
+    check(logs.lines.isNotEmpty()) { "Account logs must contain provider output" }
+    check(logs.lines.any { accountLine ->
+        probe.correlatedLogs.any { probeLine ->
+            accountLine == probeLine || accountLine.endsWith(" $probeLine")
+        }
+    }) {
+        "Account logs did not contain output observed from the exact account authentication probe"
+    }
+}
+
+internal class DirectDeletedAccountCredentialVerifier(
+    private val probe: ProviderAuthenticationProbe = ProviderAuthenticationProbe(),
+) {
+    fun requireRejected(account: AccountInfo, formerPassword: String) {
+        require(formerPassword.isNotBlank()) { "Former account password is absent" }
+        val request = when (account.provider) {
+            Provider.DOVECOT -> ProviderAuthenticationRequest(
+                protocol = ProviderAuthenticationProtocol.IMAP,
+                mechanism = ProviderAuthenticationMechanism.PASSWORD,
+                credentials = AccountCredentials(account.address, password = formerPassword),
+            )
+            Provider.STALWART -> ProviderAuthenticationRequest(
+                protocol = ProviderAuthenticationProtocol.SMTP,
+                mechanism = ProviderAuthenticationMechanism.PASSWORD,
+                credentials = AccountCredentials(account.address, password = formerPassword),
+                endpointOverride = ProviderAuthenticationEndpoint(
+                    host = "127.0.0.1",
+                    port = STALWART_SUBMISSION_PORT,
+                    startTls = false,
+                ),
+            )
+        }
+        val outcome = probe.probe(request)
+        check(formerPassword !in outcome.diagnostic) {
+            "Deleted account credential leaked into the provider diagnostic"
+        }
+        val definitiveRejection = when (outcome) {
+            is AuthenticationOutcome.MissingAccount -> true
+            is AuthenticationOutcome.WrongPassword -> when (request.protocol) {
+                ProviderAuthenticationProtocol.IMAP ->
+                    outcome.diagnostic.contains(IMAP_AUTHENTICATION_FAILED, ignoreCase = true)
+                ProviderAuthenticationProtocol.SMTP ->
+                    SMTP_AUTHENTICATION_FAILED.containsMatchIn(outcome.diagnostic)
+                ProviderAuthenticationProtocol.POP3 -> false
+            }
+            else -> false
+        }
+        check(definitiveRejection) {
+            "Provider-level credential rejection was not proven after deleting " +
+                "${account.provider.name} ${account.address}: ${outcome.diagnostic}"
+        }
+    }
+
+    private companion object {
+        const val STALWART_SUBMISSION_PORT = 8587
+        const val IMAP_AUTHENTICATION_FAILED = "[AUTHENTICATIONFAILED]"
+        val SMTP_AUTHENTICATION_FAILED = Regex("(?m)^\\s*535(?:[ -]|$)")
     }
 }
 

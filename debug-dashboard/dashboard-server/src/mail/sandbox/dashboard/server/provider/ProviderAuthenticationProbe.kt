@@ -5,10 +5,12 @@ import jakarta.mail.MessagingException
 import jakarta.mail.Session
 import jakarta.mail.Store
 import jakarta.mail.Transport
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.security.Provider
 import java.security.Security
+import java.util.ArrayDeque
 import java.util.Properties
 import javax.security.auth.callback.Callback
 import javax.security.auth.callback.CallbackHandler
@@ -217,10 +219,15 @@ internal class JakartaProviderAuthenticationConnector(
             ProviderAuthenticationTransportOutcome.Authenticated("Authentication succeeded")
         } catch (failure: AuthenticationFailedException) {
             val diagnostic = failure.providerDiagnostic()
-            if (diagnostic.indicatesMissingAccount()) {
-                ProviderAuthenticationTransportOutcome.MissingAccount(diagnostic)
-            } else {
-                ProviderAuthenticationTransportOutcome.WrongPassword(diagnostic)
+            when {
+                failure.hasCause<SocketTimeoutException>() ->
+                    ProviderAuthenticationTransportOutcome.TimedOut(diagnostic)
+                failure.hasNestedProviderIoFailure() ||
+                    failure.indicatesProviderUnavailable(attempt.protocol) ->
+                    ProviderAuthenticationTransportOutcome.Unavailable(diagnostic)
+                failure.providerFailureMessages().any(String::indicatesMissingAccount) ->
+                    ProviderAuthenticationTransportOutcome.MissingAccount(diagnostic)
+                else -> ProviderAuthenticationTransportOutcome.WrongPassword(diagnostic)
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -451,17 +458,43 @@ private fun Throwable.providerDiagnostic(): String {
 }
 
 private inline fun <reified T : Throwable> Throwable.hasCause(): Boolean {
-    var current: Throwable? = this
-    val seen = HashSet<Throwable>()
-    while (current != null && seen.add(current)) {
-        if (current is T) return true
-        current = if (current is MessagingException && current.nextException != null) {
-            current.nextException
-        } else {
-            current.cause
+    return providerFailureChain().any { it is T }
+}
+
+private fun Throwable.hasNestedProviderIoFailure(): Boolean = providerFailureChain()
+    .drop(1)
+    .any { it is IOException && it !is SaslException }
+
+private fun Throwable.indicatesProviderUnavailable(
+    protocol: ProviderAuthenticationProtocol,
+): Boolean = providerFailureMessages().any { message ->
+    val normalized = message.lowercase()
+    PROVIDER_UNAVAILABLE_RESPONSE_MARKERS.any(normalized::contains) ||
+        EXPLICIT_PROVIDER_UNAVAILABLE_PHRASES.any(normalized::contains) ||
+        (
+            protocol == ProviderAuthenticationProtocol.SMTP &&
+                SMTP_TEMPORARY_RESPONSE.containsMatchIn(message)
+        )
+}
+
+private fun Throwable.providerFailureMessages(): Sequence<String> = providerFailureChain()
+    .mapNotNull(Throwable::message)
+    .filter(String::isNotBlank)
+
+private fun Throwable.providerFailureChain(): Sequence<Throwable> {
+    val root = this
+    return sequence {
+        val pending = ArrayDeque<Throwable>().apply { add(root) }
+        val seen = HashSet<Throwable>()
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            if (!seen.add(current)) continue
+            yield(current)
+            val next = (current as? MessagingException)?.nextException
+            next?.let(pending::addLast)
+            current.cause?.takeIf { it !== next }?.let(pending::addLast)
         }
     }
-    return false
 }
 
 private fun String.indicatesMissingAccount(): Boolean {
@@ -480,3 +513,15 @@ private fun boundDiagnostic(value: String, secret: String): String = (
     .ifEmpty { "Provider authentication failed" }
 
 private const val MAXIMUM_DIAGNOSTIC_CHARACTERS = 512
+private val PROVIDER_UNAVAILABLE_RESPONSE_MARKERS = listOf(
+    "[unavailable]",
+    "[serverbug]",
+    "[sys/temp]",
+)
+private val EXPLICIT_PROVIDER_UNAVAILABLE_PHRASES = listOf(
+    "authentication temporarily unavailable",
+    "authentication service unavailable",
+    "temporary authentication failure",
+    "temporarily unable to authenticate",
+)
+private val SMTP_TEMPORARY_RESPONSE = Regex("(?m)^\\s*4\\d{2}(?:[ -]|$)")
