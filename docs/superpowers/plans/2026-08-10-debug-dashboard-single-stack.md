@@ -442,7 +442,12 @@ interface DovecotMailboxClient {
     fun createFolder(credentials: AccountCredentials, name: String): DovecotFolder
     fun deleteFolder(credentials: AccountCredentials, id: String)
     fun listMessages(credentials: AccountCredentials, folder: String): List<DovecotMessageSummary>
-    fun readMessage(credentials: AccountCredentials, folder: String, uid: Long): String
+    fun readMessage(
+        credentials: AccountCredentials,
+        folder: String,
+        uid: Long,
+        expectedState: DovecotMailboxState,
+    ): String
     fun mutate(credentials: AccountCredentials, command: DovecotMessageCommand)
 }
 ```
