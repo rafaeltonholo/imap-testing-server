@@ -6,6 +6,8 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class DashboardContractSerializationTest {
     private val json = Json
@@ -214,6 +216,28 @@ class DashboardContractSerializationTest {
             ),
         )
         assertRoundTrip(operation)
+    }
+
+    @Test
+    fun generatedMessageTargetRejectsASameAddressReplacementIdentity() {
+        val original = AccountInfo(
+            address = "dev@local.test",
+            provider = Provider.STALWART,
+            protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+            credentialReadiness = CredentialReadiness.READY,
+            providerAccountId = "original-account",
+        )
+        val replacement = original.copy(providerAccountId = "replacement-account")
+        val request = GenerateMessageRequest(
+            targetAccount = original.address,
+            provider = original.provider,
+            providerAccountId = original.providerAccountId,
+            sourceType = MessageSourceType.RANDOM,
+        )
+
+        assertTrue(request.targetsExactly(original))
+        assertFalse(request.targetsExactly(replacement))
+        assertEquals("original-account", request.providerAccountId)
     }
 
     @Test

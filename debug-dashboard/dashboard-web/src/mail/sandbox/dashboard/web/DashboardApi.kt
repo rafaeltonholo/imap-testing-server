@@ -40,6 +40,7 @@ import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.contract.Routes
 import mail.sandbox.dashboard.contract.requireAchievedOperation
 import mail.sandbox.dashboard.contract.support.LatestRequestTracker
+import mail.sandbox.dashboard.contract.targetsExactly
 import org.w3c.fetch.Headers
 import org.w3c.fetch.RequestInit
 
@@ -519,10 +520,11 @@ internal class DashboardController(
 
     suspend fun changePassword(newPassword: String) = operation("Changing password") {
         val target = requireNotNull(selectedTarget)
+        lastReceipt = null
         val result = api.changePassword(target, ChangePasswordRequest(newPassword))
-            .requireAchievedOperation()
-        lastReceipt = result.operation.message
         refreshAccounts(target)
+        result.requireAchievedOperation()
+        lastReceipt = result.operation.message
     }
 
     suspend fun deleteSelectedAccount() = operation("Deleting account") {
@@ -551,11 +553,9 @@ internal class DashboardController(
     }
 
     suspend fun generateMessage(request: GenerateMessageRequest) = operation(request.deliveryMode.busyLabel()) {
-        val targetAccount = accounts.firstOrNull {
-            it.address == request.targetAccount && it.provider == request.provider
-        } ?: throw IllegalStateException("Target account is no longer available; refresh accounts")
-        val targetedRequest = request.copy(providerAccountId = targetAccount.providerAccountId)
-        val result = api.generateMessage(targetedRequest)
+        val targetAccount = accounts.firstOrNull(request::targetsExactly)
+            ?: throw IllegalStateException("Target account is no longer available; refresh accounts")
+        val result = api.generateMessage(request)
         lastReceipt = buildString {
             append(request.provider.displayName())
             append(" · ")

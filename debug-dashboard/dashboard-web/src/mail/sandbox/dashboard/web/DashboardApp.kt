@@ -2123,6 +2123,7 @@ private fun GenerateMessageDialog(
                         GenerateMessageRequest(
                             targetAccount = resolvedTarget.address,
                             provider = resolvedTarget.provider,
+                            providerAccountId = resolvedTarget.providerAccountId,
                             sourceType = sourceType,
                             deliveryMode = deliveryMode,
                             content = content.takeIf { sourceType != MessageSourceType.RANDOM },

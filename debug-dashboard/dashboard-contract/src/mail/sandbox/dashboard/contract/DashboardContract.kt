@@ -206,6 +206,11 @@ data class GenerateMessageRequest(
     val fromAddress: String? = null,
 )
 
+fun GenerateMessageRequest.targetsExactly(account: AccountInfo): Boolean =
+    targetAccount == account.address &&
+        provider == account.provider &&
+        providerAccountId == account.providerAccountId
+
 @Serializable
 data class GenerateMessageResponse(
     val messageIds: List<String>,

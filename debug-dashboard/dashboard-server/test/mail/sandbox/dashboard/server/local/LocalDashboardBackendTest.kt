@@ -1,7 +1,11 @@
 package mail.sandbox.dashboard.server.local
 
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -31,6 +35,202 @@ import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.contract.ProviderStatus
 
 class LocalDashboardBackendTest {
+    @Test
+    fun providerListingsStartConcurrentlyWhileResultsStayDeterministic() = runBlocking {
+        val dovecotStarted = CompletableDeferred<Unit>()
+        val stalwartStarted = CompletableDeferred<Unit>()
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            beforeList = {
+                dovecotStarted.complete(Unit)
+                withTimeout(250) { stalwartStarted.await() }
+            }
+            accounts += AccountInfo(
+                address = "zeta@local.test",
+                provider = Provider.DOVECOT,
+                protocols = listOf(MailProtocol.IMAP),
+                credentialReadiness = CredentialReadiness.READY,
+            )
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            beforeList = {
+                stalwartStarted.complete(Unit)
+                withTimeout(250) { dovecotStarted.await() }
+            }
+            accounts += AccountInfo(
+                address = "alpha@local.test",
+                provider = Provider.STALWART,
+                protocols = listOf(MailProtocol.JMAP),
+                credentialReadiness = CredentialReadiness.READY,
+                providerAccountId = "stalwart-alpha",
+            )
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+        )
+
+        val response = backend.listAccounts()
+
+        assertEquals(
+            listOf("alpha@local.test", "zeta@local.test"),
+            response.accounts.map(AccountInfo::address),
+        )
+        assertEquals(
+            Provider.entries,
+            response.providerStatuses.map(ProviderStatus::provider),
+        )
+    }
+
+    @Test
+    fun providerDeadlinePreservesHealthyResultsAndTimedOutProviderFallback() = runBlocking {
+        val dovecotStarted = CompletableDeferred<Unit>()
+        val dovecotInterrupted = CompletableDeferred<Unit>()
+        val stalwartStarted = CompletableDeferred<Unit>()
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            beforeList = {
+                dovecotStarted.complete(Unit)
+                try {
+                    Thread.sleep(750)
+                } finally {
+                    dovecotInterrupted.complete(Unit)
+                }
+            }
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            beforeList = { stalwartStarted.complete(Unit) }
+            accounts += AccountInfo(
+                address = "live-stalwart@local.test",
+                provider = Provider.STALWART,
+                protocols = listOf(MailProtocol.JMAP),
+                credentialReadiness = CredentialReadiness.READY,
+                providerAccountId = "live-stalwart",
+            )
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+            cachedAccounts = {
+                listOf(
+                    LocalAccountRecord(
+                        provider = Provider.DOVECOT,
+                        address = "cached-dovecot@local.test",
+                        password = "cached-password",
+                        protocols = listOf(MailProtocol.IMAP),
+                    ),
+                )
+            },
+            providerListTimeoutMillis = 50,
+        )
+
+        val response = withTimeout(500) { backend.listAccounts() }
+
+        assertTrue(dovecotStarted.isCompleted)
+        assertTrue(stalwartStarted.isCompleted)
+        withTimeout(500) { dovecotInterrupted.await() }
+        assertEquals(
+            listOf("cached-dovecot@local.test", "live-stalwart@local.test"),
+            response.accounts.map(AccountInfo::address),
+        )
+        assertTrue(response.accounts.first().stale)
+        assertFalse(response.accounts.last().stale)
+        assertEquals(
+            listOf(ProviderAvailability.UNAVAILABLE, ProviderAvailability.READY),
+            response.providerStatuses.map(ProviderStatus::availability),
+        )
+        assertTrue("timed out" in response.providerStatuses.first().message.orEmpty())
+        assertEquals(Provider.entries, response.providerStatuses.map(ProviderStatus::provider))
+    }
+
+    @Test
+    fun parentCancellationStopsEveryConcurrentProviderListing() = runBlocking {
+        val dovecotStarted = CompletableDeferred<Unit>()
+        val stalwartStarted = CompletableDeferred<Unit>()
+        val dovecotCancelled = CompletableDeferred<Unit>()
+        val stalwartCancelled = CompletableDeferred<Unit>()
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            beforeList = {
+                dovecotStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    dovecotCancelled.complete(Unit)
+                }
+            }
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            beforeList = {
+                stalwartStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    stalwartCancelled.complete(Unit)
+                }
+            }
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+            providerListTimeoutMillis = 10_000,
+        )
+        val listing = async { backend.listAccounts() }
+        withTimeout(500) {
+            dovecotStarted.await()
+            stalwartStarted.await()
+        }
+
+        listing.cancel(CancellationException("caller stopped listing"))
+
+        val cancellation = assertFailsWith<CancellationException> { listing.await() }
+        assertEquals("caller stopped listing", cancellation.message)
+        withTimeout(500) {
+            dovecotCancelled.await()
+            stalwartCancelled.await()
+        }
+    }
+
+    @Test
+    fun providerOwnedTimeoutDoesNotCancelAHealthySibling() = runBlocking {
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            beforeList = { withTimeout(25) { awaitCancellation() } }
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            accounts += AccountInfo(
+                address = "live-stalwart@local.test",
+                provider = Provider.STALWART,
+                protocols = listOf(MailProtocol.JMAP),
+                credentialReadiness = CredentialReadiness.READY,
+                providerAccountId = "live-stalwart",
+            )
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+            cachedAccounts = {
+                listOf(
+                    LocalAccountRecord(
+                        provider = Provider.DOVECOT,
+                        address = "cached-dovecot@local.test",
+                        password = "cached-password",
+                        protocols = listOf(MailProtocol.IMAP),
+                    ),
+                )
+            },
+            providerListTimeoutMillis = 500,
+        )
+
+        val response = backend.listAccounts()
+
+        assertEquals(
+            listOf(ProviderAvailability.UNAVAILABLE, ProviderAvailability.READY),
+            response.providerStatuses.map(ProviderStatus::availability),
+        )
+        assertEquals(
+            listOf("cached-dovecot@local.test", "live-stalwart@local.test"),
+            response.accounts.map(AccountInfo::address),
+        )
+        assertTrue(response.accounts.first().stale)
+    }
+
     @Test
     fun internalProbeRedactionMetadataDoesNotRenderSecrets() {
         val secret = "internal-redaction-canary"
@@ -501,11 +701,13 @@ private class RecordingProvider(
     var listFailure: RuntimeException? = null
     var statusFailure: RuntimeException? = null
     var status = ProviderStatus(provider, ProviderAvailability.READY)
+    var beforeList: suspend () -> Unit = {}
     val probeRequests = mutableListOf<AuthenticationProbeRequest>()
     var probeResponse = "authentication failed"
     var probeSecrets = emptyList<String>()
 
     override suspend fun listAccounts(): List<AccountInfo> {
+        beforeList()
         listFailure?.let { throw it }
         return accounts
     }

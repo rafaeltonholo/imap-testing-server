@@ -1,8 +1,25 @@
 package mail.sandbox.dashboard.server.local
 
 import java.nio.file.Path
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AccountListResponse
@@ -149,6 +166,7 @@ internal class LocalDashboardBackend(
     private val cachedAccounts: () -> List<LocalAccountRecord> = { emptyList() },
     private val authenticationLogPollAttempts: Int = 3,
     private val authenticationLogPollDelayMillis: Long = 50,
+    private val providerListTimeoutMillis: Long = PROVIDER_LIST_TIMEOUT_MILLIS,
 ) : DashboardBackend, AutoCloseable {
     private val providers: Map<Provider, LocalProviderOperations> = providers.toMap()
 
@@ -163,9 +181,12 @@ internal class LocalDashboardBackend(
         require(authenticationLogPollDelayMillis in 0..1_000) {
             "Authentication log polling delay must be bounded"
         }
+        require(providerListTimeoutMillis in 1..10_000) {
+            "Provider account listing timeout must be bounded"
+        }
     }
 
-    override suspend fun listAccounts(): AccountListResponse {
+    override suspend fun listAccounts(): AccountListResponse = coroutineScope {
         val cached = try {
             cachedAccounts()
         } catch (cancellation: CancellationException) {
@@ -173,49 +194,109 @@ internal class LocalDashboardBackend(
         } catch (_: Exception) {
             emptyList()
         }
-        val accounts = mutableListOf<AccountInfo>()
-        val statuses = mutableListOf<ProviderStatus>()
-        Provider.entries.forEach { provider ->
-            val operations = providers[provider]
-            if (operations == null) {
-                val message = "${provider.displayName()} is not configured"
-                statuses += ProviderStatus(provider, ProviderAvailability.UNAVAILABLE, message)
-                accounts += staleAccounts(cached, provider, message)
-            } else {
-                try {
-                    val live = operations.listAccounts()
-                    require(live.all { it.provider == provider }) {
-                        "${provider.displayName()} returned an account for another provider"
-                    }
-                    val status = operations.providerStatus()
-                    require(status.provider == provider) {
-                        "${provider.displayName()} returned an inconsistent provider status"
-                    }
-                    accounts += live
-                    statuses += status
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (failure: Exception) {
-                    val message = failure.message
-                        ?.take(PROVIDER_STATUS_MESSAGE_LIMIT)
-                        ?.ifBlank { null }
-                        ?: "${provider.displayName()} account listing failed"
-                    statuses += ProviderStatus(
-                        provider = provider,
-                        availability = ProviderAvailability.UNAVAILABLE,
-                        message = message,
-                    )
-                    accounts += staleAccounts(cached, provider, message)
-                }
-            }
-        }
-        return AccountListResponse(
-            accounts = accounts.sortedWith(
+        val results = Provider.entries.map { provider ->
+            async { listProviderAccounts(provider, cached) }
+        }.awaitAll()
+        AccountListResponse(
+            accounts = results.flatMap(ProviderAccountResult::accounts).sortedWith(
                 compareBy(AccountInfo::address, { it.provider.ordinal }),
             ),
-            providerStatuses = statuses,
+            providerStatuses = results.map(ProviderAccountResult::status),
         )
     }
+
+    private suspend fun listProviderAccounts(
+        provider: Provider,
+        cached: List<LocalAccountRecord>,
+    ): ProviderAccountResult {
+        val operations = providers[provider]
+        if (operations == null) {
+            val message = "${provider.displayName()} is not configured"
+            return unavailableProviderAccounts(provider, cached, message)
+        }
+        val task = try {
+            ProviderAccountWorkers.submit(provider) {
+                val live = operations.listAccounts()
+                require(live.all { it.provider == provider }) {
+                    "${provider.displayName()} returned an account for another provider"
+                }
+                val status = operations.providerStatus()
+                require(status.provider == provider) {
+                    "${provider.displayName()} returned an inconsistent provider status"
+                }
+                ProviderAccountResult(live, status)
+            }
+        } catch (_: RejectedExecutionException) {
+            currentCoroutineContext().ensureActive()
+            return unavailableProviderAccounts(
+                provider,
+                cached,
+                "${provider.displayName()} account listing is still running",
+            )
+        }
+        return try {
+            runInterruptible(Dispatchers.IO) {
+                task.get(providerListTimeoutMillis, TimeUnit.MILLISECONDS)
+            }
+        } catch (_: TimeoutException) {
+            task.cancel(true)
+            currentCoroutineContext().ensureActive()
+            unavailableProviderAccounts(
+                provider,
+                cached,
+                "${provider.displayName()} account listing timed out after " +
+                    "$providerListTimeoutMillis ms",
+            )
+        } catch (failure: ExecutionException) {
+            when (val cause = failure.unwrapExecutionFailure()) {
+                is TimeoutCancellationException -> {
+                    currentCoroutineContext().ensureActive()
+                    unavailableProviderAccounts(provider, cached, cause)
+                }
+                is CancellationException -> throw cause
+                is Exception -> {
+                    currentCoroutineContext().ensureActive()
+                    unavailableProviderAccounts(provider, cached, cause)
+                }
+                else -> throw cause
+            }
+        } catch (interrupted: InterruptedException) {
+            task.cancel(true)
+            currentCoroutineContext().ensureActive()
+            unavailableProviderAccounts(provider, cached, interrupted)
+        } catch (cancellation: CancellationException) {
+            task.cancel(true)
+            throw cancellation
+        } catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            unavailableProviderAccounts(provider, cached, failure)
+        }
+    }
+
+    private fun unavailableProviderAccounts(
+        provider: Provider,
+        cached: List<LocalAccountRecord>,
+        failure: Exception,
+    ): ProviderAccountResult {
+        val message = failure.message
+            ?.take(PROVIDER_STATUS_MESSAGE_LIMIT)
+            ?.ifBlank { null }
+            ?: "${provider.displayName()} account listing failed"
+        return unavailableProviderAccounts(provider, cached, message)
+    }
+
+    private fun unavailableProviderAccounts(
+        provider: Provider,
+        cached: List<LocalAccountRecord>,
+        message: String,
+    ): ProviderAccountResult = ProviderAccountResult(
+        accounts = staleAccounts(cached, provider, message),
+        status = ProviderStatus(
+            provider = provider,
+            availability = ProviderAvailability.UNAVAILABLE,
+            message = message,
+        ),
+    )
 
     override suspend fun createAccount(request: CreateAccountRequest): AccountInfo =
         operations(request.provider).createAccount(request)
@@ -436,6 +517,7 @@ internal class LocalDashboardBackend(
         }
 
         private const val AUTHENTICATION_LOG_LIMIT = 500
+        private const val PROVIDER_LIST_TIMEOUT_MILLIS = 2_000L
         private const val PROVIDER_STATUS_MESSAGE_LIMIT = 240
     }
 
@@ -455,6 +537,45 @@ internal class LocalDashboardBackend(
         )
     }
 }
+
+private data class ProviderAccountResult(
+    val accounts: List<AccountInfo>,
+    val status: ProviderStatus,
+)
+
+/**
+ * One daemon worker and no queue per provider keeps blocking native discovery bounded. A timed-out
+ * call may finish under its protocol-native timeout, but it cannot multiply threads or delay the
+ * other provider; a refresh while it is still running receives an immediate unavailable result.
+ */
+private object ProviderAccountWorkers {
+    private val workers = Provider.entries.associateWith { provider ->
+        ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            SynchronousQueue(),
+            { task ->
+                Thread(
+                    task,
+                    "dashboard-${provider.name.lowercase()}-account-listing",
+                ).apply { isDaemon = true }
+            },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+    }
+
+    fun <T> submit(provider: Provider, action: suspend () -> T): Future<T> =
+        workers.getValue(provider).submit(Callable { runBlocking { action() } })
+}
+
+private tailrec fun Throwable.unwrapExecutionFailure(): Throwable =
+    if (this is ExecutionException && cause != null) {
+        requireNotNull(cause).unwrapExecutionFailure()
+    } else {
+        this
+    }
 
 private fun AuthenticationProbeRequest.logService(): LogService = when (provider) {
     Provider.STALWART -> LogService.STALWART
