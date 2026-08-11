@@ -167,13 +167,23 @@ internal class LocalDashboardBackend(
     private val authenticationLogPollAttempts: Int = 3,
     private val authenticationLogPollDelayMillis: Long = 50,
     private val providerListTimeoutMillis: Long = PROVIDER_LIST_TIMEOUT_MILLIS,
+    startupProviderStatuses: Map<Provider, ProviderStatus> = emptyMap(),
 ) : DashboardBackend, AutoCloseable {
     private val providers: Map<Provider, LocalProviderOperations> = providers.toMap()
+    private val startupProviderStatuses: Map<Provider, ProviderStatus> =
+        startupProviderStatuses.toMap()
 
     init {
         require(this.providers.isNotEmpty()) { "At least one dashboard provider is required" }
         require(this.providers.all { (key, value) -> key == value.provider }) {
             "Dashboard provider map is inconsistent"
+        }
+        require(
+            this.startupProviderStatuses.all { (provider, status) ->
+                provider == status.provider && status.availability != ProviderAvailability.READY
+            },
+        ) {
+            "Dashboard startup provider status is inconsistent"
         }
         require(authenticationLogPollAttempts in 1..10) {
             "Authentication log polling must be bounded"
@@ -209,6 +219,14 @@ internal class LocalDashboardBackend(
         provider: Provider,
         cached: List<LocalAccountRecord>,
     ): ProviderAccountResult {
+        startupProviderStatuses[provider]?.let { status ->
+            val message = status.message
+                ?: "${provider.displayName()} is unavailable from dashboard startup"
+            return ProviderAccountResult(
+                accounts = staleAccounts(cached, provider, message),
+                status = status,
+            )
+        }
         val operations = providers[provider]
         if (operations == null) {
             val message = "${provider.displayName()} is not configured"
@@ -482,9 +500,15 @@ internal class LocalDashboardBackend(
         }
     }
 
-    private fun operations(provider: Provider): LocalProviderOperations =
-        providers[provider]
+    private fun operations(provider: Provider): LocalProviderOperations {
+        startupProviderStatuses[provider]?.let { status ->
+            throw IllegalStateException(
+                status.message ?: "${provider.displayName()} is unavailable from dashboard startup",
+            )
+        }
+        return providers[provider]
             ?: throw DashboardNotFoundException("${provider.displayName()} is not configured")
+    }
 
     private fun success(message: String): OperationResponse =
         OperationResponse(success = true, message = message)
@@ -496,22 +520,38 @@ internal class LocalDashboardBackend(
             repositoryRoot: Path = Path.of(System.getProperty("user.dir"))
                 .toAbsolutePath()
                 .normalize(),
+            environment: Map<String, String> = System.getenv(),
         ): LocalDashboardBackend {
             val catalog = LocalAccountCatalog.production(repositoryRoot)
+            val stalwartState = StalwartStartupState.fromEnvironment(
+                environment[STALWART_RUNTIME_STATE_ENV],
+            )
             return LocalDashboardBackend(
-                providers = mapOf(
-                    Provider.DOVECOT to DovecotDashboardProvider(
-                        adapter = DovecotProductAdapter.dashboard(repositoryRoot),
-                        catalog = catalog,
-                    ),
-                    Provider.STALWART to createStalwartDashboardProvider(
-                        catalog = catalog,
-                    ),
-                ),
+                providers = buildMap {
+                    put(
+                        Provider.DOVECOT,
+                        DovecotDashboardProvider(
+                            adapter = DovecotProductAdapter.dashboard(repositoryRoot),
+                            catalog = catalog,
+                        ),
+                    )
+                    if (stalwartState == StalwartStartupState.CURRENT) {
+                        put(
+                            Provider.STALWART,
+                            createStalwartDashboardProvider(catalog = catalog),
+                        )
+                    }
+                },
                 logSource = DockerComposeLogSource(repositoryRoot),
                 cachedAccounts = catalog::list,
+                startupProviderStatuses = stalwartState.providerStatus()?.let { status ->
+                    mapOf(Provider.STALWART to status)
+                }.orEmpty(),
             )
         }
+
+        internal const val STALWART_RUNTIME_STATE_ENV =
+            "DASHBOARD_STALWART_RUNTIME_STATE"
 
         private const val AUTHENTICATION_LOG_LIMIT = 500
         private const val PROVIDER_LIST_TIMEOUT_MILLIS = 2_000L
@@ -532,6 +572,48 @@ internal class LocalDashboardBackend(
             readinessMessage = message,
             stale = true,
         )
+    }
+}
+
+internal enum class StalwartStartupState {
+    CURRENT,
+    MIGRATION_REQUIRED,
+    INITIALIZATION_FAILED,
+    INVALID,
+    UNAVAILABLE,
+    ;
+
+    fun providerStatus(): ProviderStatus? = when (this) {
+        CURRENT -> null
+        MIGRATION_REQUIRED -> ProviderStatus(
+            provider = Provider.STALWART,
+            availability = ProviderAvailability.UPGRADE_REQUIRED,
+            message = "Stalwart upgrade required; follow docs/stalwart-v016-migration.md",
+        )
+        INITIALIZATION_FAILED -> ProviderStatus(
+            provider = Provider.STALWART,
+            availability = ProviderAvailability.UNAVAILABLE,
+            message = "Stalwart fresh initialization failed; inspect its failure evidence",
+        )
+        INVALID -> ProviderStatus(
+            provider = Provider.STALWART,
+            availability = ProviderAvailability.UNAVAILABLE,
+            message = "Stalwart runtime state is invalid; run debug-dashboard/stalwart-status.sh",
+        )
+        UNAVAILABLE -> ProviderStatus(
+            provider = Provider.STALWART,
+            availability = ProviderAvailability.UNAVAILABLE,
+            message = "Stalwart startup state is unavailable; use debug-dashboard/start-local.sh",
+        )
+    }
+
+    companion object {
+        fun fromEnvironment(value: String?): StalwartStartupState =
+            if (value == null) {
+                UNAVAILABLE
+            } else {
+                entries.firstOrNull { state -> state.name == value } ?: INVALID
+            }
     }
 }
 

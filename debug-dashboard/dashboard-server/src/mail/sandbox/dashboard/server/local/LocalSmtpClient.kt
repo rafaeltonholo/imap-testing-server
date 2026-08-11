@@ -12,9 +12,34 @@ import java.time.Duration
 import java.util.Base64
 import java.util.Locale
 
-internal enum class LocalSmtpEndpoint(internal val port: Int) {
-    POSTFIX(21025),
-    STALWART(8587),
+internal enum class LocalSmtpEndpoint(
+    internal val port: Int,
+    private val credentialPolicy: LocalSmtpCredentialPolicy,
+) {
+    POSTFIX_DELIVERY(1025, LocalSmtpCredentialPolicy.FORBIDDEN),
+    STALWART_SUBMISSION(8587, LocalSmtpCredentialPolicy.REQUIRED),
+    ;
+
+    fun requireCredentialRole(credentials: LocalSmtpCredentials?) {
+        require(
+            when (credentialPolicy) {
+                LocalSmtpCredentialPolicy.FORBIDDEN -> credentials == null
+                LocalSmtpCredentialPolicy.REQUIRED -> credentials != null
+            },
+        ) {
+            when (credentialPolicy) {
+                LocalSmtpCredentialPolicy.FORBIDDEN ->
+                    "Direct Postfix delivery does not accept account credentials"
+                LocalSmtpCredentialPolicy.REQUIRED ->
+                    "Authenticated SMTP submission requires account credentials"
+            }
+        }
+    }
+}
+
+private enum class LocalSmtpCredentialPolicy {
+    FORBIDDEN,
+    REQUIRED,
 }
 
 internal data class LocalSmtpCredentials(
@@ -104,6 +129,7 @@ internal class LocalSmtpClient(
         val recipient = requireAddress(envelopeRecipient)
         requireMessage(rawMessage)
         credentials?.let(::requireCredentials)
+        endpoint.requireCredentialRole(credentials)
 
         var stage = LocalSmtpStage.CONNECT
         var acceptedResult: LocalSmtpSendResult? = null
@@ -321,7 +347,7 @@ private object JvmLoopbackSmtpSocketConnector : LocalSmtpSocketConnector {
 }
 
 internal fun isApprovedLoopbackSmtpEndpoint(host: String, port: Int): Boolean =
-    host == "127.0.0.1" && port in setOf(21025, 8587)
+    host == "127.0.0.1" && port in setOf(1025, 1587, 8587)
 
 private data class SmtpReply(
     val code: Int,

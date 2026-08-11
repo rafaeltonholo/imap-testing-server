@@ -36,6 +36,105 @@ import mail.sandbox.dashboard.contract.ProviderStatus
 
 class LocalDashboardBackendTest {
     @Test
+    fun stalwartStartupStateUsesFixedValuesAndFailsClosedOnMalformedInput() {
+        assertEquals(
+            listOf(
+                "CURRENT",
+                "MIGRATION_REQUIRED",
+                "INITIALIZATION_FAILED",
+                "INVALID",
+                "UNAVAILABLE",
+            ),
+            StalwartStartupState.entries.map(StalwartStartupState::name),
+        )
+        assertEquals(StalwartStartupState.UNAVAILABLE, StalwartStartupState.fromEnvironment(null))
+        assertEquals(
+            StalwartStartupState.CURRENT,
+            StalwartStartupState.fromEnvironment("CURRENT"),
+        )
+        assertEquals(
+            StalwartStartupState.MIGRATION_REQUIRED,
+            StalwartStartupState.fromEnvironment("MIGRATION_REQUIRED"),
+        )
+        listOf("", "current", "FRESH", "READY", " CURRENT ", "unknown").forEach { value ->
+            assertEquals(
+                StalwartStartupState.INVALID,
+                StalwartStartupState.fromEnvironment(value),
+                "Expected malformed launcher state '$value' to fail closed",
+            )
+        }
+        assertEquals(null, StalwartStartupState.CURRENT.providerStatus())
+        assertEquals(
+            ProviderAvailability.UPGRADE_REQUIRED,
+            StalwartStartupState.MIGRATION_REQUIRED.providerStatus()?.availability,
+        )
+        listOf(
+            StalwartStartupState.INITIALIZATION_FAILED,
+            StalwartStartupState.INVALID,
+            StalwartStartupState.UNAVAILABLE,
+        ).forEach { state ->
+            assertEquals(ProviderAvailability.UNAVAILABLE, state.providerStatus()?.availability)
+        }
+    }
+
+    @Test
+    fun startupStatusBlocksOnlyStalwartAndRetainsItsCachedAccountsAsStale() = runBlocking {
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            accounts += AccountInfo(
+                address = "live-dovecot@local.test",
+                provider = Provider.DOVECOT,
+                protocols = listOf(MailProtocol.IMAP),
+                credentialReadiness = CredentialReadiness.READY,
+            )
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            beforeList = { error("A migration-required provider must not be contacted") }
+        }
+        val startupStatus = requireNotNull(
+            StalwartStartupState.MIGRATION_REQUIRED.providerStatus(),
+        )
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+            cachedAccounts = {
+                listOf(
+                    LocalAccountRecord(
+                        provider = Provider.STALWART,
+                        address = "cached-stalwart@local.test",
+                        password = "cached-password",
+                        protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                        providerAccountId = "cached-id",
+                    ),
+                )
+            },
+            startupProviderStatuses = mapOf(Provider.STALWART to startupStatus),
+        )
+
+        val response = backend.listAccounts()
+
+        assertEquals(
+            listOf("cached-stalwart@local.test", "live-dovecot@local.test"),
+            response.accounts.map(AccountInfo::address),
+        )
+        assertTrue(response.accounts.first().stale)
+        assertEquals(
+            listOf(ProviderAvailability.READY, ProviderAvailability.UPGRADE_REQUIRED),
+            response.providerStatuses.map(ProviderStatus::availability),
+        )
+        assertFailsWith<IllegalStateException> {
+            backend.createAccount(
+                CreateAccountRequest(
+                    address = "blocked@local.test",
+                    password = "password",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                ),
+            )
+        }
+        Unit
+    }
+
+    @Test
     fun providerListingsStartConcurrentlyWhileResultsStayDeterministic() = runBlocking {
         val dovecotStarted = CompletableDeferred<Unit>()
         val stalwartStarted = CompletableDeferred<Unit>()

@@ -65,7 +65,9 @@ private class DefaultStalwartSmtpAuthenticationProbe(
 internal class StalwartDashboardProvider(
     private val adapter: StalwartProductGateway,
     private val catalog: LocalAccountCatalog,
-    private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.STALWART),
+    private val smtpSender: LocalSmtpSender = LocalSmtpClient(
+        LocalSmtpEndpoint.STALWART_SUBMISSION,
+    ),
     private val smtpAuthenticationProbe: StalwartSmtpAuthenticationProbe =
         DefaultStalwartSmtpAuthenticationProbe(),
 ) : LocalProviderOperations, AutoCloseable {

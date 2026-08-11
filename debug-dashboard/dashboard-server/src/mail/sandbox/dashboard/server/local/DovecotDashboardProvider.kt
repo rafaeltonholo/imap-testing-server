@@ -40,7 +40,9 @@ internal class DovecotDashboardProvider(
     private val mailboxClient: DovecotMailboxClient = DovecotImapClient(
         accountExists = DovecotAccountExistence(adapter)::contains,
     ),
-    private val smtpSender: LocalSmtpSender = LocalSmtpClient(LocalSmtpEndpoint.POSTFIX),
+    private val smtpSender: LocalSmtpSender = LocalSmtpClient(
+        LocalSmtpEndpoint.POSTFIX_DELIVERY,
+    ),
     private val authenticationProbe: ProviderAuthenticationProbe = ProviderAuthenticationProbe(),
 ) : LocalProviderOperations {
     override val provider: Provider = Provider.DOVECOT

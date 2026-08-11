@@ -11,7 +11,7 @@ class DockerComposeLogSourceTest {
     private val repositoryRoot = Path.of("/work/mail-sandbox")
 
     @Test
-    fun readsDashboardAndDedicatedStalwartServicesWithFixedCommands() {
+    fun readsEveryProviderFromTheExactRootComposeProject() {
         val runner = RecordingLogRunner(
             ComposeLogResult(0, "dovecot | ready\n"),
             ComposeLogResult(0, "oauth2-mock | ready\n"),
@@ -27,32 +27,24 @@ class DockerComposeLogSourceTest {
         assertEquals(listOf("stalwart | ready"), source.read(LogService.STALWART).lines)
         assertEquals(
             listOf(
-                "docker", "compose", "-p", "mail-sandbox-dashboard",
-                "-f", repositoryRoot.resolve("docker-compose.yml").toString(),
-                "-f", repositoryRoot.resolve(
-                    "debug-dashboard/docker-compose.local-providers.yml",
-                ).toString(),
+                "docker", "compose", "-f",
+                repositoryRoot.resolve("docker-compose.yml").toString(),
                 "logs", "--no-color", "--tail", "500", "dovecot",
             ),
             runner.requests[0].argv,
         )
         assertEquals(
             listOf(
-                "docker", "compose", "-p", "mail-sandbox-dashboard",
-                "-f", repositoryRoot.resolve("docker-compose.yml").toString(),
-                "-f", repositoryRoot.resolve(
-                    "debug-dashboard/docker-compose.local-providers.yml",
-                ).toString(),
+                "docker", "compose", "-f",
+                repositoryRoot.resolve("docker-compose.yml").toString(),
                 "logs", "--no-color", "--tail", "500", "oauth2-mock",
             ),
             runner.requests[1].argv,
         )
         assertEquals(
             listOf(
-                "docker", "compose", "-p", "mail-sandbox-stalwart-gate", "-f",
-                repositoryRoot.resolve(
-                    "debug-dashboard/dashboard-server/testResources/stalwart-gate0b/compose.yml",
-                ).toString(),
+                "docker", "compose", "-f",
+                repositoryRoot.resolve("docker-compose.yml").toString(),
                 "logs", "--no-color", "--tail", "500", "stalwart",
             ),
             runner.requests[2].argv,
@@ -115,36 +107,22 @@ class DockerComposeLogSourceTest {
     }
 
     @Test
-    fun runnerApprovalRequiresExactDedicatedProjectAndComposeFiles() {
+    fun runnerApprovalRequiresTheExactRootComposeFileAndKnownService() {
         val runner = JvmComposeLogRunner(repositoryRoot)
         val approval = runner.javaClass.declaredMethods
             .single { method -> method.name == "isApproved" }
             .apply { isAccessible = true }
 
         fun isApproved(argv: List<String>): Boolean = approval.invoke(runner, argv) as Boolean
-        fun dashboardCommand(service: String): List<String> = listOf(
-            "docker", "compose", "-p", "mail-sandbox-dashboard",
-            "-f", repositoryRoot.resolve("docker-compose.yml").toString(),
-            "-f", repositoryRoot.resolve(
-                "debug-dashboard/docker-compose.local-providers.yml",
-            ).toString(),
+        fun rootCommand(service: String): List<String> = listOf(
+            "docker", "compose", "-f",
+            repositoryRoot.resolve("docker-compose.yml").toString(),
             "logs", "--no-color", "--tail", "500", service,
         )
 
-        listOf("dovecot", "postfix", "oauth2-mock").forEach { service ->
-            assertTrue(isApproved(dashboardCommand(service)))
+        listOf("dovecot", "postfix", "oauth2-mock", "stalwart").forEach { service ->
+            assertTrue(isApproved(rootCommand(service)))
         }
-        assertTrue(
-            isApproved(
-                listOf(
-                    "docker", "compose", "-p", "mail-sandbox-stalwart-gate", "-f",
-                    repositoryRoot.resolve(
-                        "debug-dashboard/dashboard-server/testResources/stalwart-gate0b/compose.yml",
-                    ).toString(),
-                    "logs", "--no-color", "--tail", "500", "stalwart",
-                ),
-            ),
-        )
         assertEquals(
             false,
             isApproved(
@@ -156,9 +134,20 @@ class DockerComposeLogSourceTest {
         assertEquals(
             false,
             isApproved(
-                dashboardCommand("dovecot").toMutableList().apply {
-                    this[5] = repositoryRoot.resolve("other-compose.yml").toString()
+                rootCommand("dovecot").toMutableList().apply {
+                    this[3] = repositoryRoot.resolve("other-compose.yml").toString()
                 },
+            ),
+        )
+        assertEquals(false, isApproved(rootCommand("dovecot-operator")))
+        assertEquals(
+            false,
+            isApproved(
+                listOf(
+                    "docker", "compose", "-p", "mail-sandbox-dashboard", "-f",
+                    repositoryRoot.resolve("docker-compose.yml").toString(),
+                    "logs", "--no-color", "--tail", "500", "dovecot",
+                ),
             ),
         )
     }

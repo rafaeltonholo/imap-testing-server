@@ -17,14 +17,20 @@ import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
 
 class LocalSmtpClientTest {
     @Test
-    fun productionSocketGuardApprovesOnlyTheCurrentFixedEndpoints() {
-        assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 21025))
+    fun productionSocketGuardAndProfilesUseOnlyTheThreeRootEndpoints() {
+        assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 1025))
+        assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 1587))
         assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 8587))
+        assertFalse(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 21025))
         assertFalse(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 18587))
         assertFalse(isApprovedLoopbackSmtpEndpoint("localhost", 8587))
+        assertEquals(1025, LocalSmtpEndpoint.POSTFIX_DELIVERY.port)
+        assertEquals(1587, ProviderAuthenticationProtocol.SMTP.endpoint.port)
+        assertEquals(8587, LocalSmtpEndpoint.STALWART_SUBMISSION.port)
     }
 
     @Test
@@ -50,7 +56,7 @@ class LocalSmtpClientTest {
             smtp.reply("221 2.0.0 Bye")
         }.use { server ->
             val client = LocalSmtpClient(
-                endpoint = LocalSmtpEndpoint.POSTFIX,
+                endpoint = LocalSmtpEndpoint.POSTFIX_DELIVERY,
                 connectTimeout = Duration.ofMillis(250),
                 readTimeout = Duration.ofMillis(500),
                 connector = server.connector,
@@ -89,7 +95,7 @@ class LocalSmtpClientTest {
                 receivedData,
             )
             assertEquals(
-                ConnectionRequest("127.0.0.1", 21025, 250, 500),
+                ConnectionRequest("127.0.0.1", 1025, 250, 500),
                 server.connectionRequest,
             )
         }
@@ -125,7 +131,7 @@ class LocalSmtpClientTest {
             smtp.reply("221 2.0.0 Bye")
         }.use { server ->
             val client = LocalSmtpClient(
-                endpoint = LocalSmtpEndpoint.STALWART,
+                endpoint = LocalSmtpEndpoint.STALWART_SUBMISSION,
                 connector = server.connector,
             )
 
@@ -164,7 +170,7 @@ class LocalSmtpClientTest {
             smtp.reply("250 2.0.0 Ok: queued as ACCEPTED42")
         }.use { server ->
             val result = LocalSmtpClient(
-                endpoint = LocalSmtpEndpoint.POSTFIX,
+                endpoint = LocalSmtpEndpoint.POSTFIX_DELIVERY,
                 connector = server.connector,
             ).send(
                 envelopeFrom = "sender@local.test",
@@ -190,7 +196,7 @@ class LocalSmtpClientTest {
             smtp.reply("550 5.1.1 User unknown")
         }.use { server ->
             val client = LocalSmtpClient(
-                endpoint = LocalSmtpEndpoint.POSTFIX,
+                endpoint = LocalSmtpEndpoint.POSTFIX_DELIVERY,
                 connector = server.connector,
             )
 
@@ -216,7 +222,7 @@ class LocalSmtpClientTest {
             connectionAttempts += 1
             error("The invalid request must not connect")
         }
-        val client = LocalSmtpClient(LocalSmtpEndpoint.POSTFIX, connector = connector)
+        val client = LocalSmtpClient(LocalSmtpEndpoint.POSTFIX_DELIVERY, connector = connector)
 
         listOf(
             "Sender@local.test" to "alice@local.test",
@@ -264,19 +270,52 @@ class LocalSmtpClientTest {
         listOf(Duration.ZERO, Duration.ofSeconds(31)).forEach { invalid ->
             assertFailsWith<IllegalArgumentException> {
                 LocalSmtpClient(
-                    LocalSmtpEndpoint.POSTFIX,
+                    LocalSmtpEndpoint.POSTFIX_DELIVERY,
                     connectTimeout = invalid,
                     connector = connector,
                 )
             }
             assertFailsWith<IllegalArgumentException> {
                 LocalSmtpClient(
-                    LocalSmtpEndpoint.POSTFIX,
+                    LocalSmtpEndpoint.POSTFIX_DELIVERY,
                     readTimeout = invalid,
                     connector = connector,
                 )
             }
         }
+        assertEquals(0, connectionAttempts)
+    }
+
+    @Test
+    fun endpointProfilesRejectUsingDeliveryAsSubmissionOrSubmissionWithoutAuthentication() {
+        var connectionAttempts = 0
+        val connector = LocalSmtpSocketConnector { _, _, _, _ ->
+            connectionAttempts += 1
+            error("An invalid endpoint role must not connect")
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            LocalSmtpClient(
+                LocalSmtpEndpoint.POSTFIX_DELIVERY,
+                connector = connector,
+            ).send(
+                "sender@local.test",
+                "alice@local.test",
+                validMessage(),
+                LocalSmtpCredentials("alice@local.test", "password"),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            LocalSmtpClient(
+                LocalSmtpEndpoint.STALWART_SUBMISSION,
+                connector = connector,
+            ).send(
+                "sender@local.test",
+                "alice@local.test",
+                validMessage(),
+            )
+        }
+
         assertEquals(0, connectionAttempts)
     }
 

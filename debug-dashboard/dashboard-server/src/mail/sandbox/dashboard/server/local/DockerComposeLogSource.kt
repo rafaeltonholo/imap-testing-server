@@ -10,13 +10,7 @@ import mail.sandbox.dashboard.contract.LogResponse
 import mail.sandbox.dashboard.contract.LogService
 import mail.sandbox.dashboard.server.gate.dovecot.DovecotDockerRouting
 
-private const val DASHBOARD_PROJECT = "mail-sandbox-dashboard"
-private const val DASHBOARD_BASE_COMPOSE = "docker-compose.yml"
-private const val DASHBOARD_PROVIDER_COMPOSE =
-    "debug-dashboard/docker-compose.local-providers.yml"
-private const val STALWART_PROJECT = "mail-sandbox-stalwart-gate"
-private const val STALWART_COMPOSE =
-    "debug-dashboard/dashboard-server/testResources/stalwart-gate0b/compose.yml"
+private const val ROOT_COMPOSE = "docker-compose.yml"
 
 internal data class ComposeLogRequest(
     val argv: List<String>,
@@ -138,23 +132,16 @@ internal class DockerComposeLogSource(
     )
 
     private fun command(service: LogService, limit: Int): List<String> = when (service) {
-        LogService.DOVECOT -> dashboardCommand("dovecot", limit)
-        LogService.POSTFIX -> dashboardCommand("postfix", limit)
-        LogService.OAUTH2 -> dashboardCommand("oauth2-mock", limit)
-
-        LogService.STALWART -> listOf(
-            "docker", "compose", "-p", STALWART_PROJECT, "-f",
-            repositoryRoot.resolve(STALWART_COMPOSE).toString(),
-            "logs", "--no-color", "--tail", limit.toString(), "stalwart",
-        )
+        LogService.DOVECOT -> rootCommand("dovecot", limit)
+        LogService.POSTFIX -> rootCommand("postfix", limit)
+        LogService.OAUTH2 -> rootCommand("oauth2-mock", limit)
+        LogService.STALWART -> rootCommand("stalwart", limit)
 
         LogService.ALL -> error("ALL is expanded before command construction")
     }
 
-    private fun dashboardCommand(service: String, limit: Int): List<String> = listOf(
-        "docker", "compose", "-p", DASHBOARD_PROJECT,
-        "-f", repositoryRoot.resolve(DASHBOARD_BASE_COMPOSE).toString(),
-        "-f", repositoryRoot.resolve(DASHBOARD_PROVIDER_COMPOSE).toString(),
+    private fun rootCommand(service: String, limit: Int): List<String> = listOf(
+        "docker", "compose", "-f", repositoryRoot.resolve(ROOT_COMPOSE).toString(),
         "logs", "--no-color", "--tail", limit.toString(), service,
     )
 
@@ -281,21 +268,11 @@ internal class JvmComposeLogRunner(
     }
 
     private fun isApproved(argv: List<String>): Boolean {
-        val dashboard = argv.size == 13 &&
-            argv.take(4) == listOf("docker", "compose", "-p", DASHBOARD_PROJECT) &&
-            argv[4] == "-f" &&
-            argv[5] == repositoryRoot.resolve(DASHBOARD_BASE_COMPOSE).toString() &&
-            argv[6] == "-f" &&
-            argv[7] == repositoryRoot.resolve(DASHBOARD_PROVIDER_COMPOSE).toString() &&
-            argv.subList(8, 11) == listOf("logs", "--no-color", "--tail") &&
-            argv[11].toIntOrNull() in 1..2_000 &&
-            argv[12] in setOf("dovecot", "postfix", "oauth2-mock")
-        val stalwart = argv.size == 11 &&
-            argv.take(4) == listOf("docker", "compose", "-p", STALWART_PROJECT) &&
-            argv[4] == "-f" &&
-            argv[5] == repositoryRoot.resolve(STALWART_COMPOSE).toString() &&
-            argv.subList(6, 9) == listOf("logs", "--no-color", "--tail") &&
-            argv[9].toIntOrNull() in 1..2_000 && argv[10] == "stalwart"
-        return dashboard || stalwart
+        return argv.size == 9 &&
+            argv.take(3) == listOf("docker", "compose", "-f") &&
+            argv[3] == repositoryRoot.resolve(ROOT_COMPOSE).toString() &&
+            argv.subList(4, 7) == listOf("logs", "--no-color", "--tail") &&
+            argv[7].toIntOrNull() in 1..2_000 &&
+            argv[8] in setOf("dovecot", "postfix", "oauth2-mock", "stalwart")
     }
 }
