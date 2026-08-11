@@ -971,6 +971,12 @@ class RecoveryRetirementContractTest(unittest.TestCase):
             b'{"account_id":null,"status":401,"username":null}',
             scheme="basic",
         )
+        basic = stalwart_v016._validated_jmap_auth_probe_output(
+            b'{"account_id":"unit-account","status":200,'
+            b'"username":"dashboard-management@local.test"}',
+            scheme="basic",
+            authenticated=True,
+        )
 
         self.assertEqual(
             bearer,
@@ -983,6 +989,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
         self.assertEqual(rejected.status, 401)
         self.assertIsNone(rejected.account_id)
         self.assertIsNone(rejected.username)
+        self.assertEqual(basic, bearer)
         self.assertEqual(repr(bearer), "JmapAuthProbe(<redacted>)")
 
         invalid = (
@@ -1043,6 +1050,66 @@ class RecoveryRetirementContractTest(unittest.TestCase):
         self.assertIn(
             "JMAP_AUTH_PROBE_MODE",
             parent_source,
+        )
+
+    def test_fixed_normal_smtp_probe_uses_loopback_8587_and_management_login(
+        self,
+    ) -> None:
+        events: list[object] = []
+
+        class Smtp:
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                *,
+                timeout: float,
+            ) -> None:
+                events.append(("connect", host, port, timeout))
+
+            def __enter__(self) -> "Smtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                events.append(("close",))
+
+            def ehlo(self) -> tuple[int, bytes]:
+                events.append(("ehlo",))
+                return 250, b"ok"
+
+            def login(self, username: str, password: str) -> None:
+                events.append(("login", username, password))
+
+            def noop(self) -> tuple[int, bytes]:
+                events.append(("noop",))
+                return 250, b"ok"
+
+        credential = bytearray(
+            b"dashboard-management@local.test:secret",
+        )
+        view = memoryview(credential).toreadonly()
+        try:
+            status = stalwart_v016.run_fixed_normal_smtp_auth_probe(
+                view,
+                smtp_factory=Smtp,
+            )
+        finally:
+            view.release()
+
+        self.assertEqual(status, 250)
+        self.assertEqual(
+            events,
+            [
+                ("connect", "127.0.0.1", 8587, 5.0),
+                ("ehlo",),
+                (
+                    "login",
+                    "dashboard-management@local.test",
+                    "secret",
+                ),
+                ("noop",),
+                ("close",),
+            ],
         )
 
     def test_fixed_jmap_probe_child_uses_only_fixed_endpoint_and_sanitized_output(
@@ -12550,6 +12617,24 @@ class ApplyPreparationTest(unittest.TestCase):
                     )
                     return f"validated-{phase}"
 
+                @staticmethod
+                def finalize_migrated_current_runtime(
+                    repository: Path,
+                ) -> Path:
+                    events.append("finalize-current")
+                    self.assertEqual(repository, paths.repository_root)
+                    current = (
+                        repository
+                        / "debug-dashboard"
+                        / ".runtime"
+                        / "stalwart"
+                        / "current.json"
+                    )
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("{}\n", encoding="utf-8")
+                    current.chmod(0o600)
+                    return current
+
             BootstrapModule.BootstrapPaths = BootstrapPaths
 
             acquire = mock.Mock(
@@ -12635,7 +12720,118 @@ class ApplyPreparationTest(unittest.TestCase):
             self.assertLess(events.index("lock-enter"), events.index("load-bootstrap"))
             self.assertLess(events.index("load-bootstrap"), events.index("prepare"))
             self.assertLess(events.index("bootstrap-retired"), events.index("lock-exit"))
+            self.assertLess(events.index("finalize-current"), events.index("lock-exit"))
             self.assertGreaterEqual(events.count("lock-valid"), 9)
+
+    def test_current_receipt_publication_failure_never_rolls_back_and_resumes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._paths(directory)
+            paths.migration_root.mkdir(parents=True)
+            events: list[str] = []
+            finalizer_calls = 0
+            rollback = mock.Mock()
+
+            class BootstrapModule:
+                class BootstrapPaths:
+                    @staticmethod
+                    def for_repository(repository: Path) -> Path:
+                        return repository
+
+                @staticmethod
+                def validate_final_bootstrap_for_retirement(
+                    _paths: object,
+                    *,
+                    task6_validator: object,
+                ) -> object:
+                    return task6_validator(paths.apply_receipt)
+
+                @staticmethod
+                def finalize_migrated_current_runtime(
+                    repository: Path,
+                ) -> Path:
+                    nonlocal finalizer_calls
+                    finalizer_calls += 1
+                    events.append("finalize-current")
+                    if finalizer_calls == 1:
+                        raise RuntimeError("injected publication failure")
+                    current = (
+                        repository
+                        / "debug-dashboard"
+                        / ".runtime"
+                        / "stalwart"
+                        / "current.json"
+                    )
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    current.write_text("{}\n", encoding="utf-8")
+                    current.chmod(0o600)
+                    return current
+
+            def prepare(_paths: object, **_kwargs: object) -> Path:
+                events.append("prepare")
+                paths.recovery_retired_receipt.write_text(
+                    "{}\n",
+                    encoding="utf-8",
+                )
+                paths.recovery_retired_receipt.chmod(0o600)
+                return paths.recovery_retired_receipt
+
+            dependencies = (
+                stalwart_v016.ProductionRecoveryRetirementDependencies(
+                    acquire_operation_lock=lambda repository: self._LockContext(
+                        repository,
+                        events,
+                    ),
+                    prepare=prepare,
+                    bootstrap_module_loader=lambda _root: BootstrapModule,
+                    bootstrap_apply_validator_factory=(
+                        lambda *_args, **_kwargs: mock.Mock()
+                    ),
+                    retirement_executor_factory=lambda **_kwargs: mock.Mock(),
+                    postflight_verifier_factory=lambda **_kwargs: mock.Mock(),
+                    state_runner=mock.Mock(),
+                    runtime_runner=mock.Mock(),
+                    jmap_probe_runner=mock.Mock(),
+                    rollback_activator=rollback,
+                    existing_retirement_plan_loader=(
+                        lambda *_args, **_kwargs: None
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                stalwart_v016.MigrationError,
+                "current runtime finalization failed safely",
+            ):
+                stalwart_v016.run_production_recovery_retirement(
+                    paths,
+                    dependencies=dependencies,
+                    expected_script_sha256="a" * 64,
+                )
+
+            current = (
+                paths.repository_root
+                / "debug-dashboard"
+                / ".runtime"
+                / "stalwart"
+                / "current.json"
+            )
+            self.assertTrue(paths.recovery_retired_receipt.is_file())
+            self.assertFalse(current.exists())
+            rollback.assert_not_called()
+
+            receipt = stalwart_v016.run_production_recovery_retirement(
+                paths,
+                dependencies=dependencies,
+                expected_script_sha256="a" * 64,
+            )
+
+            self.assertEqual(receipt, paths.recovery_retired_receipt)
+            self.assertTrue(current.is_file())
+            self.assertEqual(finalizer_calls, 2)
+            self.assertEqual(events.count("prepare"), 2)
+            rollback.assert_not_called()
 
     def test_production_retirement_failure_activates_rollback_before_or_after_deletion(
         self,
@@ -14919,6 +15115,10 @@ class ApplyPreparationTest(unittest.TestCase):
                     stalwart_v016.build_normal_compose_stop_command(plan),
                     [*prefix, "stop", "--timeout", "30", "stalwart"],
                 )
+                self.assertEqual(
+                    stalwart_v016.build_normal_compose_restart_command(plan),
+                    [*prefix, "restart", "--timeout", "30", "stalwart"],
+                )
                 inspect_command = (
                     stalwart_v016.build_normal_container_inspect_command(
                         container_id,
@@ -14942,6 +15142,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     stalwart_v016.build_normal_compose_start_command(plan),
                     stalwart_v016.build_normal_compose_ps_command(plan),
                     stalwart_v016.build_normal_compose_stop_command(plan),
+                    stalwart_v016.build_normal_compose_restart_command(plan),
                 ):
                     self.assertNotIn(
                         "docker-compose.stalwart-migration.yml",
@@ -15386,6 +15587,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     stalwart_v016.build_normal_compose_start_command,
                     stalwart_v016.build_normal_compose_ps_command,
                     stalwart_v016.build_normal_compose_stop_command,
+                    stalwart_v016.build_normal_compose_restart_command,
                 ):
                     with self.subTest(
                         malformed_source_builder=builder.__name__,
@@ -15897,6 +16099,9 @@ class ApplyPreparationTest(unittest.TestCase):
                     events.append("start")
                     running = True
                     return stalwart_v016.RedactedCommandResult(b"", b"")
+                if "restart" in args:
+                    events.append("restart")
+                    return stalwart_v016.RedactedCommandResult(b"", b"")
                 if args[-4:] == [
                     "ps",
                     "--all",
@@ -15963,8 +16168,8 @@ class ApplyPreparationTest(unittest.TestCase):
                 scheme: str,
             ) -> object:
                 observed_buffers.append(credential.obj)
-                events.append(scheme)
                 if scheme == "bearer":
+                    events.append("bearer")
                     return stalwart_v016.JmapAuthProbe(
                         status=200,
                         account_id=(
@@ -15974,11 +16179,35 @@ class ApplyPreparationTest(unittest.TestCase):
                             "dashboard-management@local.test"
                         ),
                     )
+                if bytes(credential) == (
+                    b"dashboard-management@local.test:secret"
+                ):
+                    events.append("management-basic")
+                    return stalwart_v016.JmapAuthProbe(
+                        status=200,
+                        account_id=(
+                            fixture.bootstrap_token.management_account_id
+                        ),
+                        username="dashboard-management@local.test",
+                    )
+                events.append("recovery-basic")
                 return stalwart_v016.JmapAuthProbe(
                     status=401,
                     account_id=None,
                     username=None,
                 )
+
+            def smtp_probe(credential: memoryview) -> int:
+                observed_buffers.append(credential.obj)
+                self.assertEqual(
+                    bytes(credential),
+                    b"dashboard-management@local.test:secret",
+                )
+                events.append("smtp")
+                return 250
+
+            def basic_jmap_probe(credential: memoryview) -> object:
+                return auth_probe(credential, scheme="basic")
 
             def recording_write(
                 target: Path,
@@ -16001,6 +16230,8 @@ class ApplyPreparationTest(unittest.TestCase):
                 runner=runtime_runner,
                 state_runner=state_runner,
                 jmap_probe_runner=auth_probe,
+                basic_jmap_probe_runner=basic_jmap_probe,
+                smtp_probe_runner=smtp_probe,
                 readiness_probe_runner=readiness,
             )
             verifier = (
@@ -16009,6 +16240,8 @@ class ApplyPreparationTest(unittest.TestCase):
                     runner=runtime_runner,
                     state_runner=state_runner,
                     jmap_probe_runner=auth_probe,
+                    basic_jmap_probe_runner=basic_jmap_probe,
+                    smtp_probe_runner=smtp_probe,
                     readiness_probe_runner=readiness,
                 )
             )
@@ -16045,7 +16278,18 @@ class ApplyPreparationTest(unittest.TestCase):
                     "version",
                     "readiness",
                     "bearer",
-                    "basic",
+                    "management-basic",
+                    "smtp",
+                    "recovery-basic",
+                    "restart",
+                    "ps",
+                    "inspect",
+                    "version",
+                    "readiness",
+                    "bearer",
+                    "management-basic",
+                    "smtp",
+                    "recovery-basic",
                     "census-ps",
                     "census-inspect",
                     "checkpoint",
@@ -16057,6 +16301,8 @@ class ApplyPreparationTest(unittest.TestCase):
                     "version",
                     "readiness",
                     "bearer",
+                    "management-basic",
+                    "smtp",
                     "census-ps",
                     "census-inspect",
                 ],
@@ -16394,6 +16640,8 @@ class ApplyPreparationTest(unittest.TestCase):
                     if "up" in args:
                         running = True
                         return stalwart_v016.RedactedCommandResult(b"", b"")
+                    if "restart" in args:
+                        return stalwart_v016.RedactedCommandResult(b"", b"")
                     if "stop" in args:
                         running = False
                         return stalwart_v016.RedactedCommandResult(b"", b"")
@@ -16450,6 +16698,20 @@ class ApplyPreparationTest(unittest.TestCase):
                     runner=runtime_runner,
                     state_runner=mock.Mock(),
                     jmap_probe_runner=auth_probe,
+                    basic_jmap_probe_runner=lambda _credential: (
+                        stalwart_v016.JmapAuthProbe(
+                            status=200,
+                            account_id=(
+                                fixture
+                                .bootstrap_token
+                                .management_account_id
+                            ),
+                            username=(
+                                "dashboard-management@local.test"
+                            ),
+                        )
+                    ),
+                    smtp_probe_runner=lambda _credential: 250,
                     readiness_probe_runner=lambda: 200,
                 )
                 original_snapshot = (
@@ -18594,6 +18856,22 @@ class ApplyPreparationTest(unittest.TestCase):
                         task6_validator(fixture.paths.apply_receipt)
                         return fixture.bootstrap_token
 
+                    @staticmethod
+                    def finalize_migrated_current_runtime(
+                        repository: Path,
+                    ) -> Path:
+                        current = (
+                            repository
+                            / "debug-dashboard"
+                            / ".runtime"
+                            / "stalwart"
+                            / "current.json"
+                        )
+                        current.parent.mkdir(parents=True, exist_ok=True)
+                        current.write_text("{}\n", encoding="utf-8")
+                        current.chmod(0o600)
+                        return current
+
                 def interrupted_writer(
                     target: Path,
                     value: object,
@@ -19130,6 +19408,22 @@ class ApplyPreparationTest(unittest.TestCase):
                     ) -> object:
                         task6_validator(fixture.paths.apply_receipt)
                         return fixture.bootstrap_token
+
+                    @staticmethod
+                    def finalize_migrated_current_runtime(
+                        repository: Path,
+                    ) -> Path:
+                        current = (
+                            repository
+                            / "debug-dashboard"
+                            / ".runtime"
+                            / "stalwart"
+                            / "current.json"
+                        )
+                        current.parent.mkdir(parents=True, exist_ok=True)
+                        current.write_text("{}\n", encoding="utf-8")
+                        current.chmod(0o600)
+                        return current
 
                 executor = mock.Mock()
                 verifier = mock.Mock(return_value=proofs[0])

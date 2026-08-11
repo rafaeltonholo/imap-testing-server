@@ -11,6 +11,7 @@ debug-dashboard/.runtime/dovecot-operator/
 debug-dashboard/.runtime/secrets/
 debug-dashboard/.runtime/task5-proof/
 .worktrees/
+/.mail-sandbox-fresh-initialization-intent
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,windows,macos,linux,androidstudio
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,windows,macos,linux,androidstudio

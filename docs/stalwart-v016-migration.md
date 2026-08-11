@@ -400,12 +400,24 @@ python3 scripts/stalwart_v016.py retire-recovery
 ```
 
 Retirement revalidates the whole Task 5–7 receipt chain. It starts only the
-base Compose Stalwart service on `127.0.0.1:8443`, proves v0.16.17 readiness,
-authenticates the exact immutable management Account/API-key binding, proves
-the old recovery credential returns 401 or 403, and verifies there is one
-expected writer with no migration container. It durably writes
-`retire-recovery-proof.json` before deleting the bound recovery environment
-and recovery config, then publishes `recovery-retired.json`.
+base Compose Stalwart service, proves v0.16.17 readiness, authenticates the
+exact immutable management Account/API-key binding on `127.0.0.1:8443`, and
+proves the fixed management password `secret` through both Basic JMAP and SMTP
+AUTH on `127.0.0.1:8587`. It also proves the old recovery credential returns
+401 or 403. Retirement then restarts that exact normal service and repeats the
+version, readiness, API-key, Basic JMAP, SMTP AUTH, recovery-rejection, and
+single-writer/no-migration-container proofs before checkpointing. It durably
+writes `retire-recovery-proof.json` before deleting the bound recovery
+environment and recovery config; postflight repeats the surviving normal
+runtime proofs and publishes `recovery-retired.json`.
+
+While the same Stalwart operation lock is still held, the command finally
+publishes `debug-dashboard/.runtime/stalwart/current.json` and requires the
+startup classifier to return `current`. A failure publishing only
+`current.json` does not reactivate recovery or roll back the already retired
+runtime. Re-run `retire-recovery`: the validated retired state takes the
+finalize-only path and retries current-receipt publication without replaying
+the retirement executor. An existing malformed `current.json` is a hard stop.
 
 After retirement, run the applicable normal-runtime proofs:
 
@@ -452,7 +464,9 @@ proofs, recovery files, or credential objects.
 | Retirement attempt exists with no proof | Do not replay retirement or delete the marker. Re-run `retire-recovery`; it requires reconciliation and uses the durable binding to stop only an exact normal container and activate isolated rollback. |
 | Retirement proof exists but recovery deletion is partial | Re-run `retire-recovery`. It performs finalize-only deletion/postflight and does not replay credential mutation or the main executor. |
 | Retirement artifact was substituted during partial deletion | Stop. The script fails closed, stops only the exact validated normal container by full ID, and activates isolated rollback; it never deletes a foreign artifact. |
-| `recovery-retired.json` validates | Recovery is retired; use base Compose and the normal `:8443` proofs only. |
+| `recovery-retired.json` validates but `current.json` is absent | Re-run `retire-recovery`. It revalidates retired postflight and publishes only the current receipt; receipt failure does not reactivate recovery. |
+| `current.json` exists but is invalid | Stop. Do not delete or replace it to force classification. |
+| `recovery-retired.json` and `current.json` validate | Recovery is retired and startup classifies `current`; use base Compose and the normal `:8443`/`:8587` proofs only. |
 
 Direct-ID stopping is an internal safety property, not an operator shortcut:
 the recovery path first lists candidates without evaluating mutable Compose

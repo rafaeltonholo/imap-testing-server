@@ -5134,54 +5134,12 @@ class _ProductionFreshRuntime:
         *,
         domain_id: str,
     ) -> str:
-        value = _resolve_references(desired.desired_dict(), domain_id)
-        if not isinstance(value, dict):
-            raise BootstrapError("fresh Registry object is malformed")
-        lookup = desired.lookup_dict()
-        existing: object | None = None
-        if set(lookup) == {"name"} and type(lookup["name"]) is str:
-            ids = client.query_named_ids(desired.object_type, lookup["name"])
-            if not isinstance(ids, tuple) or len(ids) > 1:
-                raise BootstrapError("fresh Registry object is ambiguous")
-            if ids:
-                existing = client.get_one(desired.object_type, ids[0])
-        elif lookup == {"id": "singleton"}:
-            try:
-                existing = client.get_singleton(desired.object_type)
-            except self._registry.RegistryNotFoundError:
-                existing = None
-        elif desired.object_type != "Tracer":
-            raise BootstrapError("fresh Registry lookup is malformed")
-        if existing is None:
-            created = client.create(desired.object_type, value)
-            return _validate_mutation_result(
-                created,
-                operation="create",
-                object_type=desired.object_type,
-            )
-        object_id = getattr(existing, "object_id", None)
-        observed = existing.value()
-        if type(object_id) is not str or not isinstance(observed, dict):
-            raise BootstrapError("fresh Registry projection is malformed")
-        observed = _registry_value_without_id(observed)
-        patch = _desired_patch(
-            value,
-            observed,
-            object_type=desired.object_type,
+        return _upsert_fixed_runtime_object(
+            client,
+            desired,
+            domain_id=domain_id,
+            registry_not_found_error=self._registry.RegistryNotFoundError,
         )
-        if patch:
-            updated = client.update(
-                desired.object_type,
-                object_id,
-                patch,
-            )
-            _validate_mutation_result(
-                updated,
-                operation="update",
-                object_type=desired.object_type,
-                object_id=object_id,
-            )
-        return object_id
 
     def apply_contract(self, repository: Path) -> None:
         paths = BootstrapPaths.for_repository(repository)
@@ -5816,6 +5774,89 @@ def _registry_value_without_id(value: object) -> dict[str, object]:
     return copied
 
 
+def _upsert_fixed_runtime_object(
+    client: object,
+    desired: DesiredObject,
+    *,
+    domain_id: str,
+    registry_not_found_error: type[BaseException],
+) -> str:
+    """Reconcile one fixed object by its explicit manifest lookup."""
+    if (
+        not isinstance(desired, DesiredObject)
+        or not isinstance(registry_not_found_error, type)
+        or not issubclass(registry_not_found_error, BaseException)
+    ):
+        raise BootstrapError("fixed Registry object dependency is malformed")
+    value = _resolve_references(desired.desired_dict(), domain_id)
+    if not isinstance(value, dict):
+        raise BootstrapError("fixed Registry object is malformed")
+    lookup = desired.lookup_dict()
+    existing: object | None = None
+    if set(lookup) == {"name"} and type(lookup["name"]) is str:
+        ids = client.query_named_ids(desired.object_type, lookup["name"])
+    elif lookup == {"id": "singleton"}:
+        try:
+            existing = client.get_singleton(desired.object_type)
+        except registry_not_found_error:
+            existing = None
+        ids = ()
+    elif (
+        set(lookup) == {"description"}
+        and type(lookup["description"]) is str
+    ):
+        value["description"] = lookup["description"]
+        ids = client.query_described_ids(
+            desired.object_type,
+            lookup["description"],
+        )
+    else:
+        raise BootstrapError("fixed Registry object lookup is malformed")
+    if existing is None and lookup != {"id": "singleton"}:
+        if (
+            not isinstance(ids, tuple)
+            or len(ids) > 1
+            or any(
+                type(object_id) is not str
+                or SAFE_ID_PATTERN.fullmatch(object_id) is None
+                for object_id in ids
+            )
+        ):
+            raise BootstrapError("fixed Registry object is ambiguous")
+        if ids:
+            existing = client.get_one(desired.object_type, ids[0])
+    if existing is None:
+        created = client.create(desired.object_type, value)
+        return _validate_mutation_result(
+            created,
+            operation="create",
+            object_type=desired.object_type,
+        )
+    object_id = getattr(existing, "object_id", None)
+    observed = existing.value()
+    if type(object_id) is not str or not isinstance(observed, dict):
+        raise BootstrapError("fixed Registry projection is malformed")
+    observed = _registry_value_without_id(observed)
+    patch = _desired_patch(
+        value,
+        observed,
+        object_type=desired.object_type,
+    )
+    if patch:
+        updated = client.update(
+            desired.object_type,
+            object_id,
+            patch,
+        )
+        _validate_mutation_result(
+            updated,
+            operation="update",
+            object_type=desired.object_type,
+            object_id=object_id,
+        )
+    return object_id
+
+
 def _complete_account_credentials(
     account_id: str,
     account_value: dict[str, object],
@@ -5871,6 +5912,208 @@ def _complete_account_credentials(
             ),
         )
     return tuple(result)
+
+
+def _normal_management_password_inventory(
+    client: object,
+    state: CheckpointState,
+) -> tuple[str | None, tuple[str, ...]]:
+    if state.account is None or state.proof is None:
+        raise BootstrapError("normal management prerequisites are incomplete")
+    account_id = state.account.ownership.account_id
+    if state.proof.account_id != account_id:
+        raise BootstrapError("normal management Account proof differs")
+    fetched = client.get_one("Account", account_id)
+    value = _registry_value_without_id(fetched.value())
+    raw_credentials = value.get("credentials")
+    if not isinstance(raw_credentials, dict):
+        raise BootstrapError("normal management credential inventory is absent")
+    credential_keys: dict[str, str] = {}
+    for map_key, raw in raw_credentials.items():
+        if type(map_key) is not str or not isinstance(raw, dict):
+            raise BootstrapError(
+                "normal management credential inventory is malformed",
+            )
+        credential_id = raw.get("credentialId")
+        if (
+            type(credential_id) is not str
+            or SAFE_ID_PATTERN.fullmatch(credential_id) is None
+            or credential_id in credential_keys
+        ):
+            raise BootstrapError(
+                "normal management credential inventory is malformed",
+            )
+        credential_keys[credential_id] = map_key
+    credentials = _complete_account_credentials(account_id, value)
+    api_keys = tuple(
+        item for item in credentials if item.credential_type == "ApiKey"
+    )
+    passwords = tuple(
+        item for item in credentials if item.credential_type == "Password"
+    )
+    if (
+        len(api_keys) != 1
+        or api_keys[0].credential_id != state.proof.credential_id
+        or [_credential_metadata(api_keys[0])]
+        != state.proof.credential_inventory()
+        or len(passwords) > 1
+        or len(credentials) != len(api_keys) + len(passwords)
+    ):
+        raise BootstrapError(
+            "normal management credential inventory is not exact",
+        )
+    password_key: str | None = None
+    if passwords:
+        password = passwords[0]
+        if (
+            password.description is not None
+            or password.permissions_dict() is not None
+            or password.allowed_ips_dict() != {}
+        ):
+            raise BootstrapError(
+                "normal management Password projection is not exact",
+            )
+        password_key = credential_keys.get(password.credential_id)
+        if password_key is None:
+            raise BootstrapError(
+                "normal management Password key is unavailable",
+            )
+    return password_key, tuple(raw_credentials)
+
+
+def _normal_management_password_authenticates(
+    state: CheckpointState,
+    contract: NormalRuntimeContract,
+    dependencies: BootstrapOrchestratorDependencies,
+) -> bool:
+    if state.account is None:
+        raise BootstrapError("normal management Account is unavailable")
+    username = bytearray(contract.management_address.encode("utf-8"))
+    password = bytearray(contract.management_password.encode("utf-8"))
+    credential: object | None = None
+    try:
+        credential = dependencies.basic_credential_factory(
+            username,
+            password,
+        )
+    finally:
+        _wipe_mutable(username)
+        _wipe_mutable(password)
+    try:
+        client = dependencies.registry_client_factory(
+            credential,
+            expected_username=contract.management_address,
+            expected_account_id=state.account.ownership.account_id,
+            timeout_seconds=5.0,
+        )
+    except BaseException:
+        close = getattr(credential, "close", None)
+        if callable(close):
+            close()
+        raise
+    with client:
+        try:
+            session = client.discover()
+        except Exception as error:
+            if type(getattr(error, "status", None)) is int and error.status in {
+                401,
+                403,
+            }:
+                return False
+            raise
+        if (
+            getattr(session, "username", None)
+            != contract.management_address
+            or getattr(session, "account_id", None)
+            != state.account.ownership.account_id
+            or getattr(session, "api_path", None) != "/jmap/"
+        ):
+            raise BootstrapError(
+                "normal management Basic identity proof is malformed",
+            )
+    return True
+
+
+def _reconcile_normal_runtime_contract(
+    client: object,
+    state: CheckpointState,
+    dependencies: BootstrapOrchestratorDependencies,
+) -> None:
+    if state.account is None or state.proof is None:
+        raise BootstrapError("normal runtime proof prerequisites are incomplete")
+    contract = load_normal_runtime_contract(state.inputs.desired.paths)
+    for desired in contract.objects:
+        _upsert_fixed_runtime_object(
+            client,
+            desired,
+            domain_id=state.account.ownership.domain_id,
+            registry_not_found_error=dependencies.registry_not_found_error,
+        )
+    password_key, map_keys = _normal_management_password_inventory(
+        client,
+        state,
+    )
+    authenticated = (
+        password_key is not None
+        and _normal_management_password_authenticates(
+            state,
+            contract,
+            dependencies,
+        )
+    )
+    if authenticated:
+        return
+    password_was_absent = password_key is None
+    if password_was_absent:
+        used = set(map_keys)
+        for candidate in range(len(used) + 1):
+            candidate_key = str(candidate)
+            if candidate_key not in used:
+                password_key = candidate_key
+                break
+        else:  # pragma: no cover - the bounded search always finds a gap
+            raise BootstrapError("normal Password key could not be selected")
+    patch = (
+        {
+            f"credentials/{password_key}": {
+                "@type": "Password",
+                "allowedIps": {},
+                "secret": contract.management_password,
+            },
+        }
+        if password_was_absent
+        else {
+            f"credentials/{password_key}/secret": (
+                contract.management_password
+            ),
+        }
+    )
+    result = client.update(
+        "Account",
+        state.account.ownership.account_id,
+        patch,
+    )
+    _validate_mutation_result(
+        result,
+        operation="update",
+        object_type="Account",
+        object_id=state.account.ownership.account_id,
+    )
+    verified_key, _map_keys = _normal_management_password_inventory(
+        client,
+        state,
+    )
+    if (
+        verified_key != password_key
+        or not _normal_management_password_authenticates(
+            state,
+            contract,
+            dependencies,
+        )
+    ):
+        raise BootstrapError(
+            "normal management Password proof failed safely",
+        )
 
 
 def _desired_query_name(desired: DesiredObject) -> str | None:
@@ -7314,16 +7557,22 @@ def _bootstrap_inside_recovery_runtime(
                 "recovery Registry authentication is malformed",
             )
         state = load_checkpoint_state(inputs)
-        if state.final_receipt is not None:
-            return
-        _publish_attempt(inputs, dependencies)
-        state = _ensure_management_key_and_proof(
+        if state.final_receipt is None:
+            _publish_attempt(inputs, dependencies)
+            state = _ensure_management_key_and_proof(
+                client,
+                inputs,
+                dependencies,
+            )
+            _publish_protected_accounts(state)
+            state = load_checkpoint_state(inputs)
+        _reconcile_normal_runtime_contract(
             client,
-            inputs,
+            state,
             dependencies,
         )
-        _publish_protected_accounts(state)
-        state = load_checkpoint_state(inputs)
+        if state.final_receipt is not None:
+            return
         _publish_routing_proof(client, state, dependencies)
         state = load_checkpoint_state(inputs)
         _publish_final_receipt(inputs, state, dependencies)
@@ -7436,6 +7685,45 @@ def _validate_fresh_initialization_dependencies(
         raise BootstrapError("fresh initialization dependencies are malformed")
 
 
+def finalize_migrated_current_runtime(repository_root: Path) -> Path:
+    """Publish the fixed current receipt after externally proved retirement."""
+    root = _normalized_absolute(repository_root, "repository root")
+    runtime_state = _load_sibling_module(
+        "stalwart_runtime_state.py",
+        "_mail_sandbox_stalwart_runtime_state_finalize",
+    )
+    try:
+        current = runtime_state.RuntimeState.CURRENT
+        invalid = runtime_state.RuntimeState.INVALID
+        relative = runtime_state.RECEIPT_RELATIVE
+        classify = runtime_state.classify_repository
+        publish = runtime_state.publish_current_receipt
+    except AttributeError:
+        raise BootstrapError("current runtime state dependency is unavailable") from None
+    if (
+        not isinstance(relative, Path)
+        or relative.is_absolute()
+        or not callable(classify)
+        or not callable(publish)
+    ):
+        raise BootstrapError("current runtime state dependency is malformed")
+    receipt = root / relative
+    state = classify(root)
+    if state is current:
+        return receipt
+    if state is not invalid:
+        raise BootstrapError("migrated Stalwart runtime is not finalizable")
+    if _path_present(receipt):
+        raise BootstrapError("current runtime receipt is invalid")
+    try:
+        published = publish(root)
+    except (AttributeError, ValueError):
+        raise BootstrapError("current runtime receipt was not published") from None
+    if published != receipt or classify(root) is not current:
+        raise BootstrapError("current runtime receipt did not reclassify")
+    return receipt
+
+
 def initialize_fresh(
     repository_root: Path,
     *,
@@ -7457,9 +7745,10 @@ def initialize_fresh(
         dependencies.validate_definition(root)
         _assert_operation_lock(operation_lock, root)
 
-        mutation_started = True
+        mutation_started = False
         try:
             dependencies.mark_invalid(root)
+            mutation_started = True
             _assert_operation_lock(operation_lock, root)
             dependencies.prepare(root)
             dependencies.start_recovery(root)

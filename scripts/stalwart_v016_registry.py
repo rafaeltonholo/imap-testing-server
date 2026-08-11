@@ -493,6 +493,30 @@ class RegistryClient:
             page_limit=page_limit,
         )
 
+    def query_described_ids(
+        self,
+        object_type: str,
+        description: str,
+        *,
+        page_limit: int = 100,
+    ) -> tuple[str, ...]:
+        """Query exact `description` matches in one bounded page."""
+
+        _validate_object_type(object_type)
+        if (
+            type(description) is not str
+            or not description
+            or len(description) > 512
+            or any(ord(char) < 0x20 for char in description)
+        ):
+            raise ValueError("registry object description is invalid")
+        return self._query_ids(
+            object_type,
+            account_id=self.session.account_id,
+            filter_value={"description": description},
+            page_limit=page_limit,
+        )
+
     def get_one(
         self,
         object_type: str,

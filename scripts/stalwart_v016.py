@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import smtplib
 import stat
 import subprocess
 from datetime import datetime, timezone
@@ -154,6 +155,9 @@ MIGRATION_RECOVERY_CONTAINER_INSPECT_FORMAT = (
 NORMAL_RUNTIME_BASE_URL = "http://127.0.0.1:8443"
 NORMAL_RUNTIME_API_URL = "http://127.0.0.1:8443/jmap/"
 DASHBOARD_MANAGEMENT_USERNAME = "dashboard-management@local.test"
+DASHBOARD_MANAGEMENT_PASSWORD = "secret"
+NORMAL_RUNTIME_SMTP_HOST = "127.0.0.1"
+NORMAL_RUNTIME_SMTP_PORT = 8587
 NORMAL_RUNTIME_ENVIRONMENT = frozenset(
     {
         (
@@ -1272,9 +1276,13 @@ def _validated_jmap_auth_probe_output(
     stdout: bytes,
     *,
     scheme: str,
+    authenticated: bool | None = None,
 ) -> JmapAuthProbe:
+    if authenticated is None:
+        authenticated = scheme == "bearer"
     if (
         scheme not in {"bearer", "basic"}
+        or type(authenticated) is not bool
         or type(stdout) is not bytes
         or not stdout
         or len(stdout) > JMAP_AUTH_PROBE_MAXIMUM_OUTPUT
@@ -1309,7 +1317,7 @@ def _validated_jmap_auth_probe_output(
     status = value["status"]
     account_id = value["account_id"]
     username = value["username"]
-    if scheme == "bearer":
+    if authenticated:
         valid = (
             status == 200
             and type(account_id) is str
@@ -1375,10 +1383,11 @@ def _fixed_jmap_auth_probe_child(scheme: str, size_text: str) -> int:
         _wipe_bytearray(credential)
 
 
-def run_fixed_jmap_auth_probe(
+def _run_fixed_jmap_auth_probe(
     credential: memoryview,
     *,
     scheme: str,
+    authenticated: bool,
 ) -> JmapAuthProbe:
     """Pipe one mutable credential to the fixed short-lived JMAP child."""
     if not _valid_jmap_probe_credential_view(credential, scheme=scheme):
@@ -1444,7 +1453,89 @@ def run_fixed_jmap_auth_probe(
     return _validated_jmap_auth_probe_output(
         stdout,
         scheme=scheme,
+        authenticated=authenticated,
     )
+
+
+def run_fixed_jmap_auth_probe(
+    credential: memoryview,
+    *,
+    scheme: str,
+) -> JmapAuthProbe:
+    """Probe the API-key success or retired-recovery rejection contract."""
+    # The shared child dispatcher is pinned by JMAP_AUTH_PROBE_MODE.
+    return _run_fixed_jmap_auth_probe(
+        credential,
+        scheme=scheme,
+        authenticated=scheme == "bearer",
+    )
+
+
+def run_fixed_normal_basic_jmap_auth_probe(
+    credential: memoryview,
+) -> JmapAuthProbe:
+    """Prove the fixed normal management Password over Basic JMAP."""
+    return _run_fixed_jmap_auth_probe(
+        credential,
+        scheme="basic",
+        authenticated=True,
+    )
+
+
+def run_fixed_normal_smtp_auth_probe(
+    credential: memoryview,
+    *,
+    smtp_factory: object = smtplib.SMTP,
+) -> int:
+    """Authenticate the fixed normal management account on loopback SMTP."""
+    if (
+        type(credential) is not memoryview
+        or not credential.readonly
+        or credential.ndim != 1
+        or credential.format != "B"
+        or not credential.c_contiguous
+        or not callable(smtp_factory)
+    ):
+        raise CommandError("normal runtime SMTP probe is malformed")
+    raw = bytearray(credential)
+    username = bytearray()
+    password = bytearray()
+    try:
+        if raw.count(b":") != 1:
+            raise CommandError("normal runtime SMTP probe is malformed")
+        separator = raw.index(ord(":"))
+        username.extend(raw[:separator])
+        password.extend(raw[separator + 1 :])
+        if (
+            not username
+            or not password
+            or len(raw) > 1024
+            or any(item < 0x21 or item > 0x7E for item in raw)
+        ):
+            raise CommandError("normal runtime SMTP probe is malformed")
+        username_text = username.decode("ascii", "strict")
+        password_text = password.decode("ascii", "strict")
+        with smtp_factory(
+            NORMAL_RUNTIME_SMTP_HOST,
+            NORMAL_RUNTIME_SMTP_PORT,
+            timeout=5.0,
+        ) as smtp:
+            ehlo_status, _ehlo_message = smtp.ehlo()
+            if type(ehlo_status) is not int or ehlo_status != 250:
+                raise CommandError(
+                    "normal runtime SMTP probe failed safely",
+                )
+            smtp.login(username_text, password_text)
+            status, _message = smtp.noop()
+        if type(status) is not int or status != 250:
+            raise CommandError("normal runtime SMTP probe failed safely")
+        return status
+    except (UnicodeError, OSError, smtplib.SMTPException):
+        raise CommandError("normal runtime SMTP probe failed safely") from None
+    finally:
+        _wipe_bytearray(raw)
+        _wipe_bytearray(username)
+        _wipe_bytearray(password)
 
 
 def run_fixed_normal_readiness_probe(
@@ -6180,6 +6271,19 @@ def build_normal_compose_stop_command(
     ]
 
 
+def build_normal_compose_restart_command(
+    plan: RecoveryRetirementPlan,
+) -> list[str]:
+    source = _normal_runtime_plan_context(plan)
+    return [
+        *_normal_compose_prefix(plan),
+        "restart",
+        "--timeout",
+        "30",
+        source.compose_service,
+    ]
+
+
 def build_normal_container_inspect_command(
     container_id: str,
 ) -> list[str]:
@@ -6574,6 +6678,131 @@ def _invoke_retirement_jmap_probe(
     return result
 
 
+def _invoke_retirement_basic_jmap_probe(
+    probe: object,
+    credential: memoryview,
+) -> JmapAuthProbe:
+    if not callable(probe):
+        raise MigrationError(
+            "normal Basic authentication probe is unavailable",
+        )
+    failed = False
+    result: object = None
+    try:
+        result = probe(credential)
+    except Exception:
+        failed = True
+    if failed or type(result) is not JmapAuthProbe:
+        raise MigrationError(
+            "normal Basic authentication probe failed safely",
+        ) from None
+    return result
+
+
+def _invoke_retirement_smtp_probe(
+    probe: object,
+    credential: memoryview,
+) -> int:
+    if not callable(probe):
+        raise MigrationError("normal SMTP probe is unavailable")
+    failed = False
+    result: object = None
+    try:
+        result = probe(credential)
+    except Exception:
+        failed = True
+    if failed or type(result) is not int or result != 250:
+        raise MigrationError("normal SMTP probe failed safely") from None
+    return result
+
+
+def _prove_normal_management_password(
+    plan: RecoveryRetirementPlan,
+    *,
+    basic_jmap_probe: object,
+    smtp_probe: object,
+) -> None:
+    credential = bytearray(
+        (
+            f"{DASHBOARD_MANAGEMENT_USERNAME}:"
+            f"{DASHBOARD_MANAGEMENT_PASSWORD}"
+        ).encode("ascii"),
+    )
+    view: memoryview | None = None
+    try:
+        view = memoryview(credential).toreadonly()
+        basic = _invoke_retirement_basic_jmap_probe(
+            basic_jmap_probe,
+            view,
+        )
+        if (
+            basic.status != 200
+            or basic.account_id != plan.bootstrap.management_account_id
+            or basic.username != DASHBOARD_MANAGEMENT_USERNAME
+        ):
+            raise MigrationError(
+                "normal management Basic authentication differs",
+            )
+        _invoke_retirement_smtp_probe(smtp_probe, view)
+    finally:
+        if view is not None:
+            view.release()
+        _wipe_bytearray(credential)
+
+
+def _prove_normal_management_key(
+    paths: MigrationPaths,
+    plan: RecoveryRetirementPlan,
+    jmap_probe: object,
+) -> None:
+    management_key = bytearray()
+    management_view: memoryview | None = None
+    try:
+        management_key = _read_bound_management_key(paths, plan)
+        management_view = memoryview(management_key).toreadonly()
+        management = _invoke_retirement_jmap_probe(
+            jmap_probe,
+            management_view,
+            scheme="bearer",
+        )
+    finally:
+        if management_view is not None:
+            management_view.release()
+        _wipe_bytearray(management_key)
+    if (
+        management.status != 200
+        or management.account_id != plan.bootstrap.management_account_id
+        or management.username != DASHBOARD_MANAGEMENT_USERNAME
+    ):
+        raise MigrationError(
+            "normal runtime management authentication differs",
+        )
+
+
+def _prove_recovery_credential_rejected(
+    recovery_credential: RecoveryCredentialLease,
+    jmap_probe: object,
+) -> int:
+    recovery_view = recovery_credential.borrow()
+    try:
+        old_recovery = _invoke_retirement_jmap_probe(
+            jmap_probe,
+            recovery_view,
+            scheme="basic",
+        )
+    finally:
+        recovery_view.release()
+    if (
+        old_recovery.status not in {401, 403}
+        or old_recovery.account_id is not None
+        or old_recovery.username is not None
+    ):
+        raise MigrationError(
+            "normal runtime still accepts the recovery credential",
+        )
+    return old_recovery.status
+
+
 def _normal_runtime_writer_census(
     paths: MigrationPaths,
     plan: RecoveryRetirementPlan,
@@ -6855,6 +7084,10 @@ class RecoveryRetirementExecutor:
         runner: object = run_redacted_command,
         state_runner: object = run_command,
         jmap_probe_runner: object = run_fixed_jmap_auth_probe,
+        basic_jmap_probe_runner: object = (
+            run_fixed_normal_basic_jmap_auth_probe
+        ),
+        smtp_probe_runner: object = run_fixed_normal_smtp_auth_probe,
         readiness_probe_runner: object = run_fixed_normal_readiness_probe,
     ) -> None:
         if (
@@ -6865,6 +7098,8 @@ class RecoveryRetirementExecutor:
             or not callable(runner)
             or not callable(state_runner)
             or not callable(jmap_probe_runner)
+            or not callable(basic_jmap_probe_runner)
+            or not callable(smtp_probe_runner)
             or not callable(readiness_probe_runner)
         ):
             raise MigrationError(
@@ -6874,6 +7109,8 @@ class RecoveryRetirementExecutor:
         self._runner = runner
         self._state_runner = state_runner
         self._jmap_probe_runner = jmap_probe_runner
+        self._basic_jmap_probe_runner = basic_jmap_probe_runner
+        self._smtp_probe_runner = smtp_probe_runner
         self._readiness_probe_runner = readiness_probe_runner
 
     def __repr__(self) -> str:
@@ -6960,52 +7197,86 @@ class RecoveryRetirementExecutor:
                 self._readiness_probe_runner,
             )
 
-            management_key = bytearray()
-            management_view: memoryview | None = None
-            try:
-                management_key = _read_bound_management_key(
-                    self._paths,
-                    plan,
-                )
-                management_view = memoryview(
-                    management_key,
-                ).toreadonly()
-                management = _invoke_retirement_jmap_probe(
-                    self._jmap_probe_runner,
-                    management_view,
-                    scheme="bearer",
-                )
-            finally:
-                if management_view is not None:
-                    management_view.release()
-                _wipe_bytearray(management_key)
-            if (
-                management.status != 200
-                or management.account_id
-                != plan.bootstrap.management_account_id
-                or management.username
-                != DASHBOARD_MANAGEMENT_USERNAME
-            ):
-                raise MigrationError(
-                    "normal runtime management authentication differs",
-                )
+            _prove_normal_management_key(
+                self._paths,
+                plan,
+                self._jmap_probe_runner,
+            )
+            _prove_normal_management_password(
+                plan,
+                basic_jmap_probe=self._basic_jmap_probe_runner,
+                smtp_probe=self._smtp_probe_runner,
+            )
+            old_recovery_status = _prove_recovery_credential_rejected(
+                recovery_credential,
+                self._jmap_probe_runner,
+            )
 
-            recovery_view = recovery_credential.borrow()
-            try:
-                old_recovery = _invoke_retirement_jmap_probe(
-                    self._jmap_probe_runner,
-                    recovery_view,
-                    scheme="basic",
-                )
-            finally:
-                recovery_view.release()
-            if (
-                old_recovery.status not in {401, 403}
-                or old_recovery.account_id is not None
-                or old_recovery.username is not None
-            ):
+            if _validate_receipt_bound_normal_config(plan) != normal_config:
                 raise MigrationError(
-                    "normal runtime still accepts the recovery credential",
+                    "normal runtime config changed before restart",
+                )
+            _invoke_normal_runtime_command(
+                self._runner,
+                build_normal_compose_restart_command(plan),
+                plan=plan,
+                timeout=60,
+            )
+            restarted_ps = _invoke_normal_runtime_command(
+                self._runner,
+                build_normal_compose_ps_command(plan),
+                plan=plan,
+                timeout=30,
+            )
+            restarted_container_id = _migration_container_id(
+                restarted_ps.stdout,
+            )
+            if restarted_container_id != container_id:
+                raise MigrationError(
+                    "normal runtime identity changed during restart",
+                )
+            restarted_inspect = _invoke_normal_runtime_command(
+                self._runner,
+                build_normal_container_inspect_command(container_id),
+                plan=plan,
+                timeout=30,
+            )
+            restarted_inspection = _validate_normal_container_inspection(
+                restarted_inspect.stdout,
+                plan=plan,
+                container_id=container_id,
+            )
+            if restarted_inspection != inspection:
+                raise MigrationError(
+                    "normal runtime inspection changed during restart",
+                )
+            restarted_version = _invoke_normal_runtime_command(
+                self._runner,
+                build_migration_server_version_command(container_id),
+                plan=plan,
+                timeout=60,
+            )
+            _validated_server_version(restarted_version.stdout)
+            _invoke_normal_readiness_probe(self._readiness_probe_runner)
+            _prove_normal_management_key(
+                self._paths,
+                plan,
+                self._jmap_probe_runner,
+            )
+            _prove_normal_management_password(
+                plan,
+                basic_jmap_probe=self._basic_jmap_probe_runner,
+                smtp_probe=self._smtp_probe_runner,
+            )
+            restarted_recovery_status = (
+                _prove_recovery_credential_rejected(
+                    recovery_credential,
+                    self._jmap_probe_runner,
+                )
+            )
+            if restarted_recovery_status != old_recovery_status:
+                raise MigrationError(
+                    "recovery rejection changed during restart",
                 )
 
             writer_ids, migration_ids = _normal_runtime_writer_census(
@@ -7017,7 +7288,7 @@ class RecoveryRetirementExecutor:
             proof = _build_recovery_retirement_proof(
                 plan,
                 inspection,
-                old_recovery_auth_status=old_recovery.status,
+                old_recovery_auth_status=old_recovery_status,
                 writer_ids=writer_ids,
                 migration_ids=migration_ids,
             )
@@ -7068,6 +7339,10 @@ class RecoveryRetirementPostflightVerifier:
         runner: object = run_redacted_command,
         state_runner: object = run_command,
         jmap_probe_runner: object = run_fixed_jmap_auth_probe,
+        basic_jmap_probe_runner: object = (
+            run_fixed_normal_basic_jmap_auth_probe
+        ),
+        smtp_probe_runner: object = run_fixed_normal_smtp_auth_probe,
         readiness_probe_runner: object = run_fixed_normal_readiness_probe,
     ) -> None:
         if (
@@ -7078,6 +7353,8 @@ class RecoveryRetirementPostflightVerifier:
             or not callable(runner)
             or not callable(state_runner)
             or not callable(jmap_probe_runner)
+            or not callable(basic_jmap_probe_runner)
+            or not callable(smtp_probe_runner)
             or not callable(readiness_probe_runner)
         ):
             raise MigrationError(
@@ -7087,6 +7364,8 @@ class RecoveryRetirementPostflightVerifier:
         self._runner = runner
         self._state_runner = state_runner
         self._jmap_probe_runner = jmap_probe_runner
+        self._basic_jmap_probe_runner = basic_jmap_probe_runner
+        self._smtp_probe_runner = smtp_probe_runner
         self._readiness_probe_runner = readiness_probe_runner
 
     def __repr__(self) -> str:
@@ -7157,35 +7436,16 @@ class RecoveryRetirementPostflightVerifier:
                 self._readiness_probe_runner,
             )
 
-            management_key = bytearray()
-            management_view: memoryview | None = None
-            try:
-                management_key = _read_bound_management_key(
-                    self._paths,
-                    plan,
-                )
-                management_view = memoryview(
-                    management_key,
-                ).toreadonly()
-                management = _invoke_retirement_jmap_probe(
-                    self._jmap_probe_runner,
-                    management_view,
-                    scheme="bearer",
-                )
-            finally:
-                if management_view is not None:
-                    management_view.release()
-                _wipe_bytearray(management_key)
-            if (
-                management.status != 200
-                or management.account_id
-                != plan.bootstrap.management_account_id
-                or management.username
-                != DASHBOARD_MANAGEMENT_USERNAME
-            ):
-                raise MigrationError(
-                    "normal runtime management authentication differs",
-                )
+            _prove_normal_management_key(
+                self._paths,
+                plan,
+                self._jmap_probe_runner,
+            )
+            _prove_normal_management_password(
+                plan,
+                basic_jmap_probe=self._basic_jmap_probe_runner,
+                smtp_probe=self._smtp_probe_runner,
+            )
             writer_ids, migration_ids = _normal_runtime_writer_census(
                 self._paths,
                 plan,
@@ -10885,6 +11145,8 @@ class ProductionRecoveryRetirementDependencies:
     state_runner: object
     runtime_runner: object
     jmap_probe_runner: object
+    basic_jmap_probe_runner: object = run_fixed_normal_basic_jmap_auth_probe
+    smtp_probe_runner: object = run_fixed_normal_smtp_auth_probe
     rollback_activator: object = default_rollback_activator
     existing_retirement_plan_loader: object = (
         _load_existing_retirement_recovery_plan
@@ -10903,6 +11165,8 @@ class ProductionRecoveryRetirementDependencies:
                 self.state_runner,
                 self.runtime_runner,
                 self.jmap_probe_runner,
+                self.basic_jmap_probe_runner,
+                self.smtp_probe_runner,
                 self.rollback_activator,
                 self.existing_retirement_plan_loader,
             )
@@ -10930,6 +11194,8 @@ def production_recovery_retirement_dependencies(
         state_runner=run_command,
         runtime_runner=run_redacted_command,
         jmap_probe_runner=run_fixed_jmap_auth_probe,
+        basic_jmap_probe_runner=run_fixed_normal_basic_jmap_auth_probe,
+        smtp_probe_runner=run_fixed_normal_smtp_auth_probe,
         rollback_activator=default_rollback_activator,
         existing_retirement_plan_loader=(
             _load_existing_retirement_recovery_plan
@@ -11154,6 +11420,10 @@ def run_production_recovery_retirement(
                     runner=selected.runtime_runner,
                     state_runner=selected.state_runner,
                     jmap_probe_runner=selected.jmap_probe_runner,
+                    basic_jmap_probe_runner=(
+                        selected.basic_jmap_probe_runner
+                    ),
+                    smtp_probe_runner=selected.smtp_probe_runner,
                 )
                 _assert_production_retirement_lock(
                     operation_lock,
@@ -11164,6 +11434,10 @@ def run_production_recovery_retirement(
                     runner=selected.runtime_runner,
                     state_runner=selected.state_runner,
                     jmap_probe_runner=selected.jmap_probe_runner,
+                    basic_jmap_probe_runner=(
+                        selected.basic_jmap_probe_runner
+                    ),
+                    smtp_probe_runner=selected.smtp_probe_runner,
                 )
                 if not callable(executor) or not callable(verifier):
                     raise MigrationError(
@@ -11272,7 +11546,7 @@ def run_production_recovery_retirement(
                     operation_lock,
                     paths.repository_root,
                 )
-                return receipt
+                retirement_receipt = receipt
             except BaseException as primary:
                 recovery_error: BaseException | None = None
                 if (
@@ -11328,6 +11602,58 @@ def run_production_recovery_retirement(
                         "reconciliation is required",
                     ) from None
                 raise
+
+            _assert_production_retirement_lock(
+                operation_lock,
+                paths.repository_root,
+            )
+            if trusted_bootstrap_module is not None:
+                _assert_trusted_production_bootstrap_module(
+                    trusted_bootstrap_module,
+                    Path(__file__).resolve().with_name(
+                        "bootstrap_stalwart_v016.py",
+                    ),
+                )
+            current_finalizer = getattr(
+                bootstrap_module,
+                "finalize_migrated_current_runtime",
+                None,
+            )
+            if not callable(current_finalizer):
+                raise MigrationError(
+                    "current runtime finalizer is unavailable",
+                )
+            try:
+                current_receipt = current_finalizer(
+                    paths.repository_root,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                raise MigrationError(
+                    "current runtime finalization failed safely",
+                ) from None
+            expected_current = (
+                paths.repository_root
+                / "debug-dashboard"
+                / ".runtime"
+                / "stalwart"
+                / "current.json"
+            )
+            if current_receipt != expected_current:
+                raise MigrationError(
+                    "current runtime finalizer returned a non-fixed receipt",
+                )
+            require_regular_0600(
+                current_receipt,
+                root=paths.repository_root,
+                label="current runtime receipt",
+            )
+            _assert_production_retirement_lock(
+                operation_lock,
+                paths.repository_root,
+            )
+            return retirement_receipt
     except (MigrationError, KeyboardInterrupt, SystemExit):
         raise
     except Exception:

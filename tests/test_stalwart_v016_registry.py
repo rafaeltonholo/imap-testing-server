@@ -820,6 +820,31 @@ class QueryContractTests(unittest.TestCase):
             },
         )
 
+    def test_description_query_uses_exact_bounded_filter(self) -> None:
+        query_connection = DynamicConnection(
+            lambda request: jmap_response(
+                request,
+                query_payload(ids=["tracer-1"], total=1),
+            )
+        )
+        client, factory = self.connected_client([query_connection])
+
+        ids = client.query_described_ids(
+            "Tracer",
+            "mail-sandbox debug stdout",
+            page_limit=2,
+        )
+
+        self.assertEqual(ids, ("tracer-1",))
+        self.assertEqual(len(factory.calls), 2)
+        body = json.loads(
+            bytes(query_connection.requests[0]["body"]).decode("utf-8")
+        )
+        self.assertEqual(
+            body["methodCalls"][0][1]["filter"],
+            {"description": "mail-sandbox debug stdout"},
+        )
+
     def test_accepts_source_query_and_optional_envelope_shapes(self) -> None:
         payload = query_payload(
             ids=["a1"],

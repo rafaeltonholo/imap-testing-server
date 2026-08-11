@@ -2636,6 +2636,10 @@ class FakeRegistryNotFound(RuntimeError):
     pass
 
 
+class FakeRegistryAuthenticationError(RuntimeError):
+    status = 401
+
+
 class FakeCredential:
     def __init__(self, kind: str, *values: object) -> None:
         self.kind = kind
@@ -2710,11 +2714,15 @@ class FakeRegistryServer:
                 "MtaRoute",
                 "SieveSystemScript",
                 "MtaStageRcpt",
+                "Authentication",
+                "MtaStageAuth",
+                "Tracer",
                 "Account",
                 "MtaOutboundStrategy",
             )
         }
         self.credentials: dict[str, dict[str, dict[str, object]]] = {}
+        self.password_secrets: dict[str, dict[str, str]] = {}
         self.objects["MtaOutboundStrategy"]["singleton"] = json.loads(
             json.dumps(PRESERVED_OBJECTS[0]["value"]),
         )
@@ -2788,13 +2796,43 @@ class FakeRegistryClient:
         self.closed = True
 
     def discover(self) -> object:
-        account_id = (
-            "recovery-account"
-            if self.credential.kind == "basic"
-            else self.expected_account_id
-        )
+        if (
+            self.credential.kind == "basic"
+            and self.expected_username != "recovery-admin"
+        ):
+            supplied_username = bytes(self.credential.buffers[0]).decode()
+            supplied_password = bytes(self.credential.buffers[1]).decode()
+            local_part = supplied_username.partition("@")[0]
+            matches = [
+                object_id
+                for object_id, value in self.server.objects["Account"].items()
+                if value.get("name") == local_part
+            ]
+            if (
+                supplied_username != self.expected_username
+                or len(matches) != 1
+                or supplied_password
+                not in self.server.password_secrets.get(matches[0], {}).values()
+            ):
+                raise FakeRegistryAuthenticationError(
+                    "fixed authentication rejection",
+                )
+            account_id = matches[0]
+        else:
+            account_id = (
+                "recovery-account"
+                if self.credential.kind == "basic"
+                else self.expected_account_id
+            )
         if account_id is None:
             raise AssertionError("Bearer client omitted expected Account")
+        if (
+            self.expected_account_id is not None
+            and account_id != self.expected_account_id
+        ):
+            raise FakeRegistryAuthenticationError(
+                "fixed authentication rejection",
+            )
         self.session = SimpleNamespace(
             username=self.expected_username,
             account_id=account_id,
@@ -2819,6 +2857,22 @@ class FakeRegistryClient:
             object_id
             for object_id, value in self.server.objects[object_type].items()
             if value.get("name") == name
+        )
+
+    def query_described_ids(
+        self,
+        object_type: str,
+        description: str,
+        *,
+        page_limit: int = 100,
+    ) -> tuple[str, ...]:
+        self.server.calls.append(
+            ("query-description", object_type, description, page_limit),
+        )
+        return tuple(
+            object_id
+            for object_id, value in self.server.objects[object_type].items()
+            if value.get("description") == description
         )
 
     def get_one(
@@ -2911,7 +2965,13 @@ class FakeRegistryClient:
         )
         object_id = (
             "singleton"
-            if object_type in {"SystemSettings", "MtaStageRcpt"}
+            if object_type
+            in {
+                "Authentication",
+                "MtaStageAuth",
+                "MtaStageRcpt",
+                "SystemSettings",
+            }
             else self.server._id(object_type.lower())
         )
         copied = json.loads(json.dumps(value))
@@ -2919,9 +2979,18 @@ class FakeRegistryClient:
         self.server.objects[object_type][object_id] = copied
         if object_type == "Account":
             self.server.credentials[object_id] = {}
+            self.server.password_secrets[object_id] = {}
             if isinstance(credentials, dict):
                 for map_key, credential in credentials.items():
                     item = json.loads(json.dumps(credential))
+                    secret = item.get("secret")
+                    if item.get("@type") == "Password" and isinstance(
+                        secret,
+                        str,
+                    ):
+                        self.server.password_secrets[object_id][map_key] = (
+                            secret
+                        )
                     item["credentialId"] = self.server._id("password")
                     item["secret"] = "****"
                     self.server.credentials[object_id][map_key] = item
@@ -3008,6 +3077,44 @@ class FakeRegistryClient:
         else:
             target = self.server.objects[object_type][object_id]
         for path, value in patch.items():
+            if object_type == "Account" and path.startswith("credentials/"):
+                credential_path = path.removeprefix("credentials/").split("/")
+                map_key = credential_path[0]
+                if not map_key or len(credential_path) > 2:
+                    raise AssertionError("test credential patch is malformed")
+                if len(credential_path) == 2:
+                    if credential_path[1] != "secret" or not isinstance(
+                        value,
+                        str,
+                    ):
+                        raise AssertionError(
+                            "test credential secret patch is malformed",
+                        )
+                    existing = self.server.credentials[object_id][map_key]
+                    if existing.get("@type") != "Password":
+                        raise AssertionError(
+                            "test credential secret target is malformed",
+                        )
+                    self.server.password_secrets[object_id][map_key] = value
+                    continue
+                if value is None:
+                    self.server.credentials[object_id].pop(map_key, None)
+                    self.server.password_secrets[object_id].pop(map_key, None)
+                    continue
+                if not isinstance(value, dict):
+                    raise AssertionError("test credential value is malformed")
+                item = json.loads(json.dumps(value))
+                secret = item.get("secret")
+                if item.get("@type") == "Password" and isinstance(
+                    secret,
+                    str,
+                ):
+                    self.server.password_secrets[object_id][map_key] = secret
+                item["credentialId"] = self.server._id("password")
+                if "secret" in item:
+                    item["secret"] = "****"
+                self.server.credentials[object_id][map_key] = item
+                continue
             parts = path.split("/")
             nested = target
             for part in parts[:-1]:
@@ -3064,6 +3171,7 @@ class FakeRegistryClient:
                     )
                 else:
                     self.server.credentials.pop(object_id, None)
+                    self.server.password_secrets.pop(object_id, None)
         self.server.after_mutation(mutation_number)
         return SimpleNamespace(
             operation="destroy",
@@ -3803,6 +3911,73 @@ class FreshInitializationTest(unittest.TestCase):
         b'}'
     )
 
+    def test_migrated_current_finalizer_is_idempotent_and_rejects_bad_receipt(
+        self,
+    ) -> None:
+        current_state = object()
+        invalid_state = object()
+        runtime_state = SimpleNamespace(
+            RuntimeState=SimpleNamespace(
+                CURRENT=current_state,
+                INVALID=invalid_state,
+            ),
+            RECEIPT_RELATIVE=(
+                Path("debug-dashboard")
+                / ".runtime"
+                / "stalwart"
+                / "current.json"
+            ),
+            classify_repository=mock.Mock(return_value=current_state),
+            publish_current_receipt=mock.Mock(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            receipt = root / runtime_state.RECEIPT_RELATIVE
+            receipt.parent.mkdir(parents=True)
+            write_file(receipt, b"valid\n", 0o600)
+            with mock.patch.object(
+                bootstrap,
+                "_load_sibling_module",
+                return_value=runtime_state,
+            ):
+                self.assertEqual(
+                    bootstrap.finalize_migrated_current_runtime(root),
+                    receipt,
+                )
+            runtime_state.publish_current_receipt.assert_not_called()
+
+            receipt.unlink()
+            runtime_state.classify_repository.side_effect = [
+                invalid_state,
+                current_state,
+            ]
+            runtime_state.publish_current_receipt.return_value = receipt
+            with mock.patch.object(
+                bootstrap,
+                "_load_sibling_module",
+                return_value=runtime_state,
+            ):
+                self.assertEqual(
+                    bootstrap.finalize_migrated_current_runtime(root),
+                    receipt,
+                )
+            runtime_state.publish_current_receipt.assert_called_once_with(root)
+
+            runtime_state.publish_current_receipt.reset_mock()
+            runtime_state.classify_repository.side_effect = None
+            runtime_state.classify_repository.return_value = invalid_state
+            write_file(receipt, b"malformed\n", 0o600)
+            with (
+                mock.patch.object(
+                    bootstrap,
+                    "_load_sibling_module",
+                    return_value=runtime_state,
+                ),
+                self.assertRaises(bootstrap.BootstrapError),
+            ):
+                bootstrap.finalize_migrated_current_runtime(root)
+            runtime_state.publish_current_receipt.assert_not_called()
+
     def dependencies(
         self,
         events: list[object],
@@ -3996,6 +4171,46 @@ class FreshInitializationTest(unittest.TestCase):
                     "stop-recovery",
                     "mark-invalid",
                     "classify",
+                ],
+            )
+
+    def test_failure_publishing_initial_invalid_marker_does_not_stop_services(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+            dependencies = self.dependencies(
+                events,
+                ["fresh"],
+                fail_at="mark-invalid",
+            )
+
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "fresh Stalwart initialization failed safely",
+            ):
+                bootstrap.initialize_fresh(
+                    root,
+                    dependencies=dependencies,
+                )
+
+            self.assertEqual(
+                [
+                    event[0]
+                    for event in events
+                    if event[0]
+                    not in {
+                        "acquire-lock",
+                        "enter-lock",
+                        "assert-lock",
+                        "release-lock",
+                    }
+                ],
+                [
+                    "classify",
+                    "validate-definition",
+                    "mark-invalid",
                 ],
             )
 
@@ -4616,6 +4831,37 @@ class ProductionOrchestratorTest(unittest.TestCase):
             timeout: int,
         ) -> object:
             self.assertTrue(lock_state["held"])
+            self.assertEqual(
+                len(server.objects["Authentication"]),
+                1,
+                "normal Authentication must exist before routing proof",
+            )
+            self.assertEqual(
+                len(server.objects["MtaStageAuth"]),
+                1,
+                "normal MtaStageAuth must exist before routing proof",
+            )
+            self.assertEqual(
+                len(server.objects["Tracer"]),
+                1,
+                "normal debug Tracer must exist before routing proof",
+            )
+            management_ids = [
+                account_id
+                for account_id, value in server.objects["Account"].items()
+                if value.get("name") == "dashboard-management"
+            ]
+            self.assertEqual(len(management_ids), 1)
+            self.assertEqual(
+                sorted(
+                    credential.get("@type")
+                    for credential in server.credentials[
+                        management_ids[0]
+                    ].values()
+                ),
+                ["ApiKey", "Password"],
+                "management Password must exist before routing proof",
+            )
             self.assertEqual(stdin, b"")
             self.assertEqual(
                 cwd,
@@ -4702,6 +4948,72 @@ class ProductionOrchestratorTest(unittest.TestCase):
             self.assertEqual(
                 result.management_account_id,
                 management_ids[0],
+            )
+            management_credentials = server.credentials[management_ids[0]]
+            self.assertEqual(
+                sorted(
+                    credential["@type"]
+                    for credential in management_credentials.values()
+                ),
+                ["ApiKey", "Password"],
+            )
+            password = next(
+                credential
+                for credential in management_credentials.values()
+                if credential["@type"] == "Password"
+            )
+            self.assertEqual(
+                password,
+                {
+                    "@type": "Password",
+                    "allowedIps": {},
+                    "credentialId": password["credentialId"],
+                    "secret": "****",
+                },
+            )
+            self.assertEqual(
+                [
+                    value
+                    for value in server.objects["NetworkListener"].values()
+                    if value.get("name") == "submission"
+                ],
+                [
+                    {
+                        "bind": {"[::]:587": True},
+                        "name": "submission",
+                        "protocol": "smtp",
+                        "tlsImplicit": False,
+                        "useTls": False,
+                    },
+                ],
+            )
+            self.assertEqual(
+                server.objects["Authentication"],
+                {
+                    "singleton": {
+                        "directoryId": None,
+                        "passwordMinLength": 1,
+                        "passwordMinStrength": "zero",
+                    },
+                },
+            )
+            self.assertEqual(len(server.objects["MtaStageAuth"]), 1)
+            self.assertEqual(
+                list(server.objects["Tracer"].values()),
+                [
+                    {
+                        "@type": "Stdout",
+                        "ansi": False,
+                        "buffered": False,
+                        "description": "mail-sandbox debug stdout",
+                        "enable": True,
+                        "events": {},
+                        "eventsPolicy": "exclude",
+                        "level": "debug",
+                        "lossy": False,
+                        "multiline": False,
+                    },
+                ],
             )
             self.assertTrue(paths.final_receipt.is_file())
             self.assertTrue(paths.routing_proof.is_file())
@@ -4855,6 +5167,170 @@ class ProductionOrchestratorTest(unittest.TestCase):
                     event[0]
                     for event in events[last_validation + 1 : runtime_exit]
                 ],
+            )
+
+    def test_completed_bootstrap_reconciles_normal_contract_idempotently(
+        self,
+    ) -> None:
+        with TemporaryRepository() as repository:
+            server = FakeRegistryServer()
+            first_events: list[object] = []
+            bootstrap.run_bootstrap(
+                repository.root,
+                Path(sys.executable),
+                dependencies=self.dependencies(
+                    repository,
+                    server,
+                    first_events,
+                ),
+            )
+            submission_id = next(
+                object_id
+                for object_id, value
+                in server.objects["NetworkListener"].items()
+                if value.get("name") == "submission"
+            )
+            server.objects["NetworkListener"][submission_id]["protocol"] = (
+                "imap"
+            )
+            tracer_ids = tuple(server.objects["Tracer"])
+            management_id = next(
+                account_id
+                for account_id, value in server.objects["Account"].items()
+                if value.get("name") == "dashboard-management"
+            )
+            password_ids = tuple(
+                value["credentialId"]
+                for value in server.credentials[management_id].values()
+                if value["@type"] == "Password"
+            )
+
+            second_events: list[object] = []
+            bootstrap.run_bootstrap(
+                repository.root,
+                Path(sys.executable),
+                dependencies=self.dependencies(
+                    repository,
+                    server,
+                    second_events,
+                ),
+            )
+
+            self.assertEqual(
+                server.objects["NetworkListener"][submission_id]["protocol"],
+                "smtp",
+            )
+            self.assertEqual(tuple(server.objects["Tracer"]), tracer_ids)
+            self.assertEqual(
+                tuple(
+                    value["credentialId"]
+                    for value in server.credentials[management_id].values()
+                    if value["@type"] == "Password"
+                ),
+                password_ids,
+            )
+            self.assertFalse(
+                any(event[0] == "routing-command" for event in second_events),
+            )
+
+    def test_normal_contract_reconciliation_resumes_after_ambiguous_create(
+        self,
+    ) -> None:
+        with TemporaryRepository() as repository:
+            server = FakeRegistryServer()
+            server.fail_after_mutation_number = 12
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "ambiguous dispatch failure",
+            ):
+                bootstrap.run_bootstrap(
+                    repository.root,
+                    Path(sys.executable),
+                    dependencies=self.dependencies(repository, server, []),
+                )
+
+            paths = bootstrap.BootstrapPaths.for_repository(repository.root)
+            self.assertTrue(paths.proof.is_file())
+            self.assertFalse(paths.final_receipt.exists())
+            self.assertEqual(len(server.objects["Authentication"]), 1)
+
+            result = bootstrap.run_bootstrap(
+                repository.root,
+                Path(sys.executable),
+                dependencies=self.dependencies(repository, server, []),
+            )
+
+            self.assertTrue(result.final_receipt.path.is_file())
+            self.assertEqual(len(server.objects["Authentication"]), 1)
+            self.assertEqual(len(server.objects["MtaStageAuth"]), 1)
+            self.assertEqual(len(server.objects["Tracer"]), 1)
+            self.assertEqual(
+                len(
+                    [
+                        value
+                        for value
+                        in server.objects["NetworkListener"].values()
+                        if value.get("name") == "submission"
+                    ],
+                ),
+                1,
+            )
+
+    def test_completed_bootstrap_resets_stale_management_password_and_reproves(
+        self,
+    ) -> None:
+        with TemporaryRepository() as repository:
+            server = FakeRegistryServer()
+            bootstrap.run_bootstrap(
+                repository.root,
+                Path(sys.executable),
+                dependencies=self.dependencies(repository, server, []),
+            )
+            management_id = next(
+                account_id
+                for account_id, value in server.objects["Account"].items()
+                if value.get("name") == "dashboard-management"
+            )
+            password_key = next(
+                map_key
+                for map_key, value
+                in server.credentials[management_id].items()
+                if value["@type"] == "Password"
+            )
+            old_credential_id = server.credentials[management_id][
+                password_key
+            ]["credentialId"]
+            server.password_secrets[management_id][password_key] = "stale"
+
+            bootstrap.run_bootstrap(
+                repository.root,
+                Path(sys.executable),
+                dependencies=self.dependencies(repository, server, []),
+            )
+
+            self.assertEqual(
+                server.password_secrets[management_id],
+                {password_key: "secret"},
+            )
+            self.assertEqual(
+                server.credentials[management_id][password_key][
+                    "credentialId"
+                ],
+                old_credential_id,
+            )
+            self.assertGreaterEqual(
+                sum(
+                    1
+                    for call in server.calls
+                    if call[:3]
+                    == (
+                        "discover",
+                        "basic",
+                        "dashboard-management@local.test",
+                    )
+                ),
+                2,
             )
 
     def test_runtime_recovers_unavailable_mutable_artifacts_before_ready_validation(
@@ -5553,8 +6029,13 @@ class ProductionOrchestratorTest(unittest.TestCase):
                 server.credentials[result.management_account_id],
             )
             self.assertEqual(
-                len(server.credentials[result.management_account_id]),
-                1,
+                sorted(
+                    value["@type"]
+                    for value in server.credentials[
+                        result.management_account_id
+                    ].values()
+                ),
+                ["ApiKey", "Password"],
             )
             replacement_payload = json.loads(
                 paths.replacement.read_text("utf-8"),
@@ -6572,7 +7053,7 @@ class ProductionOrchestratorTest(unittest.TestCase):
     def test_each_actor_cleanup_dispatch_failure_still_cleans_both_accounts(
         self,
     ) -> None:
-        for failure_number in (13, 14):
+        for failure_number in (18, 19):
             with (
                 self.subTest(failure_number=failure_number),
                 TemporaryRepository() as repository,

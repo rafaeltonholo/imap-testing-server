@@ -200,6 +200,14 @@ class RuntimeStateClassificationTest(unittest.TestCase):
         )
         (self.root / "stalwart" / "config.json").write_bytes(CONFIG_BYTES)
 
+    def test_root_failure_intent_is_ignored_by_git(self) -> None:
+        gitignore = (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "/.mail-sandbox-fresh-initialization-intent\n",
+            gitignore,
+        )
+
     def write_compose(self, image: str) -> None:
         if image == CURRENT_IMAGE:
             content = current_compose_text()
