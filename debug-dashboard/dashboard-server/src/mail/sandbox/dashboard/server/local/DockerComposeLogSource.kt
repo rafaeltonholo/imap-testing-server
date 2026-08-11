@@ -8,7 +8,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import mail.sandbox.dashboard.contract.LogResponse
 import mail.sandbox.dashboard.contract.LogService
-import mail.sandbox.dashboard.server.gate.dovecot.DovecotDockerRouting
 
 private const val ROOT_COMPOSE = "docker-compose.yml"
 
@@ -211,7 +210,6 @@ private const val STALWART_ID_RADIX = 32UL
 
 internal class JvmComposeLogRunner(
     private val repositoryRoot: Path,
-    private val dockerRouting: DovecotDockerRouting = DovecotDockerRouting.localDefault(),
 ) : ComposeLogRunner {
     override fun run(request: ComposeLogRequest): ComposeLogResult {
         require(Files.isRegularFile(repositoryRoot.resolve("docker-compose.yml"))) {
@@ -227,7 +225,7 @@ internal class JvmComposeLogRunner(
         }
         val process = ProcessBuilder(request.argv)
             .directory(repositoryRoot.toFile())
-            .also { builder -> dockerRouting.applyTo(builder.environment()) }
+            .also { builder -> applyRootComposeRouting(builder.environment()) }
             .start()
         process.outputStream.close()
         val readers = Executors.newFixedThreadPool(2) { runnable ->
@@ -275,4 +273,12 @@ internal class JvmComposeLogRunner(
             argv[7].toIntOrNull() in 1..2_000 &&
             argv[8] in setOf("dovecot", "postfix", "oauth2-mock", "stalwart")
     }
+}
+
+internal fun applyRootComposeRouting(environment: MutableMap<String, String>) {
+    environment.keys
+        .filter { key -> key.startsWith("COMPOSE_") || key.startsWith("DOCKER_") }
+        .forEach(environment::remove)
+    environment["DOCKER_HOST"] = "unix:///var/run/docker.sock"
+    environment["COMPOSE_DISABLE_ENV_FILE"] = "1"
 }

@@ -190,6 +190,10 @@ class LocalDashboardScriptsTest {
             assertEquals(0, upgradeRequired.exitCode, upgradeRequired.output)
             assertTrue("Stalwart upgrade required" in upgradeRequired.output)
             assertTrue("docs/stalwart-v016-migration.md" in upgradeRequired.output)
+            assertTrue(
+                "python3 scripts/capture_stalwart_v015.py capture --source-service stalwart" in
+                    upgradeRequired.output,
+            )
             assertTrue(upgradeRequired.trace.none { "initialize-fresh" in it })
             assertTrue(upgradeRequired.trace.none { it.endsWith("up -d stalwart") })
             assertTrue(upgradeRequired.trace.none { it.startsWith("curl|") })

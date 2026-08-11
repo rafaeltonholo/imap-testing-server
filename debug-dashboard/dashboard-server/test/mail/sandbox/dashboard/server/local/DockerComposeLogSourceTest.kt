@@ -153,6 +153,30 @@ class DockerComposeLogSourceTest {
     }
 
     @Test
+    fun rootLogRoutingDiscardsInheritedComposeAndDockerOverrides() {
+        val environment = mutableMapOf(
+            "PATH" to "/usr/bin",
+            "COMPOSE_FILE" to "debug-dashboard/docker-compose.local-providers.yml",
+            "COMPOSE_PROJECT_NAME" to "mail-sandbox-dashboard",
+            "COMPOSE_PROFILES" to "retired-profile",
+            "DOCKER_CONTEXT" to "remote-context",
+            "DOCKER_HOST" to "tcp://example.invalid:2375",
+            "DOCKER_TLS_VERIFY" to "1",
+        )
+
+        applyRootComposeRouting(environment)
+
+        assertEquals("/usr/bin", environment["PATH"])
+        assertEquals("unix:///var/run/docker.sock", environment["DOCKER_HOST"])
+        assertEquals("1", environment["COMPOSE_DISABLE_ENV_FILE"])
+        assertEquals(null, environment["COMPOSE_FILE"])
+        assertEquals(null, environment["COMPOSE_PROJECT_NAME"])
+        assertEquals(null, environment["COMPOSE_PROFILES"])
+        assertEquals(null, environment["DOCKER_CONTEXT"])
+        assertEquals(null, environment["DOCKER_TLS_VERIFY"])
+    }
+
+    @Test
     fun rejectsUnboundedRequestsAndCommandFailures() {
         val source = DockerComposeLogSource(
             repositoryRoot,

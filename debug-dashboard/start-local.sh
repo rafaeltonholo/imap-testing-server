@@ -138,7 +138,9 @@ case "$dashboard_classified_stalwart_state" in
     dashboard_stalwart_runtime_state=MIGRATION_REQUIRED
     printf '%s\n' \
       'Stalwart upgrade required.' \
-      'Follow docs/stalwart-v016-migration.md; migration requires explicit authorization.' >&2
+      'Follow docs/stalwart-v016-migration.md; migration requires explicit authorization.' \
+      'Capture command (do not run without authorization):' \
+      'python3 scripts/capture_stalwart_v015.py capture --source-service stalwart' >&2
     ;;
   invalid)
     dashboard_stalwart_runtime_state=INVALID
