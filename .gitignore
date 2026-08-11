@@ -250,3 +250,4 @@ mails/debugging/*
 # AI stuff
 .claude/settings.local.json
 .superpowers/brainstorm/
+debug-dashboard/.runtime/acceptance/
