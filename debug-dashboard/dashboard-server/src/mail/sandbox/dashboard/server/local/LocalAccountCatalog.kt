@@ -93,9 +93,6 @@ internal class LocalAccountCatalog(
                 val accountId = account.providerAccountId
                 if (accountId != null) {
                     records.firstOrNull { it.providerAccountId == accountId }
-                        ?: records.firstOrNull {
-                            it.address == canonical && it.providerAccountId == null
-                        }
                 } else {
                     records.firstOrNull {
                         it.address == canonical && it.providerAccountId == null
@@ -157,6 +154,23 @@ internal class LocalAccountCatalog(
         val current = read().accounts
         val next = current.filterNot {
             it.provider == provider && it.address == canonical
+        }
+        if (next.size == current.size) return false
+        write(LocalAccountDocument(accounts = next.sortedWith(RECORD_ORDER)))
+        return true
+    }
+
+    @Synchronized
+    fun removeByProviderAccountId(provider: Provider, providerAccountId: String): Boolean {
+        require(provider == Provider.STALWART) {
+            "Only Stalwart records use a provider Account ID"
+        }
+        require(PROVIDER_ACCOUNT_ID.matches(providerAccountId)) {
+            "Stalwart Account ID is invalid"
+        }
+        val current = read().accounts
+        val next = current.filterNot {
+            it.provider == provider && it.providerAccountId == providerAccountId
         }
         if (next.size == current.size) return false
         write(LocalAccountDocument(accounts = next.sortedWith(RECORD_ORDER)))

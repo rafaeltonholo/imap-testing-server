@@ -6,6 +6,7 @@ import kotlin.io.path.readText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import mail.sandbox.dashboard.contract.AccountInfo
@@ -189,7 +190,34 @@ class LocalAccountCatalogTest {
     }
 
     @Test
-    fun stalwartAddressFallbackAppliesOnlyToCachedRecordsWithoutAnId() {
+    fun stalwartRemovalUsesTheExactProviderIdentity() {
+        val root = createTempDirectory("dashboard-account-catalog-stalwart-remove")
+        try {
+            val catalog = LocalAccountCatalog(root.resolve("accounts.json"))
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "current-password",
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "current-id",
+                ),
+            )
+
+            assertFalse(catalog.removeByProviderAccountId(Provider.STALWART, "stale-id"))
+            assertEquals(
+                "current-password",
+                catalog.findByProviderAccountId(Provider.STALWART, "current-id")?.password,
+            )
+            assertTrue(catalog.removeByProviderAccountId(Provider.STALWART, "current-id"))
+            assertNull(catalog.findByProviderAccountId(Provider.STALWART, "current-id"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stalwartLiveIdentityNeverInheritsAnIdLessLegacyPasswordByAddress() {
         val root = createTempDirectory("dashboard-account-catalog-stalwart-fallback")
         try {
             val catalog = LocalAccountCatalog(root.resolve("accounts.json"))
@@ -209,7 +237,7 @@ class LocalAccountCatalogTest {
                 providerAccountId = "live-id",
             )
 
-            assertEquals("legacy-password", catalog.findByIdentity(live)?.password)
+            assertNull(catalog.findByIdentity(live))
         } finally {
             root.toFile().deleteRecursively()
         }

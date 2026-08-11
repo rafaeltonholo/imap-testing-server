@@ -1,6 +1,7 @@
 package mail.sandbox.dashboard.server.local
 
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.writeText
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,6 +41,84 @@ import mail.sandbox.dashboard.server.provider.dovecot.DovecotMessageSummary
 import mail.sandbox.dashboard.server.provider.dovecot.DovecotProductAdapter
 
 class DovecotDashboardProviderTest {
+    @Test
+    fun malformedPasswordCacheDegradesOnlyAccountsThatNeedItsFallback() = runBlocking {
+        val directory = createTempDirectory("dovecot-readiness-cache-isolation").toRealPath()
+        try {
+            val catalogPath = directory.resolve("accounts.json")
+            catalogPath.writeText("{")
+            val mailbox = RecordingMailboxClient()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    MultipleAccountRegistry(
+                        linkedMapOf(
+                            "alice@local.test" to null,
+                            "bob@local.test" to "bob-password",
+                        ),
+                    ),
+                    QueueRunner(),
+                ),
+                catalog = LocalAccountCatalog(catalogPath),
+                mailboxClient = mailbox,
+            )
+
+            val accounts = provider.listAccounts()
+
+            assertEquals(
+                listOf("alice@local.test", "bob@local.test"),
+                accounts.map { it.address },
+            )
+            assertEquals(
+                listOf(CredentialReadiness.PROVIDER_UNAVAILABLE, CredentialReadiness.READY),
+                accounts.map { it.credentialReadiness },
+            )
+            assertTrue("catalog" in accounts.first().readinessMessage.orEmpty().lowercase())
+            assertEquals(
+                listOf(AccountCredentials("bob@local.test", "bob-password")),
+                mailbox.probed,
+            )
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun accountListingStopsProbingAfterProviderTransportBecomesUnavailable() = runBlocking {
+        val directory = createTempDirectory("dovecot-readiness-bounded-probes").toRealPath()
+        try {
+            val mailbox = RecordingMailboxClient(
+                probeOutcomes = listOf(AuthenticationOutcome.TimedOut("read timed out")),
+            )
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    MultipleAccountRegistry(
+                        linkedMapOf(
+                            "alice@local.test" to "alice-password",
+                            "bob@local.test" to "bob-password",
+                            "carol@local.test" to "carol-password",
+                        ),
+                    ),
+                    QueueRunner(),
+                ),
+                catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = mailbox,
+            )
+
+            val accounts = provider.listAccounts()
+
+            assertEquals(3, accounts.size)
+            assertTrue(accounts.all {
+                it.credentialReadiness == CredentialReadiness.PROVIDER_UNAVAILABLE
+            })
+            assertEquals(1, mailbox.probed.size)
+            assertTrue(accounts.drop(1).all {
+                "skipped" in it.readinessMessage.orEmpty().lowercase()
+            })
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun accountListingMapsEveryOrdinaryImapReadinessOutcome() = runBlocking {
         data class Case(
@@ -200,7 +279,7 @@ class DovecotDashboardProviderTest {
                     authenticationProbe = ProviderAuthenticationProbe(connector),
                 )
 
-                listOf(
+                val results = listOf(
                     AuthenticationProbeRequest(
                         "alice@local.test",
                         Provider.DOVECOT,
@@ -230,9 +309,22 @@ class DovecotDashboardProviderTest {
                         AuthenticationProtocol.OAUTH_SMTP,
                         "smtp-token",
                     ),
-                ).forEach { request ->
-                    assertTrue(provider.probeAuthentication(request).success)
+                ).map { request ->
+                    provider.probeAuthentication(request).also { result ->
+                        assertTrue(result.response.success)
+                    }
                 }
+
+                assertEquals(
+                    listOf(
+                        listOf("remembered-password"),
+                        listOf("override-password"),
+                        emptyList(),
+                        listOf("imap-token"),
+                        listOf("smtp-token"),
+                    ),
+                    results.map(LocalAuthenticationProbeResult::secretsToRedact),
+                )
 
                 assertEquals(
                     listOf(
@@ -821,14 +913,24 @@ private class MutablePlainAccountRegistry(
     }
 }
 
+private class MultipleAccountRegistry(
+    private val passwords: LinkedHashMap<String, String?>,
+) : DovecotAccountRegistry by EmptyAccounts {
+    override fun list(): List<String> = passwords.keys.toList()
+
+    override fun plainPassword(address: String): String? = passwords[address]
+}
+
 private class RecordingMailboxClient(
     val folders: MutableList<DovecotFolder> = mutableListOf(DovecotFolder("INBOX")),
     messageSnapshots: List<List<DovecotMessageSummary>> = emptyList(),
     private val rawMessage: String = fixtureRawMessage(),
     private val probeOutcome: AuthenticationOutcome =
         AuthenticationOutcome.Authenticated("authenticated"),
+    probeOutcomes: List<AuthenticationOutcome> = emptyList(),
 ) : DovecotMailboxClient {
     private val messageSnapshots = ArrayDeque(messageSnapshots)
+    private val probeOutcomes = ArrayDeque(probeOutcomes)
     private var lastMessageSnapshot: List<DovecotMessageSummary>? = null
     val credentials = mutableListOf<AccountCredentials>()
     val probed = mutableListOf<AccountCredentials>()
@@ -839,7 +941,7 @@ private class RecordingMailboxClient(
     override fun probe(credentials: AccountCredentials): AuthenticationOutcome {
         this.credentials += credentials
         probed += credentials
-        return probeOutcome
+        return probeOutcomes.removeFirstOrNull() ?: probeOutcome
     }
 
     override fun listFolders(credentials: AccountCredentials): List<DovecotFolder> {

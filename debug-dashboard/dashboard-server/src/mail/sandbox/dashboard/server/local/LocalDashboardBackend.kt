@@ -1,6 +1,7 @@
 package mail.sandbox.dashboard.server.local
 
 import java.nio.file.Path
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
@@ -44,13 +45,17 @@ internal interface LocalProviderOperations {
 
     suspend fun createAccount(request: CreateAccountRequest): AccountInfo
 
-    suspend fun dashboardLogAccount(address: String): DashboardLogAccount
+    suspend fun dashboardLogAccount(
+        address: String,
+        providerAccountId: String? = null,
+    ): DashboardLogAccount
 
-    suspend fun deleteAccount(address: String)
+    suspend fun deleteAccount(address: String, providerAccountId: String? = null)
 
     suspend fun adoptPassword(
         address: String,
         request: AdoptPasswordRequest,
+        providerAccountId: String? = null,
     ): CredentialUpdateResponse = unavailableCredentialUpdate(
         address,
         "Password verification is unavailable for ${provider.name}",
@@ -59,31 +64,47 @@ internal interface LocalProviderOperations {
     suspend fun changePassword(
         address: String,
         newPassword: String,
+        providerAccountId: String? = null,
     ): CredentialUpdateResponse
 
     suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
-    ): AuthenticationProbeResponse = AuthenticationProbeResponse(
-        address = request.address,
-        provider = request.provider,
-        protocol = request.protocol,
-        success = false,
-        providerResponse = "Authentication probes are unavailable for ${provider.name}",
-        correlatedLogs = emptyList(),
+    ): LocalAuthenticationProbeResult = LocalAuthenticationProbeResult(
+        response = AuthenticationProbeResponse(
+            address = request.address,
+            provider = request.provider,
+            protocol = request.protocol,
+            success = false,
+            providerResponse = "Authentication probes are unavailable for ${provider.name}",
+            correlatedLogs = emptyList(),
+        ),
     )
 
-    suspend fun listFolders(address: String): List<FolderInfo>
+    suspend fun listFolders(address: String, providerAccountId: String? = null): List<FolderInfo>
 
-    suspend fun createFolder(address: String, name: String): FolderInfo
+    suspend fun createFolder(
+        address: String,
+        name: String,
+        providerAccountId: String? = null,
+    ): FolderInfo
 
-    suspend fun deleteFolder(address: String, folderId: String)
+    suspend fun deleteFolder(
+        address: String,
+        folderId: String,
+        providerAccountId: String? = null,
+    )
 
-    suspend fun listMessages(address: String, folderId: String?): List<MessageSummary>
+    suspend fun listMessages(
+        address: String,
+        folderId: String?,
+        providerAccountId: String? = null,
+    ): List<MessageSummary>
 
     suspend fun readMessage(
         address: String,
         messageId: String,
         folderId: String?,
+        providerAccountId: String? = null,
     ): MessageDetail
 
     suspend fun mutateMessages(
@@ -112,6 +133,15 @@ internal interface LocalProviderOperations {
     )
 }
 
+/** Provider-only probe metadata. Secrets never cross the serialized API boundary. */
+internal data class LocalAuthenticationProbeResult(
+    val response: AuthenticationProbeResponse,
+    val secretsToRedact: List<String> = emptyList(),
+) {
+    override fun toString(): String =
+        "LocalAuthenticationProbeResult(response=redacted, secretCount=${secretsToRedact.size})"
+}
+
 internal class LocalDashboardBackend(
     providers: Map<Provider, LocalProviderOperations>,
     private val logSource: DashboardLogSource,
@@ -136,7 +166,13 @@ internal class LocalDashboardBackend(
     }
 
     override suspend fun listAccounts(): AccountListResponse {
-        val cached = cachedAccounts()
+        val cached = try {
+            cachedAccounts()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            emptyList()
+        }
         val accounts = mutableListOf<AccountInfo>()
         val statuses = mutableListOf<ProviderStatus>()
         Provider.entries.forEach { provider ->
@@ -146,7 +182,7 @@ internal class LocalDashboardBackend(
                 statuses += ProviderStatus(provider, ProviderAvailability.UNAVAILABLE, message)
                 accounts += staleAccounts(cached, provider, message)
             } else {
-                val result = runCatching {
+                try {
                     val live = operations.listAccounts()
                     require(live.all { it.provider == provider }) {
                         "${provider.displayName()} returned an account for another provider"
@@ -155,12 +191,11 @@ internal class LocalDashboardBackend(
                     require(status.provider == provider) {
                         "${provider.displayName()} returned an inconsistent provider status"
                     }
-                    live to status
-                }
-                result.onSuccess { (live, status) ->
                     accounts += live
                     statuses += status
-                }.onFailure { failure ->
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
                     val message = failure.message
                         ?.take(PROVIDER_STATUS_MESSAGE_LIMIT)
                         ?.ifBlank { null }
@@ -188,32 +223,45 @@ internal class LocalDashboardBackend(
     override suspend fun deleteAccount(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): OperationResponse {
-        operations(provider).deleteAccount(address)
+        operations(provider).deleteAccount(address, providerAccountId)
         return success("Account deleted from ${provider.displayName()}")
     }
 
     override suspend fun adoptPassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: AdoptPasswordRequest,
-    ): CredentialUpdateResponse = operations(provider).adoptPassword(address, request)
+    ): CredentialUpdateResponse =
+        operations(provider).adoptPassword(address, request, providerAccountId)
 
     override suspend fun changePassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: ChangePasswordRequest,
     ): CredentialUpdateResponse =
-        operations(provider).changePassword(address, request.newPassword)
+        operations(provider).changePassword(address, request.newPassword, providerAccountId)
 
     override suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
     ): AuthenticationProbeResponse {
         val operations = operations(request.provider)
-        val logAccount = operations.dashboardLogAccount(request.address)
+        val logAccount = operations.dashboardLogAccount(
+            request.address,
+            request.providerAccountId,
+        )
         val service = request.logService()
         val cursor = logSource.snapshot(service, logAccount, AUTHENTICATION_LOG_LIMIT)
-        val response = operations.probeAuthentication(request).redact(request.credentialOverride)
+        val probeResult = operations.probeAuthentication(request)
+        val secretsToRedact = (probeResult.secretsToRedact + request.credentialOverride)
+            .filterNotNull()
+            .filter(String::isNotEmpty)
+            .distinct()
+            .sortedByDescending(String::length)
+        val response = probeResult.response.redact(secretsToRedact)
         var correlated = emptyList<String>()
         repeat(authenticationLogPollAttempts) { attempt ->
             if (attempt > 0 && authenticationLogPollDelayMillis > 0) {
@@ -224,7 +272,7 @@ internal class LocalDashboardBackend(
                 account = logAccount,
                 cursor = cursor,
                 limit = AUTHENTICATION_LOG_LIMIT,
-            ).lines.map { line -> line.redact(request.credentialOverride) }
+            ).lines.map { line -> line.redact(secretsToRedact) }
             if (correlated.isNotEmpty()) {
                 return response.copy(correlatedLogs = correlated.takeLast(AUTHENTICATION_LOG_LIMIT))
             }
@@ -234,8 +282,12 @@ internal class LocalDashboardBackend(
 
     override suspend fun logs(service: LogService): LogResponse = logSource.read(service)
 
-    override suspend fun accountLogs(address: String, provider: Provider): LogResponse {
-        val account = operations(provider).dashboardLogAccount(address)
+    override suspend fun accountLogs(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): LogResponse {
+        val account = operations(provider).dashboardLogAccount(address, providerAccountId)
         return when (provider) {
             Provider.DOVECOT -> LogResponse(
                 service = LogService.DOVECOT,
@@ -255,43 +307,65 @@ internal class LocalDashboardBackend(
     override suspend fun listFolders(
         address: String,
         provider: Provider,
-    ): FolderListResponse = FolderListResponse(operations(provider).listFolders(address))
+        providerAccountId: String?,
+    ): FolderListResponse = FolderListResponse(
+        operations(provider).listFolders(address, providerAccountId),
+    )
 
     override suspend fun createFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: CreateFolderRequest,
-    ): FolderInfo = operations(provider).createFolder(address, request.name)
+    ): FolderInfo = operations(provider).createFolder(
+        address,
+        request.name,
+        providerAccountId,
+    )
 
     override suspend fun deleteFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String,
     ): OperationResponse {
-        operations(provider).deleteFolder(address, folderId)
+        operations(provider).deleteFolder(address, folderId, providerAccountId)
         return success("Folder deleted")
     }
 
     override suspend fun listMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String?,
     ): MessageListResponse = MessageListResponse(
-        operations(provider).listMessages(address, folderId),
+        operations(provider).listMessages(address, folderId, providerAccountId),
     )
 
     override suspend fun readMessage(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         messageId: String,
         folderId: String?,
-    ): MessageDetail = operations(provider).readMessage(address, messageId, folderId)
+    ): MessageDetail = operations(provider).readMessage(
+        address,
+        messageId,
+        folderId,
+        providerAccountId,
+    )
 
     override suspend fun mutateMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: MutateMessagesRequest,
-    ): OperationResponse = operations(provider).mutateMessages(address, request)
+    ): OperationResponse {
+        require(request.providerAccountId == providerAccountId) {
+            "Message action provider identity does not match the route"
+        }
+        return operations(provider).mutateMessages(address, request)
+    }
 
     override suspend fun generateMessage(
         request: GenerateMessageRequest,
@@ -317,7 +391,13 @@ internal class LocalDashboardBackend(
 
     override fun close() {
         providers.values.filterIsInstance<AutoCloseable>().forEach { provider ->
-            runCatching(provider::close)
+            try {
+                provider.close()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                // Closing one provider must not prevent the remaining providers from closing.
+            }
         }
     }
 
@@ -395,13 +475,13 @@ private fun Provider.displayName(): String = when (this) {
     Provider.STALWART -> "Stalwart"
 }
 
-private fun AuthenticationProbeResponse.redact(credential: String?): AuthenticationProbeResponse =
+private fun AuthenticationProbeResponse.redact(credentials: List<String>): AuthenticationProbeResponse =
     copy(
-        providerResponse = providerResponse.redact(credential),
-        correlatedLogs = correlatedLogs.map { line -> line.redact(credential) },
+        providerResponse = providerResponse.redact(credentials),
+        correlatedLogs = correlatedLogs.map { line -> line.redact(credentials) },
     )
 
-private fun String.redact(credential: String?): String = credential
-    ?.takeIf(String::isNotEmpty)
-    ?.let { replace(it, "[redacted]") }
-    ?: this
+private fun String.redact(credentials: List<String>): String =
+    credentials.fold(this) { redacted, credential ->
+        redacted.replace(credential, "[redacted]")
+    }

@@ -11,6 +11,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -46,6 +47,7 @@ import mail.sandbox.dashboard.contract.ProviderStatus
 import mail.sandbox.dashboard.contract.Routes
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DashboardApiRoutesTest {
@@ -69,12 +71,12 @@ class DashboardApiRoutesTest {
             assertResponse(
                 HttpStatusCode.OK,
                 backend.operation,
-                client.delete(Routes.account(TEST_ADDRESS, Provider.STALWART)),
+                client.delete(withIdentity(Routes.account(TEST_ADDRESS, Provider.STALWART))),
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.credentialUpdate,
-                client.put(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART)) {
+                client.put(withIdentity(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART))) {
                     jsonBody(backend.passwordRequest)
                 },
             )
@@ -82,7 +84,9 @@ class DashboardApiRoutesTest {
                 HttpStatusCode.OK,
                 backend.credentialUpdate,
                 client.post(
-                    Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                    withIdentity(
+                        Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                    ),
                 ) {
                     jsonBody(backend.adoptRequest)
                 },
@@ -102,45 +106,49 @@ class DashboardApiRoutesTest {
             assertResponse(
                 HttpStatusCode.OK,
                 backend.accountLogs,
-                client.get(Routes.accountLogs(TEST_ADDRESS, Provider.STALWART)),
+                client.get(withIdentity(Routes.accountLogs(TEST_ADDRESS, Provider.STALWART))),
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.folderList,
-                client.get(Routes.folders(TEST_ADDRESS, Provider.STALWART)),
+                client.get(withIdentity(Routes.folders(TEST_ADDRESS, Provider.STALWART))),
             )
             assertResponse(
                 HttpStatusCode.Created,
                 backend.createdFolder,
-                client.post(Routes.folders(TEST_ADDRESS, Provider.STALWART)) {
+                client.post(withIdentity(Routes.folders(TEST_ADDRESS, Provider.STALWART))) {
                     jsonBody(backend.folderRequest)
                 },
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.operation,
-                client.delete(Routes.folder(TEST_ADDRESS, Provider.STALWART, TEST_FOLDER_ID)),
+                client.delete(
+                    withIdentity(
+                        Routes.folder(TEST_ADDRESS, Provider.STALWART, TEST_FOLDER_ID),
+                    ),
+                ),
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.messageList,
                 client.get(
-                    "${Routes.messages(TEST_ADDRESS, Provider.STALWART)}" +
-                        "?folderId=$TEST_FOLDER_ID",
+                    "${withIdentity(Routes.messages(TEST_ADDRESS, Provider.STALWART))}" +
+                        "&folderId=$TEST_FOLDER_ID",
                 ),
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.messageDetail,
                 client.get(
-                    "${Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID)}" +
-                        "?folderId=$TEST_FOLDER_ID",
+                    "${withIdentity(Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID))}" +
+                        "&folderId=$TEST_FOLDER_ID",
                 ),
             )
             assertResponse(
                 HttpStatusCode.OK,
                 backend.operation,
-                client.post(Routes.messageActions(TEST_ADDRESS, Provider.STALWART)) {
+                client.post(withIdentity(Routes.messageActions(TEST_ADDRESS, Provider.STALWART))) {
                     jsonBody(backend.mutationRequest)
                 },
             )
@@ -157,45 +165,64 @@ class DashboardApiRoutesTest {
             listOf(
                 DashboardCall.ListAccounts,
                 DashboardCall.CreateAccount(backend.createRequest),
-                DashboardCall.DeleteAccount(TEST_ADDRESS, Provider.STALWART),
+                DashboardCall.DeleteAccount(
+                    TEST_ADDRESS,
+                    Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
+                ),
                 DashboardCall.ChangePassword(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     backend.passwordRequest,
                 ),
                 DashboardCall.AdoptPassword(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     backend.adoptRequest,
                 ),
                 DashboardCall.ProbeAuthentication(backend.probeRequest),
                 DashboardCall.Logs(LogService.STALWART),
-                DashboardCall.AccountLogs(TEST_ADDRESS, Provider.STALWART),
-                DashboardCall.ListFolders(TEST_ADDRESS, Provider.STALWART),
+                DashboardCall.AccountLogs(
+                    TEST_ADDRESS,
+                    Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
+                ),
+                DashboardCall.ListFolders(
+                    TEST_ADDRESS,
+                    Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
+                ),
                 DashboardCall.CreateFolder(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     backend.folderRequest,
                 ),
                 DashboardCall.DeleteFolder(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     TEST_FOLDER_ID,
                 ),
                 DashboardCall.ListMessages(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     TEST_FOLDER_ID,
                 ),
                 DashboardCall.ReadMessage(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     TEST_MESSAGE_ID,
                     TEST_FOLDER_ID,
                 ),
                 DashboardCall.MutateMessages(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     backend.mutationRequest,
                 ),
                 DashboardCall.GenerateMessage(backend.generateRequest),
@@ -327,7 +354,9 @@ class DashboardApiRoutesTest {
             assertEquals(
                 HttpStatusCode.OK,
                 client.get(
-                    Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID),
+                    withIdentity(
+                        Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID),
+                    ),
                 ).status,
             )
         }
@@ -338,6 +367,7 @@ class DashboardApiRoutesTest {
                 DashboardCall.ReadMessage(
                     TEST_ADDRESS,
                     Provider.STALWART,
+                    TEST_PROVIDER_ACCOUNT_ID,
                     TEST_MESSAGE_ID,
                     null,
                 ),
@@ -355,17 +385,19 @@ class DashboardApiRoutesTest {
 
             listOf(
                 client.post(Routes.ACCOUNTS) { malformedJsonBody() },
-                client.put(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART)) {
+                client.put(withIdentity(Routes.accountPassword(TEST_ADDRESS, Provider.STALWART))) {
                     malformedJsonBody()
                 },
                 client.post(
-                    Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                    withIdentity(
+                        Routes.accountPasswordVerification(TEST_ADDRESS, Provider.STALWART),
+                    ),
                 ) { malformedJsonBody() },
                 client.post(Routes.AUTHENTICATION_PROBES) { malformedJsonBody() },
-                client.post(Routes.folders(TEST_ADDRESS, Provider.STALWART)) {
+                client.post(withIdentity(Routes.folders(TEST_ADDRESS, Provider.STALWART))) {
                     malformedJsonBody()
                 },
-                client.post(Routes.messageActions(TEST_ADDRESS, Provider.STALWART)) {
+                client.post(withIdentity(Routes.messageActions(TEST_ADDRESS, Provider.STALWART))) {
                     malformedJsonBody()
                 },
                 client.post(Routes.GENERATE_MESSAGE) { malformedJsonBody() },
@@ -385,6 +417,7 @@ class DashboardApiRoutesTest {
     fun rejectsInvalidPathAndQueryEnumsAndMismatchedMutationTargets() {
         val backend = RecordingDashboardBackend()
         val mismatch = backend.mutationRequest.copy(account = "other@local.test")
+        val mismatchedIdentity = backend.mutationRequest.copy(providerAccountId = "account-other")
         val missingSource = backend.mutationRequest.copy(sourceFolderId = null)
         val missingMutationState = backend.mutationRequest.copy(mutationStates = emptyMap())
         val batchMutation = backend.mutationRequest.copy(
@@ -408,9 +441,14 @@ class DashboardApiRoutesTest {
             )
             val invalidService = client.get("${Routes.LOGS}?service=not-a-service")
             val mismatchedMutation = client.post(
-                Routes.messageActions(TEST_ADDRESS, Provider.STALWART),
+                withIdentity(Routes.messageActions(TEST_ADDRESS, Provider.STALWART)),
             ) {
                 jsonBody(mismatch)
+            }
+            val mismatchedIdentityMutation = client.post(
+                withIdentity(Routes.messageActions(TEST_ADDRESS, Provider.STALWART)),
+            ) {
+                jsonBody(mismatchedIdentity)
             }
             val missingSourceMutation = client.post(
                 Routes.messageActions(TEST_ADDRESS, Provider.STALWART),
@@ -438,6 +476,7 @@ class DashboardApiRoutesTest {
                 invalidProvider,
                 invalidService,
                 mismatchedMutation,
+                mismatchedIdentityMutation,
                 missingSourceMutation,
                 missingStateMutation,
                 batchMessageMutation,
@@ -464,7 +503,9 @@ class DashboardApiRoutesTest {
 
             backend.failure = DashboardNotFoundException("Message does not exist")
             val missing = client.get(
-                Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID),
+                withIdentity(
+                    Routes.message(TEST_ADDRESS, Provider.STALWART, TEST_MESSAGE_ID),
+                ),
             )
             assertEquals(HttpStatusCode.NotFound, missing.status)
             assertEquals(
@@ -478,6 +519,25 @@ class DashboardApiRoutesTest {
             assertEquals(
                 DashboardApiError("internal_error", "compose exploded"),
                 Json.decodeFromString<DashboardApiError>(failed.bodyAsText()),
+            )
+        }
+    }
+
+    @Test
+    fun requestCancellationIsNeverConvertedIntoAnHttpError() {
+        val backend = RecordingDashboardBackend().apply {
+            failure = CancellationException("request cancelled")
+        }
+
+        testApplication {
+            application { routing { dashboardApiRoutes(backend) } }
+
+            val response = client.get(Routes.ACCOUNTS)
+
+            assertEquals(HttpStatusCode.InternalServerError, response.status)
+            assertFalse(
+                "\"error\":\"internal_error\"" in response.bodyAsText(),
+                "Cancellation must escape the dashboard's typed error adapter",
             )
         }
     }
@@ -510,49 +570,72 @@ class DashboardApiRoutesTest {
 private const val TEST_ADDRESS = "dev@local.test"
 private const val TEST_FOLDER_ID = "inbox"
 private const val TEST_MESSAGE_ID = "message-1"
+private const val TEST_PROVIDER_ACCOUNT_ID = "account-42"
+
+private fun withIdentity(path: String): String =
+    "$path?providerAccountId=$TEST_PROVIDER_ACCOUNT_ID"
 
 private sealed interface DashboardCall {
     data object ListAccounts : DashboardCall
     data class CreateAccount(val request: CreateAccountRequest) : DashboardCall
-    data class DeleteAccount(val address: String, val provider: Provider) : DashboardCall
+    data class DeleteAccount(
+        val address: String,
+        val provider: Provider,
+        val providerAccountId: String?,
+    ) : DashboardCall
     data class ChangePassword(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val request: ChangePasswordRequest,
     ) : DashboardCall
     data class AdoptPassword(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val request: AdoptPasswordRequest,
     ) : DashboardCall
     data class ProbeAuthentication(val request: AuthenticationProbeRequest) : DashboardCall
     data class Logs(val service: LogService) : DashboardCall
-    data class AccountLogs(val address: String, val provider: Provider) : DashboardCall
-    data class ListFolders(val address: String, val provider: Provider) : DashboardCall
+    data class AccountLogs(
+        val address: String,
+        val provider: Provider,
+        val providerAccountId: String?,
+    ) : DashboardCall
+    data class ListFolders(
+        val address: String,
+        val provider: Provider,
+        val providerAccountId: String?,
+    ) : DashboardCall
     data class CreateFolder(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val request: CreateFolderRequest,
     ) : DashboardCall
     data class DeleteFolder(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val folderId: String,
     ) : DashboardCall
     data class ListMessages(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val folderId: String?,
     ) : DashboardCall
     data class ReadMessage(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val messageId: String,
         val folderId: String?,
     ) : DashboardCall
     data class MutateMessages(
         val address: String,
         val provider: Provider,
+        val providerAccountId: String?,
         val request: MutateMessagesRequest,
     ) : DashboardCall
     data class GenerateMessage(val request: GenerateMessageRequest) : DashboardCall
@@ -572,11 +655,13 @@ private class RecordingDashboardBackend : DashboardBackend {
         provider = Provider.STALWART,
         protocol = AuthenticationProtocol.JMAP,
         credentialOverride = "request-password",
+        providerAccountId = TEST_PROVIDER_ACCOUNT_ID,
     )
     val folderRequest = CreateFolderRequest("Issues")
     val mutationRequest = MutateMessagesRequest(
         account = TEST_ADDRESS,
         provider = Provider.STALWART,
+        providerAccountId = TEST_PROVIDER_ACCOUNT_ID,
         messageIds = listOf(TEST_MESSAGE_ID),
         mutationStates = mapOf(TEST_MESSAGE_ID to "email-state-7"),
         action = MessageAction.MARK_READ,
@@ -585,6 +670,7 @@ private class RecordingDashboardBackend : DashboardBackend {
     val generateRequest = GenerateMessageRequest(
         targetAccount = TEST_ADDRESS,
         provider = Provider.STALWART,
+        providerAccountId = TEST_PROVIDER_ACCOUNT_ID,
         sourceType = MessageSourceType.RANDOM,
         subject = "Generated reproduction",
         seed = 42,
@@ -670,26 +756,29 @@ private class RecordingDashboardBackend : DashboardBackend {
     override suspend fun deleteAccount(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): OperationResponse = record(
-        DashboardCall.DeleteAccount(address, provider),
+        DashboardCall.DeleteAccount(address, provider, providerAccountId),
         operation,
     )
 
     override suspend fun adoptPassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: AdoptPasswordRequest,
     ): CredentialUpdateResponse = record(
-        DashboardCall.AdoptPassword(address, provider, request),
+        DashboardCall.AdoptPassword(address, provider, providerAccountId, request),
         credentialUpdate,
     )
 
     override suspend fun changePassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: ChangePasswordRequest,
     ): CredentialUpdateResponse = record(
-        DashboardCall.ChangePassword(address, provider, request),
+        DashboardCall.ChangePassword(address, provider, providerAccountId, request),
         credentialUpdate,
     )
 
@@ -712,62 +801,69 @@ private class RecordingDashboardBackend : DashboardBackend {
     override suspend fun accountLogs(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): LogResponse = record(
-        DashboardCall.AccountLogs(address, provider),
+        DashboardCall.AccountLogs(address, provider, providerAccountId),
         accountLogs,
     )
 
     override suspend fun listFolders(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): FolderListResponse = record(
-        DashboardCall.ListFolders(address, provider),
+        DashboardCall.ListFolders(address, provider, providerAccountId),
         folderList,
     )
 
     override suspend fun createFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: CreateFolderRequest,
     ): FolderInfo = record(
-        DashboardCall.CreateFolder(address, provider, request),
+        DashboardCall.CreateFolder(address, provider, providerAccountId, request),
         createdFolder,
     )
 
     override suspend fun deleteFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String,
     ): OperationResponse = record(
-        DashboardCall.DeleteFolder(address, provider, folderId),
+        DashboardCall.DeleteFolder(address, provider, providerAccountId, folderId),
         operation,
     )
 
     override suspend fun listMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String?,
     ): MessageListResponse = record(
-        DashboardCall.ListMessages(address, provider, folderId),
+        DashboardCall.ListMessages(address, provider, providerAccountId, folderId),
         messageList,
     )
 
     override suspend fun readMessage(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         messageId: String,
         folderId: String?,
     ): MessageDetail = record(
-        DashboardCall.ReadMessage(address, provider, messageId, folderId),
+        DashboardCall.ReadMessage(address, provider, providerAccountId, messageId, folderId),
         messageDetail,
     )
 
     override suspend fun mutateMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: MutateMessagesRequest,
     ): OperationResponse = record(
-        DashboardCall.MutateMessages(address, provider, request),
+        DashboardCall.MutateMessages(address, provider, providerAccountId, request),
         operation,
     )
 

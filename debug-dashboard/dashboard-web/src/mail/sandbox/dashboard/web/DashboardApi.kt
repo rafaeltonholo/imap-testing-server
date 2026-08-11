@@ -7,6 +7,7 @@ import kotlin.js.ExperimentalWasmJsInterop
 import kotlin.js.JsString
 import kotlin.js.toJsString
 import kotlinx.browser.window
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.await
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -37,6 +38,7 @@ import mail.sandbox.dashboard.contract.MutateMessagesRequest
 import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.contract.Routes
+import mail.sandbox.dashboard.contract.requireAchievedOperation
 import mail.sandbox.dashboard.contract.support.LatestRequestTracker
 import org.w3c.fetch.Headers
 import org.w3c.fetch.RequestInit
@@ -44,9 +46,11 @@ import org.w3c.fetch.RequestInit
 internal data class AccountTarget(
     val address: String,
     val provider: Provider,
+    val providerAccountId: String?,
 )
 
-internal fun AccountInfo.target(): AccountTarget = AccountTarget(address, provider)
+internal fun AccountInfo.target(): AccountTarget =
+    AccountTarget(address, provider, providerAccountId)
 
 internal val AccountTarget.displayName: String
     get() = "${provider.displayName()} · $address"
@@ -68,13 +72,13 @@ internal class DashboardApi {
         post(Routes.ACCOUNTS, json.encodeToString(request))
 
     suspend fun deleteAccount(target: AccountTarget): OperationResponse =
-        delete(accountRoute(target))
+        delete(targetedRoute(accountRoute(target), target))
 
     suspend fun changePassword(
         target: AccountTarget,
         request: ChangePasswordRequest,
     ): CredentialUpdateResponse = put(
-        "${accountRoute(target)}/password",
+        targetedRoute("${accountRoute(target)}/password", target),
         json.encodeToString(request),
     )
 
@@ -82,7 +86,7 @@ internal class DashboardApi {
         target: AccountTarget,
         request: AdoptPasswordRequest,
     ): CredentialUpdateResponse = post(
-        "${accountRoute(target)}/password/verify",
+        targetedRoute("${accountRoute(target)}/password/verify", target),
         json.encodeToString(request),
     )
 
@@ -97,16 +101,21 @@ internal class DashboardApi {
         get("${Routes.LOGS}?service=${encodeComponent(service.name)}")
 
     suspend fun accountLogs(target: AccountTarget): LogResponse =
-        get("${Routes.LOGS}/accounts/${encodeComponent(target.address)}/providers/${target.provider.name.lowercase()}")
+        get(
+            targetedRoute(
+                "${Routes.LOGS}/accounts/${encodeComponent(target.address)}/providers/${target.provider.name.lowercase()}",
+                target,
+            ),
+        )
 
     suspend fun folders(target: AccountTarget): FolderListResponse =
-        get("${accountRoute(target)}/folders")
+        get(targetedRoute("${accountRoute(target)}/folders", target))
 
     suspend fun createFolder(
         target: AccountTarget,
         request: CreateFolderRequest,
     ): FolderInfo = post(
-        "${accountRoute(target)}/folders",
+        targetedRoute("${accountRoute(target)}/folders", target),
         json.encodeToString(request),
     )
 
@@ -114,15 +123,23 @@ internal class DashboardApi {
         target: AccountTarget,
         folderId: String,
     ): OperationResponse = delete(
-        "${accountRoute(target)}/folders/${encodeComponent(folderId)}",
+        targetedRoute(
+            "${accountRoute(target)}/folders/${encodeComponent(folderId)}",
+            target,
+        ),
     )
 
     suspend fun messages(
         target: AccountTarget,
         folderId: String?,
     ): MessageListResponse {
-        val query = folderId?.let { "?folderId=${encodeComponent(it)}" }.orEmpty()
-        return get("${accountRoute(target)}/messages$query")
+        return get(
+            targetedRoute(
+                "${accountRoute(target)}/messages",
+                target,
+                folderId?.let { "folderId" to it },
+            ),
+        )
     }
 
     suspend fun message(
@@ -130,9 +147,12 @@ internal class DashboardApi {
         messageId: String,
         folderId: String?,
     ): MessageDetail {
-        val query = folderId?.let { "?folderId=${encodeComponent(it)}" }.orEmpty()
         return get(
-            "${accountRoute(target)}/messages/${encodeComponent(messageId)}$query",
+            targetedRoute(
+                "${accountRoute(target)}/messages/${encodeComponent(messageId)}",
+                target,
+                folderId?.let { "folderId" to it },
+            ),
         )
     }
 
@@ -140,7 +160,7 @@ internal class DashboardApi {
         target: AccountTarget,
         request: MutateMessagesRequest,
     ): OperationResponse = post(
-        "${accountRoute(target)}/message-actions",
+        targetedRoute("${accountRoute(target)}/message-actions", target),
         json.encodeToString(request),
     )
 
@@ -149,6 +169,21 @@ internal class DashboardApi {
 
     private fun accountRoute(target: AccountTarget): String =
         "${Routes.ACCOUNTS}/${encodeComponent(target.address)}/providers/${target.provider.name.lowercase()}"
+
+    private fun targetedRoute(
+        path: String,
+        target: AccountTarget,
+        extraParameter: Pair<String, String>? = null,
+    ): String {
+        val parameters = listOfNotNull(
+            target.providerAccountId?.let { "providerAccountId" to it },
+            extraParameter,
+        )
+        if (parameters.isEmpty()) return path
+        return path + parameters.joinToString(prefix = "?", separator = "&") { (name, value) ->
+            "$name=${encodeComponent(value)}"
+        }
+    }
 
     private suspend inline fun <reified T> get(path: String): T =
         decode(request(path, "GET", null))
@@ -284,7 +319,7 @@ internal class DashboardController(
 
     val selectedAccount: AccountInfo?
         get() = selectedTarget?.let { target ->
-            accounts.firstOrNull { it.address == target.address && it.provider == target.provider }
+            accounts.firstOrNull { it.target() == target }
         }
 
     val selectedFolder: FolderInfo?
@@ -313,6 +348,7 @@ internal class DashboardController(
                 refreshWorkspace()
             }
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             accountError = failure.userMessage("Accounts could not be loaded")
         } finally {
             accountsLoading = false
@@ -354,6 +390,7 @@ internal class DashboardController(
                 selectedMessage = loadedMessage
             }
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             if (isCurrentWorkspaceRequest(requestGeneration, target)) {
                 workspaceError = failure.userMessage("Mailbox state could not be loaded")
             }
@@ -381,6 +418,7 @@ internal class DashboardController(
             if (!isCurrentWorkspaceRequest(requestGeneration, target) || selectedFolderId != folderId) return
             messages = loadedMessages
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             if (isCurrentWorkspaceRequest(requestGeneration, target) && selectedFolderId == folderId) {
                 workspaceError = failure.userMessage("Messages could not be loaded")
             }
@@ -408,6 +446,7 @@ internal class DashboardController(
                 selectedMessage = loadedMessage
             }
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             if (
                 isCurrentWorkspaceRequest(requestGeneration, target) &&
                 selectedFolderId == summary.folderId &&
@@ -438,6 +477,7 @@ internal class DashboardController(
                 globalLogs = loadedLogs
             }
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             if (globalLogRequests.isCurrent(requestToken, service) && globalLogService == service) {
                 globalLogsError = failure.userMessage("Server logs could not be loaded")
             }
@@ -460,6 +500,7 @@ internal class DashboardController(
                 accountLogs = loadedLogs
             }
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             if (accountLogRequests.isCurrent(requestToken, target) && selectedTarget == target) {
                 accountLogsError = failure.userMessage("Account logs could not be loaded")
             }
@@ -479,8 +520,9 @@ internal class DashboardController(
     suspend fun changePassword(newPassword: String) = operation("Changing password") {
         val target = requireNotNull(selectedTarget)
         val result = api.changePassword(target, ChangePasswordRequest(newPassword))
+            .requireAchievedOperation()
         lastReceipt = result.operation.message
-        refreshAccountLogs()
+        refreshAccounts(target)
     }
 
     suspend fun deleteSelectedAccount() = operation("Deleting account") {
@@ -509,7 +551,11 @@ internal class DashboardController(
     }
 
     suspend fun generateMessage(request: GenerateMessageRequest) = operation(request.deliveryMode.busyLabel()) {
-        val result = api.generateMessage(request)
+        val targetAccount = accounts.firstOrNull {
+            it.address == request.targetAccount && it.provider == request.provider
+        } ?: throw IllegalStateException("Target account is no longer available; refresh accounts")
+        val targetedRequest = request.copy(providerAccountId = targetAccount.providerAccountId)
+        val result = api.generateMessage(targetedRequest)
         lastReceipt = buildString {
             append(request.provider.displayName())
             append(" · ")
@@ -521,7 +567,7 @@ internal class DashboardController(
                 append(result.messageIds.joinToString())
             }
         }
-        if (selectedTarget == AccountTarget(request.targetAccount, request.provider)) {
+        if (selectedTarget == targetAccount.target()) {
             refreshWorkspace(
                 keepFolderId = when (request.deliveryMode) {
                     MessageDeliveryMode.DIRECT_APPEND -> request.folderId ?: selectedFolderId
@@ -549,6 +595,7 @@ internal class DashboardController(
             MutateMessagesRequest(
                 account = target.address,
                 provider = target.provider,
+                providerAccountId = target.providerAccountId,
                 messageIds = listOf(summary.id),
                 mutationStates = mapOf(summary.id to mutationState),
                 action = action,
@@ -579,6 +626,7 @@ internal class DashboardController(
         try {
             block()
         } catch (failure: Throwable) {
+            failure.rethrowIfCancellation()
             operationError = failure.userMessage("$label failed")
         } finally {
             busyLabel = null
@@ -586,7 +634,7 @@ internal class DashboardController(
     }
 
     private fun containsTarget(target: AccountTarget): Boolean =
-        accounts.any { it.address == target.address && it.provider == target.provider }
+        accounts.any { it.target() == target }
 
     private fun beginWorkspaceRequest(): Long {
         messageLoading = false
@@ -642,3 +690,7 @@ private fun MessageAction.busyLabel(): String = when (this) {
 
 private fun Throwable.userMessage(fallback: String): String =
     message?.takeIf(String::isNotBlank) ?: fallback
+
+private fun Throwable.rethrowIfCancellation() {
+    if (this is CancellationException) throw this
+}

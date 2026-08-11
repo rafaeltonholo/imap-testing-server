@@ -83,12 +83,17 @@ data class CredentialUpdateResponse(
     val operation: OperationResponse,
 )
 
+fun CredentialUpdateResponse.requireAchievedOperation(): CredentialUpdateResponse = also {
+    check(operation.success) { operation.message }
+}
+
 @Serializable
 data class AuthenticationProbeRequest(
     val address: String,
     val provider: Provider,
     val protocol: AuthenticationProtocol,
     val credentialOverride: String? = null,
+    val providerAccountId: String? = null,
 )
 
 @Serializable
@@ -190,6 +195,7 @@ enum class MessageDeliveryMode {
 data class GenerateMessageRequest(
     val targetAccount: String,
     val provider: Provider,
+    val providerAccountId: String? = null,
     val sourceType: MessageSourceType,
     val deliveryMode: MessageDeliveryMode = MessageDeliveryMode.DIRECT_APPEND,
     val content: String? = null,
@@ -222,6 +228,7 @@ enum class MessageAction {
 data class MutateMessagesRequest(
     val account: String,
     val provider: Provider,
+    val providerAccountId: String? = null,
     val messageIds: List<String>,
     val mutationStates: Map<String, String>,
     val action: MessageAction,

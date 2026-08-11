@@ -1,6 +1,7 @@
 package mail.sandbox.dashboard.server.local
 
 import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
@@ -44,21 +45,53 @@ internal class DovecotDashboardProvider(
 ) : LocalProviderOperations {
     override val provider: Provider = Provider.DOVECOT
 
-    override suspend fun listAccounts(): List<AccountInfo> = adapter.listAccounts().map { account ->
-        val password = adapter.plainPassword(account.address)
-            ?: catalog.find(provider, account.address)?.password
-        if (password == null) {
-            accountInfo(
-                address = account.address,
-                readiness = CredentialReadiness.PASSWORD_REQUIRED,
-            )
-        } else {
-            val outcome = mailboxClient.probe(AccountCredentials(account.address, password))
-            accountInfo(
-                address = account.address,
-                readiness = outcome.readiness(),
-                readinessMessage = outcome.diagnostic,
-            )
+    override suspend fun listAccounts(): List<AccountInfo> {
+        var unavailableDiagnostic: String? = null
+        return adapter.listAccounts().map { account ->
+            unavailableDiagnostic?.let { diagnostic ->
+                return@map accountInfo(
+                    address = account.address,
+                    readiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+                    readinessMessage =
+                        "Authentication probe skipped after Dovecot became unavailable: $diagnostic",
+                )
+            }
+            val plainPassword = adapter.plainPassword(account.address)
+            val password = if (plainPassword != null) {
+                plainPassword
+            } else {
+                try {
+                    catalog.find(provider, account.address)?.password
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    return@map accountInfo(
+                        address = account.address,
+                        readiness = CredentialReadiness.PROVIDER_UNAVAILABLE,
+                        readinessMessage =
+                            "Dashboard credential catalog is unavailable for this account",
+                    )
+                }
+            }
+            if (password == null) {
+                accountInfo(
+                    address = account.address,
+                    readiness = CredentialReadiness.PASSWORD_REQUIRED,
+                )
+            } else {
+                val outcome = mailboxClient.probe(AccountCredentials(account.address, password))
+                if (
+                    outcome is AuthenticationOutcome.Unavailable ||
+                    outcome is AuthenticationOutcome.TimedOut
+                ) {
+                    unavailableDiagnostic = outcome.diagnostic
+                }
+                accountInfo(
+                    address = account.address,
+                    readiness = outcome.readiness(),
+                    readinessMessage = outcome.diagnostic,
+                )
+            }
         }
     }
 
@@ -88,7 +121,11 @@ internal class DovecotDashboardProvider(
         return accountInfo(record.address, CredentialReadiness.READY)
     }
 
-    override suspend fun dashboardLogAccount(address: String): DashboardLogAccount {
+    override suspend fun dashboardLogAccount(
+        address: String,
+        providerAccountId: String?,
+    ): DashboardLogAccount {
+        requireDovecotIdentity(providerAccountId)
         val canonicalAddress = adapter.listAccounts()
             .firstOrNull { account -> account.address.equals(address, ignoreCase = true) }
             ?.address
@@ -96,7 +133,8 @@ internal class DovecotDashboardProvider(
         return DashboardLogAccount(canonicalAddress)
     }
 
-    override suspend fun deleteAccount(address: String) {
+    override suspend fun deleteAccount(address: String, providerAccountId: String?) {
+        requireDovecotIdentity(providerAccountId)
         adapter.deleteAccount(address)
         catalog.remove(provider, address)
     }
@@ -104,7 +142,9 @@ internal class DovecotDashboardProvider(
     override suspend fun adoptPassword(
         address: String,
         request: AdoptPasswordRequest,
+        providerAccountId: String?,
     ): CredentialUpdateResponse {
+        requireDovecotIdentity(providerAccountId)
         val canonical = liveAddress(address)
         val outcome = mailboxClient.probe(AccountCredentials(canonical, request.password))
         val readiness = outcome.readiness()
@@ -130,7 +170,9 @@ internal class DovecotDashboardProvider(
     override suspend fun changePassword(
         address: String,
         newPassword: String,
+        providerAccountId: String?,
     ): CredentialUpdateResponse {
+        requireDovecotIdentity(providerAccountId)
         val canonical = liveAddress(address)
         val existing = catalog.find(provider, canonical)
         val updated = catalog.validated(
@@ -171,8 +213,9 @@ internal class DovecotDashboardProvider(
 
     override suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
-    ): AuthenticationProbeResponse {
+    ): LocalAuthenticationProbeResult {
         require(request.provider == provider) { "Authentication provider does not match Dovecot" }
+        requireDovecotIdentity(request.providerAccountId)
         val canonical = liveAddress(request.address)
         val protocol = when (request.protocol) {
             AuthenticationProtocol.IMAP,
@@ -192,31 +235,43 @@ internal class DovecotDashboardProvider(
             -> ProviderAuthenticationMechanism.OAUTHBEARER
             else -> ProviderAuthenticationMechanism.PASSWORD
         }
+        val probeSecret = if (mechanism == ProviderAuthenticationMechanism.PASSWORD) {
+            request.credentialOverride ?: rememberedPassword(canonical)
+        } else {
+            request.credentialOverride
+        }
         val credentials = if (mechanism == ProviderAuthenticationMechanism.PASSWORD) {
             AccountCredentials(
                 address = canonical,
-                password = request.credentialOverride ?: rememberedPassword(canonical),
+                password = probeSecret,
             )
         } else {
             AccountCredentials(
                 address = canonical,
-                tokenOverride = request.credentialOverride,
+                tokenOverride = probeSecret,
             )
         }
         val outcome = authenticationProbe.probe(
             ProviderAuthenticationRequest(protocol, mechanism, credentials),
         )
-        return AuthenticationProbeResponse(
-            address = canonical,
-            provider = provider,
-            protocol = request.protocol,
-            success = outcome is AuthenticationOutcome.Authenticated,
-            providerResponse = outcome.diagnostic,
-            correlatedLogs = emptyList(),
+        return LocalAuthenticationProbeResult(
+            response = AuthenticationProbeResponse(
+                address = canonical,
+                provider = provider,
+                protocol = request.protocol,
+                success = outcome is AuthenticationOutcome.Authenticated,
+                providerResponse = outcome.diagnostic,
+                correlatedLogs = emptyList(),
+            ),
+            secretsToRedact = listOfNotNull(probeSecret).filter(String::isNotEmpty),
         )
     }
 
-    override suspend fun listFolders(address: String): List<FolderInfo> {
+    override suspend fun listFolders(
+        address: String,
+        providerAccountId: String?,
+    ): List<FolderInfo> {
+        requireDovecotIdentity(providerAccountId)
         val credentials = credentials(address)
         return mailboxClient.listFolders(credentials).map { folder ->
             val messages = mailboxClient.listMessages(credentials, folder.name)
@@ -229,20 +284,32 @@ internal class DovecotDashboardProvider(
         }
     }
 
-    override suspend fun createFolder(address: String, name: String): FolderInfo {
+    override suspend fun createFolder(
+        address: String,
+        name: String,
+        providerAccountId: String?,
+    ): FolderInfo {
+        requireDovecotIdentity(providerAccountId)
         val mailbox = mailbox(name)
         mailboxClient.createFolder(credentials(address), mailbox)
         return FolderInfo(mailbox, mailbox.removePrefix("INBOX."), 0, 0)
     }
 
-    override suspend fun deleteFolder(address: String, folderId: String) {
+    override suspend fun deleteFolder(
+        address: String,
+        folderId: String,
+        providerAccountId: String?,
+    ) {
+        requireDovecotIdentity(providerAccountId)
         mailboxClient.deleteFolder(credentials(address), folderId)
     }
 
     override suspend fun listMessages(
         address: String,
         folderId: String?,
+        providerAccountId: String?,
     ): List<MessageSummary> {
+        requireDovecotIdentity(providerAccountId)
         val mailbox = folderId ?: "INBOX"
         return mailboxClient.listMessages(credentials(address), mailbox).map { message ->
             MessageSummary(
@@ -262,7 +329,9 @@ internal class DovecotDashboardProvider(
         address: String,
         messageId: String,
         folderId: String?,
+        providerAccountId: String?,
     ): MessageDetail {
+        requireDovecotIdentity(providerAccountId)
         val mailbox = folderId ?: "INBOX"
         val uid = uid(messageId)
         val credentials = credentials(address)
@@ -298,6 +367,7 @@ internal class DovecotDashboardProvider(
         address: String,
         request: MutateMessagesRequest,
     ): OperationResponse {
+        requireDovecotIdentity(request.providerAccountId)
         val source = requireNotNull(request.sourceFolderId) {
             "A source folder is required for Dovecot message operations"
         }
@@ -335,6 +405,7 @@ internal class DovecotDashboardProvider(
         request: GenerateMessageRequest,
         messages: List<GeneratedMessage>,
     ): List<String> {
+        requireDovecotIdentity(request.providerAccountId)
         val mailbox = request.folderId ?: "INBOX"
         return captureMessages(request.targetAccount, mailbox, messages) { message ->
             adapter.saveRawEmail(
@@ -349,6 +420,7 @@ internal class DovecotDashboardProvider(
         request: GenerateMessageRequest,
         messages: List<GeneratedMessage>,
     ): List<String> {
+        requireDovecotIdentity(request.providerAccountId)
         require(request.folderId == null) { "SMTP delivery always targets the Inbox" }
         val account = listAccounts().firstOrNull { it.address == request.targetAccount }
             ?: throw DashboardNotFoundException("Dovecot Account was not found")
@@ -401,6 +473,12 @@ internal class DovecotDashboardProvider(
     private fun requireProtocols(protocols: List<MailProtocol>) {
         require(protocols.size == DEFAULT_PROTOCOLS.size && protocols.toSet() == ALLOWED_PROTOCOLS) {
             "Dovecot accounts always support exactly IMAP, POP3, and SMTP in this sandbox"
+        }
+    }
+
+    private fun requireDovecotIdentity(providerAccountId: String?) {
+        require(providerAccountId == null) {
+            "Dovecot accounts do not use a provider Account ID"
         }
     }
 

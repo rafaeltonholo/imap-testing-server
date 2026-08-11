@@ -1,8 +1,11 @@
 package mail.sandbox.dashboard.server.local
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import mail.sandbox.dashboard.contract.AdoptPasswordRequest
 import mail.sandbox.dashboard.contract.AccountInfo
@@ -28,6 +31,24 @@ import mail.sandbox.dashboard.contract.ProviderAvailability
 import mail.sandbox.dashboard.contract.ProviderStatus
 
 class LocalDashboardBackendTest {
+    @Test
+    fun internalProbeRedactionMetadataDoesNotRenderSecrets() {
+        val secret = "internal-redaction-canary"
+        val result = LocalAuthenticationProbeResult(
+            response = AuthenticationProbeResponse(
+                address = "dev@local.test",
+                provider = Provider.DOVECOT,
+                protocol = AuthenticationProtocol.IMAP,
+                success = false,
+                providerResponse = "failed",
+                correlatedLogs = emptyList(),
+            ),
+            secretsToRedact = listOf(secret),
+        )
+
+        assertFalse(secret in result.toString())
+    }
+
     @Test
     fun combinesProvidersAndDispatchesAccountCreationToTheSelectedServer() = runBlocking {
         val dovecot = RecordingProvider(Provider.DOVECOT)
@@ -188,6 +209,57 @@ class LocalDashboardBackendTest {
         }
 
     @Test
+    fun cacheFailureCannotHideEitherLiveProviderRegistry() = runBlocking {
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            accounts += AccountInfo(
+                address = "dove@local.test",
+                provider = Provider.DOVECOT,
+                protocols = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP),
+                credentialReadiness = CredentialReadiness.READY,
+            )
+        }
+        val stalwart = RecordingProvider(Provider.STALWART).apply {
+            accounts += AccountInfo(
+                address = "stalwart@local.test",
+                provider = Provider.STALWART,
+                protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                credentialReadiness = CredentialReadiness.PASSWORD_REQUIRED,
+                providerAccountId = "stalwart-account",
+            )
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot, Provider.STALWART to stalwart),
+            logSource = RecordingLogs(),
+            cachedAccounts = { throw IllegalStateException("catalog unavailable") },
+        )
+
+        val response = backend.listAccounts()
+
+        assertEquals(
+            listOf("dove@local.test", "stalwart@local.test"),
+            response.accounts.map(AccountInfo::address),
+        )
+        assertEquals(
+            listOf(ProviderAvailability.READY, ProviderAvailability.READY),
+            response.providerStatuses.map(ProviderStatus::availability),
+        )
+    }
+
+    @Test
+    fun providerListingCancellationIsRethrown() = runBlocking {
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            listFailure = CancellationException("cancel listing")
+        }
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot),
+            logSource = RecordingLogs(),
+        )
+
+        assertFailsWith<CancellationException> { backend.listAccounts() }
+        Unit
+    }
+
+    @Test
     fun authenticationProbeRunsOnceAndReturnsOnlyNewAccountFilteredLogs() = runBlocking {
         val credential = "wrong-password"
         val dovecot = RecordingProvider(Provider.DOVECOT).apply {
@@ -219,6 +291,39 @@ class LocalDashboardBackendTest {
         assertEquals(3, logs.readCount)
         assertTrue(credential !in response.providerResponse)
         assertTrue(response.correlatedLogs.none { credential in it })
+    }
+
+    @Test
+    fun authenticationProbeRedactsRememberedCredentialFromResponseAndLogs() = runBlocking {
+        val remembered = "remembered-secret-canary"
+        val dovecot = RecordingProvider(Provider.DOVECOT).apply {
+            probeResponse = "authentication failed credential=$remembered"
+            probeSecrets = listOf(remembered)
+        }
+        val logs = SequencedProbeLogs(
+            listOf("old matching line"),
+            listOf("new matching line credential=$remembered"),
+        )
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to dovecot),
+            logSource = logs,
+            authenticationLogPollDelayMillis = 0,
+        )
+
+        val response = backend.probeAuthentication(
+            AuthenticationProbeRequest(
+                address = "dev@local.test",
+                provider = Provider.DOVECOT,
+                protocol = AuthenticationProtocol.IMAP,
+            ),
+        )
+
+        assertEquals("authentication failed credential=[redacted]", response.providerResponse)
+        assertEquals(
+            listOf("new matching line credential=[redacted]"),
+            response.correlatedLogs,
+        )
+        assertTrue(remembered !in response.toString())
     }
 
     @Test
@@ -304,7 +409,7 @@ class LocalDashboardBackendTest {
 
         assertEquals(
             listOf("[dovecot] line-DOVECOT", "[postfix] line-POSTFIX"),
-            backend.accountLogs("dev@local.test", Provider.DOVECOT).lines,
+            backend.accountLogs("dev@local.test", Provider.DOVECOT, null).lines,
         )
         assertEquals(
             listOf(
@@ -336,7 +441,7 @@ class LocalDashboardBackendTest {
 
         assertEquals(
             listOf("line-STALWART"),
-            backend.accountLogs("dev@local.test", Provider.STALWART).lines,
+            backend.accountLogs("dev@local.test", Provider.STALWART, "c").lines,
         )
         assertEquals(
             LogRead(
@@ -398,6 +503,7 @@ private class RecordingProvider(
     var status = ProviderStatus(provider, ProviderAvailability.READY)
     val probeRequests = mutableListOf<AuthenticationProbeRequest>()
     var probeResponse = "authentication failed"
+    var probeSecrets = emptyList<String>()
 
     override suspend fun listAccounts(): List<AccountInfo> {
         listFailure?.let { throw it }
@@ -419,13 +525,17 @@ private class RecordingProvider(
         )
     }
 
-    override suspend fun dashboardLogAccount(address: String): DashboardLogAccount = logAccount
+    override suspend fun dashboardLogAccount(
+        address: String,
+        providerAccountId: String?,
+    ): DashboardLogAccount = logAccount
 
-    override suspend fun deleteAccount(address: String) = Unit
+    override suspend fun deleteAccount(address: String, providerAccountId: String?) = Unit
 
     override suspend fun adoptPassword(
         address: String,
         request: AdoptPasswordRequest,
+        providerAccountId: String?,
     ) = mail.sandbox.dashboard.contract.CredentialUpdateResponse(
         address,
         provider,
@@ -436,6 +546,7 @@ private class RecordingProvider(
     override suspend fun changePassword(
         address: String,
         newPassword: String,
+        providerAccountId: String?,
     ) = mail.sandbox.dashboard.contract.CredentialUpdateResponse(
         address,
         provider,
@@ -445,34 +556,50 @@ private class RecordingProvider(
 
     override suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
-    ): AuthenticationProbeResponse {
+    ): LocalAuthenticationProbeResult {
         probeRequests += request
-        return AuthenticationProbeResponse(
-            address = request.address,
-            provider = request.provider,
-            protocol = request.protocol,
-            success = false,
-            providerResponse = probeResponse,
-            correlatedLogs = emptyList(),
+        return LocalAuthenticationProbeResult(
+            response = AuthenticationProbeResponse(
+                address = request.address,
+                provider = request.provider,
+                protocol = request.protocol,
+                success = false,
+                providerResponse = probeResponse,
+                correlatedLogs = emptyList(),
+            ),
+            secretsToRedact = probeSecrets,
         )
     }
 
-    override suspend fun listFolders(address: String): List<FolderInfo> = emptyList()
+    override suspend fun listFolders(
+        address: String,
+        providerAccountId: String?,
+    ): List<FolderInfo> = emptyList()
 
-    override suspend fun createFolder(address: String, name: String): FolderInfo =
+    override suspend fun createFolder(
+        address: String,
+        name: String,
+        providerAccountId: String?,
+    ): FolderInfo =
         FolderInfo(name, name, 0, 0)
 
-    override suspend fun deleteFolder(address: String, folderId: String) = Unit
+    override suspend fun deleteFolder(
+        address: String,
+        folderId: String,
+        providerAccountId: String?,
+    ) = Unit
 
     override suspend fun listMessages(
         address: String,
         folderId: String?,
+        providerAccountId: String?,
     ): List<MessageSummary> = emptyList()
 
     override suspend fun readMessage(
         address: String,
         messageId: String,
         folderId: String?,
+        providerAccountId: String?,
     ): MessageDetail = error("not used")
 
     override suspend fun mutateMessages(

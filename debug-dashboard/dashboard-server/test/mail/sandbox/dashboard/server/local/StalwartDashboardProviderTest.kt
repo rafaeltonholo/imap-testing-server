@@ -4,6 +4,7 @@ import java.net.URI
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
@@ -35,33 +36,64 @@ import mail.sandbox.dashboard.server.provider.stalwart.product.StalwartProductAd
 
 class StalwartDashboardProviderTest {
     @Test
+    fun staleProviderIdentityStopsDeleteResetAndMailActionsBeforeMutation() = runBlocking {
+        repeat(3) { actionIndex ->
+            val transport = ArrivalTransport(*accountListingCalls("current-account"))
+            val directory = createTempDirectory("stalwart-dashboard-stale-$actionIndex").toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                val provider = StalwartDashboardProvider(
+                    adapter = StalwartProductAdapter(
+                        baseUri = BASE_URI,
+                        managementCredentialProvider = StalwartManagementCredentialProvider {
+                            GateCredential.basic(
+                                "manager@local.test",
+                                "management".toCharArray(),
+                            )
+                        },
+                        accountCredentialCatalog = LocalStalwartCredentialCatalog(catalog),
+                        transport = transport,
+                    ),
+                    catalog = catalog,
+                )
+
+                assertFailsWith<mail.sandbox.dashboard.server.api.DashboardNotFoundException> {
+                    when (actionIndex) {
+                        0 -> provider.deleteAccount("alice@local.test", "stale-account")
+                        1 -> provider.changePassword(
+                            "alice@local.test",
+                            "replacement-password",
+                            "stale-account",
+                        )
+                        else -> provider.mutateMessages(
+                            "alice@local.test",
+                            mail.sandbox.dashboard.contract.MutateMessagesRequest(
+                                account = "alice@local.test",
+                                provider = Provider.STALWART,
+                                providerAccountId = "stale-account",
+                                messageIds = listOf("message-one"),
+                                mutationStates = mapOf("message-one" to "state-one"),
+                                action = mail.sandbox.dashboard.contract.MessageAction.MARK_READ,
+                                sourceFolderId = "inbox",
+                            ),
+                        )
+                    }
+                }
+                transport.assertExhausted()
+                provider.close()
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
     fun liveUnknownPasswordAccountKeepsLiveIdentityAndCapabilitiesWithHonestReadiness() =
         runBlocking {
             val transport = ArrivalTransport(
-                ExpectedJmapCall("x:Account/query", query("management-account", listOf("c"))),
-                ExpectedJmapCall(
-                    "x:Account/get",
-                    get(
-                        "management-account",
-                        buildJsonObject {
-                            put("id", "c")
-                            put("@type", "User")
-                            put("name", "alice")
-                            put("domainId", "domain-one")
-                            put("permissions", buildJsonObject { put("@type", "Inherit") })
-                        },
-                    ),
-                ),
-                ExpectedJmapCall(
-                    "x:Domain/get",
-                    get(
-                        "management-account",
-                        buildJsonObject {
-                            put("id", "domain-one")
-                            put("name", "local.test")
-                        },
-                    ),
-                ),
+                *accountListingCalls("c"),
+                *accountListingCalls("c"),
+                *accountListingCalls("c"),
             )
             val directory = createTempDirectory("stalwart-dashboard-readiness").toRealPath()
             try {
@@ -102,6 +134,7 @@ class StalwartDashboardProviderTest {
                 val adoption = provider.adoptPassword(
                     account.address,
                     AdoptPasswordRequest("supplied-password"),
+                    "c",
                 )
                 assertTrue(!adoption.operation.success)
                 assertEquals(CredentialReadiness.PROVIDER_UNAVAILABLE, adoption.readiness)
@@ -112,8 +145,9 @@ class StalwartDashboardProviderTest {
                             provider = Provider.STALWART,
                             protocol = AuthenticationProtocol.JMAP,
                             credentialOverride = "supplied-password",
+                            providerAccountId = "c",
                         ),
-                    ).success,
+                    ).response.success,
                 )
                 assertEquals(null, catalog.findByProviderAccountId(Provider.STALWART, "c")?.password)
                 transport.assertExhausted()
@@ -168,7 +202,7 @@ class StalwartDashboardProviderTest {
 
             assertEquals(
                 DashboardLogAccount("alice@local.test", providerAccountId = "c"),
-                provider.dashboardLogAccount("ALICE@LOCAL.TEST"),
+                provider.dashboardLogAccount("ALICE@LOCAL.TEST", "c"),
             )
             transport.assertExhausted()
             provider.close()
@@ -260,6 +294,7 @@ class StalwartDashboardProviderTest {
                 GenerateMessageRequest(
                     targetAccount = "alice@local.test",
                     provider = Provider.STALWART,
+                    providerAccountId = "account-one",
                     sourceType = MessageSourceType.EML,
                     deliveryMode = MessageDeliveryMode.SMTP_DELIVERY,
                     content = raw,
@@ -269,6 +304,58 @@ class StalwartDashboardProviderTest {
 
             assertEquals(listOf("expected"), ids)
             assertEquals(1, smtp.calls)
+            transport.assertExhausted()
+            provider.close()
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun smtpDeliveryRequiresCredentialForTheExactLiveProviderIdentity() = runBlocking {
+        val transport = ArrivalTransport(*accountListingCalls("current-account"))
+        val smtp = StalwartRecordingSmtpSender()
+        val directory = createTempDirectory("stalwart-dashboard-smtp-identity").toRealPath()
+        try {
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "stale-password",
+                    protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+                    providerAccountId = "stale-account",
+                ),
+            )
+            val provider = StalwartDashboardProvider(
+                adapter = StalwartProductAdapter(
+                    baseUri = BASE_URI,
+                    managementCredentialProvider = StalwartManagementCredentialProvider {
+                        GateCredential.basic("manager@local.test", "management".toCharArray())
+                    },
+                    accountCredentialCatalog = LocalStalwartCredentialCatalog(catalog),
+                    transport = transport,
+                ),
+                catalog = catalog,
+                smtpSender = smtp,
+            )
+            val raw = message("<smtp-identity@local.test>")
+
+            assertFailsWith<NoSuchElementException> {
+                provider.deliverMessages(
+                    GenerateMessageRequest(
+                        targetAccount = "alice@local.test",
+                        provider = Provider.STALWART,
+                        providerAccountId = "current-account",
+                        sourceType = MessageSourceType.EML,
+                        deliveryMode = MessageDeliveryMode.SMTP_DELIVERY,
+                        content = raw,
+                    ),
+                    listOf(GeneratedMessage(raw)),
+                )
+            }
+
+            assertEquals(0, smtp.calls)
             transport.assertExhausted()
             provider.close()
         } finally {
@@ -329,6 +416,36 @@ class StalwartDashboardProviderTest {
             put("keywords", buildJsonObject {})
             put("messageId", buildJsonArray { add(JsonPrimitive(messageId)) })
         }
+
+        fun accountListingCalls(accountId: String): Array<ExpectedJmapCall> = arrayOf(
+            ExpectedJmapCall(
+                "x:Account/query",
+                query("management-account", listOf(accountId)),
+            ),
+            ExpectedJmapCall(
+                "x:Account/get",
+                get(
+                    "management-account",
+                    buildJsonObject {
+                        put("id", accountId)
+                        put("@type", "User")
+                        put("name", "alice")
+                        put("domainId", "domain-one")
+                        put("permissions", buildJsonObject { put("@type", "Inherit") })
+                    },
+                ),
+            ),
+            ExpectedJmapCall(
+                "x:Domain/get",
+                get(
+                    "management-account",
+                    buildJsonObject {
+                        put("id", "domain-one")
+                        put("name", "local.test")
+                    },
+                ),
+            ),
+        )
     }
 }
 

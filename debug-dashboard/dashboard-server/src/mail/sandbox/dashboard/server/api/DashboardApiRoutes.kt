@@ -10,6 +10,7 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -48,15 +49,22 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     delete("${Routes.ACCOUNTS}/{address}/providers/{provider}") {
         call.respondFromBackend {
-            backend.deleteAccount(requiredPath("address"), requiredProvider())
+            val provider = requiredProvider()
+            backend.deleteAccount(
+                requiredPath("address"),
+                provider,
+                requiredProviderAccountId(provider),
+            )
         }
     }
 
     put("${Routes.ACCOUNTS}/{address}/providers/{provider}/password") {
         call.respondFromBackend {
+            val provider = requiredProvider()
             backend.changePassword(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 decodeRequest<ChangePasswordRequest>().validated(),
             )
         }
@@ -64,9 +72,11 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     post("${Routes.ACCOUNTS}/{address}/providers/{provider}/password/verify") {
         call.respondFromBackend {
+            val provider = requiredProvider()
             backend.adoptPassword(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 decodeRequest<AdoptPasswordRequest>().validated(),
             )
         }
@@ -88,21 +98,33 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     get("${Routes.LOGS}/accounts/{address}/providers/{provider}") {
         call.respondFromBackend {
-            backend.accountLogs(requiredPath("address"), requiredProvider())
+            val provider = requiredProvider()
+            backend.accountLogs(
+                requiredPath("address"),
+                provider,
+                requiredProviderAccountId(provider),
+            )
         }
     }
 
     get("${Routes.ACCOUNTS}/{address}/providers/{provider}/folders") {
         call.respondFromBackend {
-            backend.listFolders(requiredPath("address"), requiredProvider())
+            val provider = requiredProvider()
+            backend.listFolders(
+                requiredPath("address"),
+                provider,
+                requiredProviderAccountId(provider),
+            )
         }
     }
 
     post("${Routes.ACCOUNTS}/{address}/providers/{provider}/folders") {
         call.respondFromBackend(HttpStatusCode.Created) {
+            val provider = requiredProvider()
             backend.createFolder(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 decodeRequest<CreateFolderRequest>().validated(),
             )
         }
@@ -110,9 +132,11 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     delete("${Routes.ACCOUNTS}/{address}/providers/{provider}/folders/{folderId}") {
         call.respondFromBackend {
+            val provider = requiredProvider()
             backend.deleteFolder(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 requiredPath("folderId"),
             )
         }
@@ -120,9 +144,11 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     get("${Routes.ACCOUNTS}/{address}/providers/{provider}/messages") {
         call.respondFromBackend {
+            val provider = requiredProvider()
             backend.listMessages(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 optionalQuery("folderId"),
             )
         }
@@ -130,9 +156,11 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
 
     get("${Routes.ACCOUNTS}/{address}/providers/{provider}/messages/{messageId}") {
         call.respondFromBackend {
+            val provider = requiredProvider()
             backend.readMessage(
                 requiredPath("address"),
-                requiredProvider(),
+                provider,
+                requiredProviderAccountId(provider),
                 requiredPath("messageId"),
                 optionalQuery("folderId"),
             )
@@ -143,13 +171,18 @@ internal fun Route.dashboardApiRoutes(backend: DashboardBackend) {
         call.respondFromBackend {
             val address = requiredPath("address")
             val provider = requiredProvider()
+            val providerAccountId = requiredProviderAccountId(provider)
             val request = decodeRequest<MutateMessagesRequest>().validated()
-            if (request.account != address || request.provider != provider) {
+            if (
+                request.account != address ||
+                request.provider != provider ||
+                request.providerAccountId != providerAccountId
+            ) {
                 throw DashboardBadRequestException(
                     "Message action target does not match the route",
                 )
             }
-            backend.mutateMessages(address, provider, request)
+            backend.mutateMessages(address, provider, providerAccountId, request)
         }
     }
 
@@ -168,6 +201,8 @@ private suspend inline fun <reified T> ApplicationCall.respondFromBackend(
 ) {
     try {
         respondJson(action(), status)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
     } catch (error: DashboardNotFoundException) {
         respondError(
             HttpStatusCode.NotFound,
@@ -208,6 +243,20 @@ private fun ApplicationCall.requiredProvider(): Provider {
     val value = requiredPath("provider")
     return Provider.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }
         ?: throw DashboardBadRequestException("Unknown provider: $value")
+}
+
+private fun ApplicationCall.requiredProviderAccountId(provider: Provider): String? {
+    val accountId = optionalQuery("providerAccountId")
+    return when (provider) {
+        Provider.DOVECOT -> {
+            require(accountId == null) { "Dovecot accounts do not use a provider Account ID" }
+            null
+        }
+        Provider.STALWART -> accountId
+            ?: throw DashboardBadRequestException(
+                "Stalwart provider Account ID is required; refresh the account list",
+            )
+    }
 }
 
 private inline fun <reified T : Enum<T>> ApplicationCall.optionalEnumQuery(name: String): T? {
@@ -263,6 +312,7 @@ private fun AdoptPasswordRequest.validated(): AdoptPasswordRequest {
 
 private fun AuthenticationProbeRequest.validated(): AuthenticationProbeRequest {
     require(address.isNotBlank()) { "Account address is required" }
+    requireProviderIdentity(provider, providerAccountId)
     credentialOverride?.requireBoundedSecret("Credential override", allowBlank = true)
     if (
         protocol == AuthenticationProtocol.OAUTH_IMAP ||
@@ -308,6 +358,7 @@ private fun CreateFolderRequest.validated(): CreateFolderRequest {
 
 private fun MutateMessagesRequest.validated(): MutateMessagesRequest {
     require(account.isNotBlank()) { "Account is required" }
+    requireProviderIdentity(provider, providerAccountId)
     require(messageIds.isNotEmpty() && messageIds.none(String::isBlank)) {
         "At least one message is required"
     }
@@ -339,11 +390,23 @@ private fun MutateMessagesRequest.validated(): MutateMessagesRequest {
 
 private fun GenerateMessageRequest.validated(): GenerateMessageRequest {
     require(targetAccount.isNotBlank()) { "Target account is required" }
+    requireProviderIdentity(provider, providerAccountId)
     require(count == 1) { "Exactly one message is required" }
     if (deliveryMode == MessageDeliveryMode.SMTP_DELIVERY) {
         require(folderId == null) { "SMTP delivery always targets the Inbox" }
     }
     return this
+}
+
+private fun requireProviderIdentity(provider: Provider, providerAccountId: String?) {
+    when (provider) {
+        Provider.DOVECOT -> require(providerAccountId == null) {
+            "Dovecot accounts do not use a provider Account ID"
+        }
+        Provider.STALWART -> require(!providerAccountId.isNullOrBlank()) {
+            "Stalwart provider Account ID is required; refresh the account list"
+        }
+    }
 }
 
 private const val MAX_CREDENTIAL_LENGTH = 4_096

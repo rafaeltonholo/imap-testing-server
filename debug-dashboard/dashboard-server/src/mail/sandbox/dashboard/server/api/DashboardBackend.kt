@@ -26,17 +26,23 @@ interface DashboardBackend {
 
     suspend fun createAccount(request: CreateAccountRequest): AccountInfo
 
-    suspend fun deleteAccount(address: String, provider: Provider): OperationResponse
+    suspend fun deleteAccount(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): OperationResponse
 
     suspend fun adoptPassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: AdoptPasswordRequest,
     ): CredentialUpdateResponse
 
     suspend fun changePassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: ChangePasswordRequest,
     ): CredentialUpdateResponse
 
@@ -46,31 +52,43 @@ interface DashboardBackend {
 
     suspend fun logs(service: LogService): LogResponse
 
-    suspend fun accountLogs(address: String, provider: Provider): LogResponse
+    suspend fun accountLogs(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): LogResponse
 
-    suspend fun listFolders(address: String, provider: Provider): FolderListResponse
+    suspend fun listFolders(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): FolderListResponse
 
     suspend fun createFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: CreateFolderRequest,
     ): FolderInfo
 
     suspend fun deleteFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String,
     ): OperationResponse
 
     suspend fun listMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String?,
     ): MessageListResponse
 
     suspend fun readMessage(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         messageId: String,
         folderId: String?,
     ): MessageDetail
@@ -78,6 +96,7 @@ interface DashboardBackend {
     suspend fun mutateMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: MutateMessagesRequest,
     ): OperationResponse
 
@@ -96,17 +115,20 @@ internal object UnavailableDashboardBackend : DashboardBackend {
     override suspend fun deleteAccount(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): OperationResponse = unavailable()
 
     override suspend fun adoptPassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: AdoptPasswordRequest,
     ): CredentialUpdateResponse = unavailable()
 
     override suspend fun changePassword(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: ChangePasswordRequest,
     ): CredentialUpdateResponse = unavailable()
 
@@ -119,34 +141,40 @@ internal object UnavailableDashboardBackend : DashboardBackend {
     override suspend fun accountLogs(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): LogResponse = unavailable()
 
     override suspend fun listFolders(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
     ): FolderListResponse = unavailable()
 
     override suspend fun createFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: CreateFolderRequest,
     ): FolderInfo = unavailable()
 
     override suspend fun deleteFolder(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String,
     ): OperationResponse = unavailable()
 
     override suspend fun listMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         folderId: String?,
     ): MessageListResponse = unavailable()
 
     override suspend fun readMessage(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         messageId: String,
         folderId: String?,
     ): MessageDetail = unavailable()
@@ -154,6 +182,7 @@ internal object UnavailableDashboardBackend : DashboardBackend {
     override suspend fun mutateMessages(
         address: String,
         provider: Provider,
+        providerAccountId: String?,
         request: MutateMessagesRequest,
     ): OperationResponse = unavailable()
 

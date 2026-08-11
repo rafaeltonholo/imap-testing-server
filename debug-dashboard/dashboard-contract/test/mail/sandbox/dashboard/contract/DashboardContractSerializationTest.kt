@@ -64,12 +64,35 @@ class DashboardContractSerializationTest {
     }
 
     @Test
+    fun credentialUpdateRequiresAnAchievedProviderOperation() {
+        val rejected = CredentialUpdateResponse(
+            address = "dev@local.test",
+            provider = Provider.DOVECOT,
+            readiness = CredentialReadiness.AUTHENTICATION_FAILED,
+            operation = OperationResponse(false, "password rejected"),
+        )
+        val achieved = rejected.copy(
+            readiness = CredentialReadiness.READY,
+            operation = OperationResponse(true, "password changed"),
+        )
+
+        assertEquals(achieved, achieved.requireAchievedOperation())
+        assertEquals(
+            "password rejected",
+            assertFailsWith<IllegalStateException> {
+                rejected.requireAchievedOperation()
+            }.message,
+        )
+    }
+
+    @Test
     fun authenticationProbeContractsRoundTripWithoutEchoingCredentials() {
         val request = AuthenticationProbeRequest(
             address = "dev@local.test",
             provider = Provider.DOVECOT,
             protocol = AuthenticationProtocol.OAUTH_IMAP,
             credentialOverride = "opaque-bearer-token",
+            providerAccountId = null,
         )
         val response = AuthenticationProbeResponse(
             address = request.address,
@@ -173,6 +196,7 @@ class DashboardContractSerializationTest {
             GenerateMessageRequest(
                 targetAccount = "dev@local.test",
                 provider = Provider.DOVECOT,
+                providerAccountId = null,
                 sourceType = MessageSourceType.RANDOM,
                 deliveryMode = MessageDeliveryMode.SMTP_DELIVERY,
                 content = null,
@@ -199,6 +223,7 @@ class DashboardContractSerializationTest {
             MutateMessagesRequest(
                 account = "dev@local.test",
                 provider = Provider.STALWART,
+                providerAccountId = "account-42",
                 messageIds = listOf("message-1", "message-2"),
                 mutationStates = mapOf(
                     "message-1" to "email-state-7",

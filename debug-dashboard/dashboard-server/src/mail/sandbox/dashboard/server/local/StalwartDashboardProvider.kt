@@ -106,40 +106,59 @@ internal class StalwartDashboardProvider(
         )
     }
 
-    override suspend fun dashboardLogAccount(address: String): DashboardLogAccount {
-        val (accountId, canonicalAddress) = account(address)
+    override suspend fun dashboardLogAccount(
+        address: String,
+        providerAccountId: String?,
+    ): DashboardLogAccount {
+        val (accountId, canonicalAddress) = account(address, providerAccountId)
         return DashboardLogAccount(canonicalAddress, providerAccountId = accountId)
     }
 
-    override suspend fun deleteAccount(address: String) {
-        val account = account(address)
+    override suspend fun deleteAccount(address: String, providerAccountId: String?) {
+        val account = account(address, providerAccountId)
         adapter.deleteAccount(account.first)
-        catalog.remove(provider, account.second)
+        catalog.removeByProviderAccountId(provider, account.first)
     }
 
     override suspend fun adoptPassword(
         address: String,
         request: AdoptPasswordRequest,
-    ): CredentialUpdateResponse = unavailableCredentialUpdate(address, "verify")
+        providerAccountId: String?,
+    ): CredentialUpdateResponse {
+        val account = account(address, providerAccountId)
+        return unavailableCredentialUpdate(account.second, "verify")
+    }
 
     override suspend fun changePassword(
         address: String,
         newPassword: String,
-    ): CredentialUpdateResponse = unavailableCredentialUpdate(address, "change")
+        providerAccountId: String?,
+    ): CredentialUpdateResponse {
+        val account = account(address, providerAccountId)
+        return unavailableCredentialUpdate(account.second, "change")
+    }
 
     override suspend fun probeAuthentication(
         request: AuthenticationProbeRequest,
-    ): AuthenticationProbeResponse = AuthenticationProbeResponse(
-        address = request.address,
-        provider = provider,
-        protocol = request.protocol,
-        success = false,
-        providerResponse = TEMPORARY_UNAVAILABLE_MESSAGE,
-        correlatedLogs = emptyList(),
-    )
+    ): LocalAuthenticationProbeResult {
+        val account = account(request.address, request.providerAccountId)
+        return LocalAuthenticationProbeResult(
+            response = AuthenticationProbeResponse(
+                address = account.second,
+                provider = provider,
+                protocol = request.protocol,
+                success = false,
+                providerResponse = TEMPORARY_UNAVAILABLE_MESSAGE,
+                correlatedLogs = emptyList(),
+            ),
+        )
+    }
 
-    override suspend fun listFolders(address: String): List<FolderInfo> {
-        val accountId = account(address).first
+    override suspend fun listFolders(
+        address: String,
+        providerAccountId: String?,
+    ): List<FolderInfo> {
+        val accountId = account(address, providerAccountId).first
         return adapter.listFolders(accountId).map { folder ->
             FolderInfo(
                 id = folder.id,
@@ -150,20 +169,29 @@ internal class StalwartDashboardProvider(
         }
     }
 
-    override suspend fun createFolder(address: String, name: String): FolderInfo {
-        val folder = adapter.createFolder(account(address).first, name)
+    override suspend fun createFolder(
+        address: String,
+        name: String,
+        providerAccountId: String?,
+    ): FolderInfo {
+        val folder = adapter.createFolder(account(address, providerAccountId).first, name)
         return FolderInfo(folder.id, folder.name, 0, 0)
     }
 
-    override suspend fun deleteFolder(address: String, folderId: String) {
-        adapter.deleteFolder(account(address).first, folderId)
+    override suspend fun deleteFolder(
+        address: String,
+        folderId: String,
+        providerAccountId: String?,
+    ) {
+        adapter.deleteFolder(account(address, providerAccountId).first, folderId)
     }
 
     override suspend fun listMessages(
         address: String,
         folderId: String?,
+        providerAccountId: String?,
     ): List<MessageSummary> {
-        val accountId = account(address).first
+        val accountId = account(address, providerAccountId).first
         return adapter.listMessages(accountId, folderId).map { message ->
             MessageSummary(
                 id = message.id,
@@ -182,8 +210,12 @@ internal class StalwartDashboardProvider(
         address: String,
         messageId: String,
         folderId: String?,
+        providerAccountId: String?,
     ): MessageDetail {
-        val message = adapter.readMessage(account(address).first, messageId)
+        val message = adapter.readMessage(
+            account(address, providerAccountId).first,
+            messageId,
+        )
         return MessageDetail(
             id = message.summary.id,
             folderId = folderId ?: message.summary.mailboxIds.firstOrNull().orEmpty(),
@@ -203,7 +235,7 @@ internal class StalwartDashboardProvider(
         address: String,
         request: MutateMessagesRequest,
     ): OperationResponse {
-        val accountId = account(address).first
+        val accountId = account(address, request.providerAccountId).first
         val expectedState = request.singleMutationState()
         when (request.action) {
             MessageAction.MARK_READ -> adapter.setSeen(
@@ -269,7 +301,7 @@ internal class StalwartDashboardProvider(
         request: GenerateMessageRequest,
         messages: List<GeneratedMessage>,
     ): List<String> {
-        val accountId = account(request.targetAccount).first
+        val accountId = account(request.targetAccount, request.providerAccountId).first
         val mailboxId = request.folderId ?: adapter.listFolders(accountId)
             .firstOrNull { it.role == "inbox" }
             ?.id
@@ -284,8 +316,12 @@ internal class StalwartDashboardProvider(
         messages: List<GeneratedMessage>,
     ): List<String> {
         require(request.folderId == null) { "SMTP delivery always targets the Inbox" }
-        val (accountId, canonicalAddress) = account(request.targetAccount)
-        val record = catalog.require(provider, canonicalAddress)
+        val (accountId, canonicalAddress) = account(
+            request.targetAccount,
+            request.providerAccountId,
+        )
+        val record = catalog.findByProviderAccountId(provider, accountId)
+            ?: throw NoSuchElementException("Account is not registered in the dashboard")
         require(MailProtocol.SMTP in record.protocols) {
             "SMTP is not enabled for this Stalwart Account"
         }
@@ -333,10 +369,20 @@ internal class StalwartDashboardProvider(
         adapter.close()
     }
 
-    private suspend fun account(address: String): Pair<String, String> {
+    private suspend fun account(
+        address: String,
+        expectedProviderAccountId: String?,
+    ): Pair<String, String> {
+        val expectedId = expectedProviderAccountId
+            ?: throw DashboardNotFoundException(
+                "Stalwart provider Account ID is required; refresh the account list",
+            )
         val accounts = adapter.listAccounts()
-        val account = accounts.firstOrNull { it.address.equals(address, ignoreCase = true) }
-            ?: throw DashboardNotFoundException("Stalwart Account was not found")
+        val account = accounts.firstOrNull {
+            it.id == expectedId && it.address.equals(address, ignoreCase = true)
+        } ?: throw DashboardNotFoundException(
+            "Stalwart Account identity changed; refresh the account list",
+        )
         return account.id to account.address
     }
 
@@ -387,7 +433,7 @@ internal class LocalStalwartCredentialCatalog(
         }
 
     override suspend fun save(login: StalwartAccountLogin) {
-        val existing = catalog.find(Provider.STALWART, login.address)
+        val existing = catalog.findByProviderAccountId(Provider.STALWART, login.accountId)
         catalog.put(
             LocalAccountRecord(
                 provider = Provider.STALWART,
@@ -400,9 +446,7 @@ internal class LocalStalwartCredentialCatalog(
     }
 
     override suspend fun remove(accountId: String) {
-        catalog.findByProviderAccountId(Provider.STALWART, accountId)?.let { record ->
-            catalog.remove(Provider.STALWART, record.address)
-        }
+        catalog.removeByProviderAccountId(Provider.STALWART, accountId)
     }
 }
 
