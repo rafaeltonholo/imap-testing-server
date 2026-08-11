@@ -1,19 +1,169 @@
 package mail.sandbox.dashboard.server.web
 
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.netty.Netty
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
+import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.AccountListResponse
+import mail.sandbox.dashboard.contract.AdoptPasswordRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeRequest
+import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
+import mail.sandbox.dashboard.contract.AuthenticationProtocol
+import mail.sandbox.dashboard.contract.ChangePasswordRequest
+import mail.sandbox.dashboard.contract.CredentialReadiness
+import mail.sandbox.dashboard.contract.CredentialUpdateResponse
+import mail.sandbox.dashboard.contract.CreateAccountRequest
+import mail.sandbox.dashboard.contract.CreateFolderRequest
+import mail.sandbox.dashboard.contract.FolderInfo
+import mail.sandbox.dashboard.contract.FolderListResponse
+import mail.sandbox.dashboard.contract.GenerateMessageRequest
+import mail.sandbox.dashboard.contract.GenerateMessageResponse
+import mail.sandbox.dashboard.contract.LogResponse
+import mail.sandbox.dashboard.contract.LogService
+import mail.sandbox.dashboard.contract.MailProtocol
+import mail.sandbox.dashboard.contract.MessageDetail
+import mail.sandbox.dashboard.contract.MessageListResponse
+import mail.sandbox.dashboard.contract.MutateMessagesRequest
+import mail.sandbox.dashboard.contract.OperationResponse
+import mail.sandbox.dashboard.contract.Provider
+import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.contract.ProviderStatus
+import mail.sandbox.dashboard.server.api.DashboardBackend
+import mail.sandbox.dashboard.server.configureDashboard
+import mail.sandbox.dashboard.server.gate.resolveDashboardHost
+import org.openqa.selenium.By
+import org.openqa.selenium.JavascriptExecutor
+import org.openqa.selenium.SearchContext
+import org.openqa.selenium.WebDriver
+import org.openqa.selenium.WebElement
+import org.openqa.selenium.chrome.ChromeDriver
+import org.openqa.selenium.chrome.ChromeOptions
+import org.openqa.selenium.devtools.HasDevTools
+import org.openqa.selenium.devtools.v150.accessibility.Accessibility
+import org.openqa.selenium.support.ui.WebDriverWait
 
-/**
- * Browser-facing source contract for the Compose/Wasm dashboard.
- *
- * The JVM server test module cannot link the Wasm application. These checks pin the semantic
- * browser surface and controller wiring; the production browser gate then exercises the linked
- * bundle, while `dashboard-web` remains built exclusively by the Kotlin Toolchain.
- */
+/** Browser-facing source and rendered-interaction contracts for the Compose/Wasm dashboard. */
 class DashboardReadinessBrowserTest {
+    @Test
+    fun narrowReadinessGateAndZeroAccountProviderStatusRenderInTheRealWasmApp() {
+        val backend = ReadinessBrowserBackend()
+        readinessBrowser(backend, windowSize = "760,1000") { driver, wait ->
+            waitForAccessibleName(wait, "Provider status Dovecot: ready")
+            waitForAccessibleName(wait, "Provider status Stalwart: ready")
+
+            clickComposeText(driver, wait, "Dovecot")
+            waitForSemanticText(
+                wait,
+                "Verify the existing password or reset it before reading or changing mailbox state.",
+            )
+            waitForSemanticText(wait, "Verify existing password")
+            waitForSemanticText(wait, "Reset password")
+            waitForSemanticText(wait, "Delete account")
+            wait.until { backend.accountLogRequests.contains("bravo@local.test") }
+            assertTrue(
+                backend.folderRequests.none { it == "bravo@local.test" },
+                "PASSWORD_REQUIRED must block mailbox loading without blocking management controls",
+            )
+
+            clickComposeText(driver, wait, "Authentication")
+            waitForAccessibleName(wait, "Authentication probe panel")
+            waitForSemanticText(
+                wait,
+                "Password required: enter a request override to keep this diagnostic available.",
+            )
+
+            backend.accountSnapshot = emptyList()
+            backend.providerStatusSnapshot = listOf(
+                ProviderStatus(Provider.DOVECOT, ProviderAvailability.UNAVAILABLE),
+                ProviderStatus(Provider.STALWART, ProviderAvailability.UPGRADE_REQUIRED),
+            )
+            clickComposeText(driver, wait, "Refresh")
+            waitForAccessibleName(wait, "Provider status Dovecot: unavailable")
+            waitForAccessibleName(wait, "Provider status Stalwart: upgrade required")
+            clickComposeText(driver, wait, "Accounts")
+            waitForSemanticText(wait, "No account channels")
+        }
+    }
+
+    @Test
+    fun latestAuthenticationProbeWinsAcrossAnAccountRoundTripInTheRealWasmApp() {
+        val backend = ReadinessBrowserBackend()
+        readinessBrowser(backend) { driver, wait ->
+            waitForSemanticText(wait, "Mail Flight Recorder")
+            waitForSemanticText(wait, "alpha@local.test")
+
+            clickComposeText(driver, wait, "Run authentication probe")
+            assertTrue(
+                backend.firstAlphaProbeStarted.await(5, TimeUnit.SECONDS),
+                "The first Alpha probe did not reach the fake backend",
+            )
+
+            clickComposeText(driver, wait, "Dovecot")
+            waitForSemanticText(wait, "Dovecot · bravo@local.test")
+            clickComposeText(driver, wait, "Stalwart")
+            waitForSemanticText(wait, "Stalwart · alpha@local.test")
+            clickComposeText(driver, wait, "Run authentication probe")
+            waitForSemanticText(wait, NEW_ALPHA_RESPONSE)
+
+            backend.releaseFirstAlphaProbe.complete(Unit)
+            wait.until { current ->
+                authenticationProbeResourceCount(current) >= 2L
+            }
+            settleRenderedFrames(driver)
+
+            assertEquals(
+                listOf(ALPHA_PROVIDER_ACCOUNT_ID, ALPHA_PROVIDER_ACCOUNT_ID),
+                backend.alphaProbeRequests.map(AuthenticationProbeRequest::providerAccountId),
+            )
+            assertTrue(
+                semanticElements(driver).none { it.semanticText() == OLD_ALPHA_RESPONSE },
+                "The invalidated first probe replaced the newer result",
+            )
+            assertNotNull(waitForSemanticText(wait, NEW_ALPHA_RESPONSE))
+        }
+    }
+
+    @Test
+    fun newReadinessEvidenceUsesAaTextContrast() {
+        val app = dashboardSource("DashboardApp.kt")
+        val badge = app.section("private fun ReadinessBadge(", "private fun StaleMarker(")
+        val stale = app.section("private fun StaleMarker(", "private fun ProtocolChip(")
+        val protocol = app.section("private fun ProtocolChip(", "private fun ReadinessNotice(")
+
+        assertTrue(
+            "color = InstrumentGraphite" in badge,
+            "Readiness badge text must use the AA-safe graphite foreground",
+        )
+        assertTrue(
+            "color = InstrumentGraphite" in stale,
+            "The 10sp stale marker must use the AA-safe graphite foreground",
+        )
+        assertTrue(
+            "color = InstrumentGraphite" in protocol,
+            "The 10sp protocol chip must use the AA-safe graphite foreground",
+        )
+
+        val graphite = app.color("InstrumentGraphite")
+        listOf("GreenWash", "ErrorWash", "PanelFogDark", "RecorderPaper", "PanelFog")
+            .forEach { background ->
+                val ratio = contrastRatio(graphite, app.color(background))
+                assertTrue(ratio >= 4.5, "$background contrast was $ratio:1")
+            }
+    }
+
     @Test
     fun controllerRetainsProviderStatusAndGatesOnlyMailPlaneActions() {
         val api = dashboardSource("DashboardApi.kt")
@@ -198,4 +348,277 @@ class DashboardReadinessBrowserTest {
         assertTrue(endIndex > startIndex, "Missing section end: $end")
         return substring(startIndex, endIndex)
     }
+
+    private fun String.color(name: String): Int {
+        val match = Regex("private val $name = Color\\(0xFF([0-9A-F]{6})\\)").find(this)
+        return requireNotNull(match) { "Missing color token: $name" }.groupValues[1].toInt(16)
+    }
+
+    private fun contrastRatio(first: Int, second: Int): Double {
+        val firstLuminance = relativeLuminance(first)
+        val secondLuminance = relativeLuminance(second)
+        return (maxOf(firstLuminance, secondLuminance) + 0.05) /
+            (minOf(firstLuminance, secondLuminance) + 0.05)
+    }
+
+    private fun relativeLuminance(rgb: Int): Double {
+        fun component(shift: Int): Double {
+            val value = ((rgb shr shift) and 0xFF) / 255.0
+            return if (value <= 0.04045) value / 12.92 else Math.pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * component(16) + 0.7152 * component(8) + 0.0722 * component(0)
+    }
 }
+
+private fun readinessBrowser(
+    backend: ReadinessBrowserBackend,
+    windowSize: String = "1440,1200",
+    block: (ChromeDriver, WebDriverWait) -> Unit,
+) {
+    val dashboardRoot = dashboardProjectRoot()
+    val server = embeddedServer(
+        factory = Netty,
+        port = 0,
+        host = "127.0.0.1",
+    ) {
+        configureDashboard(
+            webAssets = WebAssetBundle.fromEnvironment(projectRoot = dashboardRoot),
+            dashboardBackend = backend,
+        )
+    }.start(wait = false)
+    val driver = ChromeDriver(
+        ChromeOptions().apply {
+            setBinary("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+            addArguments(
+                "--headless=new",
+                "--enable-features=WebAssemblyGarbageCollection",
+                "--force-renderer-accessibility=complete",
+                "--window-size=$windowSize",
+                "--disable-search-engine-choice-screen",
+                "--disable-background-networking",
+            )
+        },
+    )
+    try {
+        val devTools = (driver as HasDevTools).devTools
+        devTools.createSession()
+        devTools.send(Accessibility.enable())
+        val port = runBlocking { server.engine.resolvedConnectors().single().port }
+        driver.get("http://127.0.0.1:$port/")
+        block(driver, WebDriverWait(driver, Duration.ofSeconds(45)))
+    } catch (failure: Throwable) {
+        println("READINESS_BROWSER_URL=${driver.currentUrl}")
+        println("READINESS_BROWSER_SOURCE=${driver.pageSource.take(2_000)}")
+        println(
+            "READINESS_BROWSER_SHADOW=" + runCatching {
+                dashboardShadow(driver).findElements(By.cssSelector("*")).map { element ->
+                    "${element.tagName}:${element.getDomAttribute("id")}:${element.semanticText()}"
+                }
+            }.getOrElse { listOf("ERROR:$it") },
+        )
+        println("READINESS_BROWSER_LOGS=${runCatching { driver.manage().logs().get("browser").all }.getOrNull()}")
+        throw failure
+    } finally {
+        runCatching { driver.quit() }
+        server.stop(gracePeriodMillis = 500, timeoutMillis = 2_000)
+    }
+}
+
+private fun dashboardProjectRoot(): Path {
+    val working = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
+    return generateSequence(working) { it.parent }
+        .firstOrNull { Files.isDirectory(it.resolve("dashboard-web")) }
+        ?: error("Could not locate the debug-dashboard project root")
+}
+
+private fun waitForSemanticText(wait: WebDriverWait, expected: String): WebElement = wait.until { driver ->
+    runCatching {
+        semanticElements(driver).firstOrNull { element ->
+            element.semanticText() == expected
+        }
+    }.getOrNull()
+}
+
+private fun waitForAccessibleName(wait: WebDriverWait, expected: String): WebElement = wait.until { driver ->
+    runCatching {
+        semanticElements(driver).firstOrNull { element ->
+            element.accessibleName.orEmpty().trim() == expected
+        }
+    }.getOrNull()
+}
+
+private fun clickComposeText(
+    driver: ChromeDriver,
+    wait: WebDriverWait,
+    expected: String,
+) {
+    val control = wait.until { current ->
+        runCatching {
+            semanticElements(current).firstOrNull { element ->
+                element.ariaRole == "button" && element.semanticText().lineSequence().any {
+                    it.trim() == expected
+                }
+            }
+        }.getOrNull()
+    }
+    (driver as JavascriptExecutor).executeScript("arguments[0].click();", control)
+}
+
+private fun semanticElements(driver: WebDriver): List<WebElement> =
+    dashboardShadow(driver).findElements(By.cssSelector("#cmp_a11y_root *"))
+
+private fun dashboardShadow(driver: WebDriver): SearchContext =
+    resolveDashboardHost(driver.findElement(By.id("dashboard-root")))
+
+private fun WebElement.semanticText(): String =
+    getDomProperty("innerText")?.trim().orEmpty().ifBlank { accessibleName.orEmpty().trim() }
+
+private fun authenticationProbeResourceCount(driver: WebDriver): Long =
+    ((driver as JavascriptExecutor).executeScript(
+        "return performance.getEntriesByType('resource')" +
+            ".filter((entry) => entry.name.endsWith('/api/v1/authentication-probes')).length;",
+    ) as Number).toLong()
+
+private fun settleRenderedFrames(driver: WebDriver) {
+    (driver as JavascriptExecutor).executeAsyncScript(
+        "const done = arguments[arguments.length - 1];" +
+            "requestAnimationFrame(() => requestAnimationFrame(done));",
+    )
+}
+
+private class ReadinessBrowserBackend : DashboardBackend {
+    val firstAlphaProbeStarted = CountDownLatch(1)
+    val releaseFirstAlphaProbe = CompletableDeferred<Unit>()
+    val alphaProbeRequests = CopyOnWriteArrayList<AuthenticationProbeRequest>()
+    val accountLogRequests = CopyOnWriteArrayList<String>()
+    val folderRequests = CopyOnWriteArrayList<String>()
+    private val alphaProbeCount = AtomicInteger()
+
+    @Volatile
+    var accountSnapshot: List<AccountInfo> = listOf(
+        AccountInfo(
+            address = "alpha@local.test",
+            provider = Provider.STALWART,
+            protocols = listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+            credentialReadiness = CredentialReadiness.READY,
+            providerAccountId = ALPHA_PROVIDER_ACCOUNT_ID,
+        ),
+        AccountInfo(
+            address = "bravo@local.test",
+            provider = Provider.DOVECOT,
+            protocols = listOf(MailProtocol.IMAP, MailProtocol.POP3, MailProtocol.SMTP),
+            credentialReadiness = CredentialReadiness.PASSWORD_REQUIRED,
+        ),
+    )
+
+    @Volatile
+    var providerStatusSnapshot: List<ProviderStatus> = listOf(
+        ProviderStatus(Provider.DOVECOT, ProviderAvailability.READY),
+        ProviderStatus(Provider.STALWART, ProviderAvailability.READY),
+    )
+
+    override suspend fun listAccounts(): AccountListResponse = AccountListResponse(
+        accounts = accountSnapshot,
+        providerStatuses = providerStatusSnapshot,
+    )
+
+    override suspend fun probeAuthentication(request: AuthenticationProbeRequest): AuthenticationProbeResponse {
+        if (request.address == "alpha@local.test") {
+            alphaProbeRequests += request
+            if (alphaProbeCount.incrementAndGet() == 1) {
+                firstAlphaProbeStarted.countDown()
+                releaseFirstAlphaProbe.await()
+                return request.response(OLD_ALPHA_RESPONSE)
+            }
+            return request.response(NEW_ALPHA_RESPONSE)
+        }
+        return request.response("bravo response")
+    }
+
+    override suspend fun logs(service: LogService): LogResponse = LogResponse(service, lines = emptyList())
+
+    override suspend fun accountLogs(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): LogResponse {
+        accountLogRequests += address
+        return LogResponse(LogService.ALL, account = address, lines = emptyList())
+    }
+
+    override suspend fun listFolders(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): FolderListResponse {
+        folderRequests += address
+        return FolderListResponse(emptyList())
+    }
+
+    override suspend fun listMessages(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        folderId: String?,
+    ): MessageListResponse = MessageListResponse(emptyList())
+
+    override suspend fun createAccount(request: CreateAccountRequest): AccountInfo = unsupported()
+    override suspend fun deleteAccount(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+    ): OperationResponse = unsupported()
+    override suspend fun adoptPassword(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        request: AdoptPasswordRequest,
+    ): CredentialUpdateResponse = unsupported()
+    override suspend fun changePassword(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        request: ChangePasswordRequest,
+    ): CredentialUpdateResponse = unsupported()
+    override suspend fun createFolder(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        request: CreateFolderRequest,
+    ): FolderInfo = unsupported()
+    override suspend fun deleteFolder(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        folderId: String,
+    ): OperationResponse = unsupported()
+    override suspend fun readMessage(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        messageId: String,
+        folderId: String?,
+    ): MessageDetail = unsupported()
+    override suspend fun mutateMessages(
+        address: String,
+        provider: Provider,
+        providerAccountId: String?,
+        request: MutateMessagesRequest,
+    ): OperationResponse = unsupported()
+    override suspend fun generateMessage(request: GenerateMessageRequest): GenerateMessageResponse = unsupported()
+
+    private fun AuthenticationProbeRequest.response(providerResponse: String) = AuthenticationProbeResponse(
+        address = address,
+        provider = provider,
+        protocol = protocol,
+        success = true,
+        providerResponse = providerResponse,
+        correlatedLogs = listOf("correlated $providerResponse"),
+    )
+
+    private fun <T> unsupported(): T = error("Unexpected browser-backend operation")
+}
+
+private const val ALPHA_PROVIDER_ACCOUNT_ID = "stalwart-alpha-id"
+private const val OLD_ALPHA_RESPONSE = "old alpha probe response"
+private const val NEW_ALPHA_RESPONSE = "new alpha probe response"

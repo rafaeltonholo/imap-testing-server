@@ -1059,12 +1059,6 @@ private fun ReadinessBadge(readiness: CredentialReadiness) {
         CredentialReadiness.AUTHENTICATION_FAILED -> ErrorWash
         CredentialReadiness.PROVIDER_UNAVAILABLE -> PanelFogDark
     }
-    val content = when (readiness) {
-        CredentialReadiness.READY -> VerifiedGreen
-        CredentialReadiness.PASSWORD_REQUIRED -> InstrumentGraphite
-        CredentialReadiness.AUTHENTICATION_FAILED -> RecorderCursorRed
-        CredentialReadiness.PROVIDER_UNAVAILABLE -> SilkscreenGray
-    }
     Text(
         text = label,
         modifier = Modifier
@@ -1073,7 +1067,7 @@ private fun ReadinessBadge(readiness: CredentialReadiness) {
             .semantics {
                 contentDescription = "Readiness ${readiness.name.lowercase()}"
             },
-        color = content,
+        color = InstrumentGraphite,
         fontSize = 10.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
@@ -1088,7 +1082,7 @@ private fun StaleMarker() {
             .border(1.dp, SilkscreenGray, RoundedCornerShape(50))
             .padding(horizontal = 6.dp, vertical = 2.dp)
             .semantics { contentDescription = "Stale provider snapshot" },
-        color = SilkscreenGray,
+        color = InstrumentGraphite,
         fontSize = 10.sp,
         maxLines = 1,
     )
@@ -1109,7 +1103,7 @@ private fun ProtocolChip(
             .semantics {
                 contentDescription = "Protocol ${protocol.name}: $evidence"
             },
-        color = if (stale) SilkscreenGray else InstrumentGraphite,
+        color = InstrumentGraphite,
         fontFamily = FontFamily.Monospace,
         fontSize = 10.sp,
         maxLines = 1,

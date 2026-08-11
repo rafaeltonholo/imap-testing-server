@@ -276,6 +276,7 @@ internal class DashboardController(
     private var workspaceRequestGeneration = 0L
     private val accountLogRequests = LatestRequestTracker<AccountTarget>()
     private val globalLogRequests = LatestRequestTracker<LogService>()
+    private val authenticationProbeRequests = LatestRequestTracker<AccountTarget>()
 
     var accounts by mutableStateOf<List<AccountInfo>>(emptyList())
         private set
@@ -556,6 +557,7 @@ internal class DashboardController(
     ) {
         if (authenticationProbeLoading) return
         val target = selectedTarget ?: return
+        val requestToken = authenticationProbeRequests.begin(target)
         authenticationProbe = null
         authenticationProbeError = null
         authenticationProbeLoading = true
@@ -576,18 +578,18 @@ internal class DashboardController(
             ) {
                 "Authentication probe response does not match the requested provider channel"
             }
-            if (selectedTarget == target) {
+            if (authenticationProbeRequests.isCurrent(requestToken, target) && selectedTarget == target) {
                 authenticationProbe = result
             }
         } catch (failure: Throwable) {
             failure.rethrowIfCancellation()
-            if (selectedTarget == target) {
+            if (authenticationProbeRequests.isCurrent(requestToken, target) && selectedTarget == target) {
                 authenticationProbeError = failure
                     .userMessage("Authentication probe failed")
                     .redactedEvidence(credentialOverride)
             }
         } finally {
-            if (selectedTarget == target) {
+            if (authenticationProbeRequests.isCurrent(requestToken, target) && selectedTarget == target) {
                 authenticationProbeLoading = false
             }
         }
@@ -810,6 +812,7 @@ internal class DashboardController(
     }
 
     private fun clearAuthenticationProbe() {
+        authenticationProbeRequests.invalidate()
         authenticationProbe = null
         authenticationProbeLoading = false
         authenticationProbeError = null
