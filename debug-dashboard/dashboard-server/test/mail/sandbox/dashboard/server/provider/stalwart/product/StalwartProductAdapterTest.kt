@@ -76,6 +76,24 @@ class StalwartProductAdapterTest {
         }
 
     @Test
+    fun ordinaryLoginProbeAttemptsAnExplicitEmptyPassword() = runBlocking {
+        val transport = RecordingTransport()
+        val catalog = InMemoryStalwartAccountCredentialCatalog()
+        val adapter = adapter(transport, catalog)
+
+        val outcome = adapter.probeOrdinaryLogin(
+            accountId = "account-one",
+            address = "dev@local.test",
+            password = "",
+        )
+
+        assertTrue(outcome is AuthenticationOutcome.Authenticated)
+        assertEquals(listOf("dev@local.test" to ""), transport.sessionCredentials)
+        assertNull(catalog.find("account-one"))
+        transport.assertExhausted()
+    }
+
+    @Test
     fun ordinaryLoginProbeRejectsAnotherPrimaryAccount() = runBlocking {
         val transport = RecordingTransport()
         val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())

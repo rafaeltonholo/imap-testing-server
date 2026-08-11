@@ -17,6 +17,7 @@ import javax.security.auth.callback.PasswordCallback
 import javax.security.sasl.SaslClient
 import javax.security.sasl.SaslClientFactory
 import javax.security.sasl.SaslException
+import kotlinx.coroutines.CancellationException
 
 internal data class AccountCredentials(
     val address: String,
@@ -221,6 +222,8 @@ internal class JakartaProviderAuthenticationConnector(
             } else {
                 ProviderAuthenticationTransportOutcome.WrongPassword(diagnostic)
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (failure: Exception) {
             val diagnostic = failure.providerDiagnostic()
             if (failure.hasCause<SocketTimeoutException>()) {

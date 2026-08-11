@@ -241,8 +241,13 @@ internal class StalwartProductAdapter(
     ): AuthenticationOutcome {
         require(accountId.isNotBlank()) { "Account ID is absent" }
         parseAddress(address)
-        requirePassword(password, "Account password")
-        val credential = GateCredential.basic(address, password.toCharArray())
+        requireProbePassword(password)
+        val passwordCharacters = password.toCharArray()
+        val credential = try {
+            GateCredential.basic(address, passwordCharacters)
+        } finally {
+            passwordCharacters.fill('\u0000')
+        }
         return try {
             GateJmapClient(baseUri, credential, transport).use { client ->
                 val session = client.discoverSession()
@@ -1096,6 +1101,13 @@ internal class StalwartProductAdapter(
             }
             require(value.none { it == '\u0000' || it == '\r' || it == '\n' }) {
                 "$label contains an unsupported delimiter"
+            }
+        }
+
+        fun requireProbePassword(value: String) {
+            require(value.length <= 4_096) { "Account password is too large" }
+            require(value.none { it == '\u0000' || it == '\r' || it == '\n' }) {
+                "Account password contains an unsupported delimiter"
             }
         }
 

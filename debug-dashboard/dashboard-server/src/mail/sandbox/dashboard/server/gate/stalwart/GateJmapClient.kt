@@ -40,7 +40,6 @@ internal sealed class GateCredential(
     companion object {
         fun basic(username: String, secret: CharArray): GateCredential {
             require(username.isNotBlank() && ':' !in username) { "Basic username is invalid" }
-            require(secret.isNotEmpty()) { "Basic secret is absent" }
             return Basic(username, secret)
         }
 

@@ -13,11 +13,20 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LocalSmtpClientTest {
+    @Test
+    fun productionSocketGuardApprovesOnlyTheCurrentFixedEndpoints() {
+        assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 21025))
+        assertTrue(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 8587))
+        assertFalse(isApprovedLoopbackSmtpEndpoint("127.0.0.1", 18587))
+        assertFalse(isApprovedLoopbackSmtpEndpoint("localhost", 8587))
+    }
+
     @Test
     fun sendsRawMessageWithCrlfDotStuffingAndReturnsPostfixQueueId() {
         var receivedData = emptyList<String>()

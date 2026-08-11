@@ -10,12 +10,14 @@ import jakarta.mail.Store
 import jakarta.mail.Transport
 import jakarta.mail.URLName
 import java.net.SocketTimeoutException
+import java.util.concurrent.CancellationException
 import java.util.Properties
 import javax.security.auth.callback.NameCallback
 import javax.security.auth.callback.PasswordCallback
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -292,6 +294,18 @@ class ProviderAuthenticationProbeTest {
                 .authenticate(passwordAttempt()),
         )
         assertEquals(1, wrappedTimeoutFactory.created.single().closeCount)
+    }
+
+    @Test
+    fun jakartaConnectorClosesTheConnectionAndPropagatesCancellation() {
+        val factory = RecordingConnectionFactory(CancellationException("cancelled"))
+        val connector = JakartaProviderAuthenticationConnector(factory)
+
+        assertFailsWith<CancellationException> {
+            connector.authenticate(passwordAttempt())
+        }
+
+        assertEquals(1, factory.created.single().closeCount)
     }
 
     @Test

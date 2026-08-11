@@ -305,7 +305,7 @@ private object JvmLoopbackSmtpSocketConnector : LocalSmtpSocketConnector {
         connectTimeoutMillis: Int,
         readTimeoutMillis: Int,
     ): Socket {
-        check(host == "127.0.0.1" && port in setOf(21025, 18587)) {
+        check(isApprovedLoopbackSmtpEndpoint(host, port)) {
             "Local SMTP endpoint is not approved"
         }
         val socket = Socket()
@@ -319,6 +319,9 @@ private object JvmLoopbackSmtpSocketConnector : LocalSmtpSocketConnector {
         }
     }
 }
+
+internal fun isApprovedLoopbackSmtpEndpoint(host: String, port: Int): Boolean =
+    host == "127.0.0.1" && port in setOf(21025, 8587)
 
 private data class SmtpReply(
     val code: Int,
