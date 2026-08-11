@@ -134,6 +134,22 @@ class DovecotUsersFileTest {
     }
 
     @Test
+    fun parserMatchesPythonSplitlinesForEveryAdditionalLineBoundary() =
+        withFixture { fixture ->
+            PYTHON_ADDITIONAL_LINE_BOUNDARIES.forEach { boundary ->
+                val password = "before${boundary}after"
+                fixture.writeUsers("dev@local.test:{PLAIN}$password::::::\n")
+                assertFailsWith<DovecotUsersFileException>("U+${boundary.code.toString(16)}") {
+                    fixture.file().list()
+                }
+                fixture.writeUsers("dev@local.test:{PLAIN}old::::::\n")
+                assertFailsWith<DovecotUsersFileException>("U+${boundary.code.toString(16)}") {
+                    fixture.file().changePassword("dev@local.test", password)
+                }
+            }
+        }
+
+    @Test
     fun nonCanonicalAddressesPasswordsModesAndSymlinksFailClosed() = withFixture { fixture ->
         fixture.writeUsers("dev@local.test:{PLAIN}secret::::::\n")
         val file = fixture.file()
@@ -315,6 +331,16 @@ class DovecotUsersFileTest {
     }
 
     private companion object {
+        val PYTHON_ADDITIONAL_LINE_BOUNDARIES = listOf(
+            '\u000b',
+            '\u000c',
+            '\u001c',
+            '\u001d',
+            '\u001e',
+            '\u0085',
+            '\u2028',
+            '\u2029',
+        )
         val JOURNAL_PATTERN = Regex(
             "users-mutation-journal-v1 " +
                 "before=sha256:[0-9a-f]{64} after=sha256:[0-9a-f]{64}\\n",

@@ -186,6 +186,9 @@ internal class DovecotUsersFile(
     }
 
     private fun parse(document: String): List<DovecotUserRecord> {
+        if (document.any(PYTHON_NON_LF_LINE_BOUNDARIES::contains)) {
+            fail("Dovecot users authority contains a non-canonical line boundary")
+        }
         val lines = when {
             document.isEmpty() -> emptyList()
             !document.endsWith('\n') -> fail("Dovecot users authority is not canonical")
@@ -370,7 +373,12 @@ internal class DovecotUsersFile(
         val password = record.passwordField.removePrefix(PLAIN_PREFIX)
         if (
             password.isEmpty() ||
-            password.any { it == '\u0000' || it == '\n' || it == '\r' || it == ':' }
+            password.any { character ->
+                character == '\u0000' ||
+                    character == '\n' ||
+                    character == ':' ||
+                    character in PYTHON_NON_LF_LINE_BOUNDARIES
+            }
         ) {
             fail("Dovecot PLAIN password is empty or unsafe")
         }
@@ -409,6 +417,18 @@ internal class DovecotUsersFile(
 }
 
 private const val PLAIN_PREFIX = "{PLAIN}"
+
+private val PYTHON_NON_LF_LINE_BOUNDARIES = setOf(
+    '\r',
+    '\u000b',
+    '\u000c',
+    '\u001c',
+    '\u001d',
+    '\u001e',
+    '\u0085',
+    '\u2028',
+    '\u2029',
+)
 
 private val DOVECOT_ADDRESS_PATTERN = Regex(
     "[a-z0-9!#\$%&'*+/=?^_`{|}~-]+" +
