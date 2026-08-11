@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -415,6 +416,13 @@ class RuntimeStateClassificationTest(unittest.TestCase):
                 1,
             ),
             "quoted": canonical.replace("services:\n", '"services":\n', 1),
+            "tagged-services": canonical
+            + "\n!!str services:\n"
+            + "  placeholder:\n"
+            + "    image: example.invalid/placeholder:fixed\n",
+            "tagged-stalwart": canonical.rstrip()
+            + "\n  !!str stalwart:\n"
+            + "    image: example.invalid/shadow:fixed\n",
         }
 
         for label, content in invalid_documents.items():
@@ -466,6 +474,48 @@ class RuntimeStateClassificationTest(unittest.TestCase):
             runtime_state.classify_repository(self.root),
             runtime_state.RuntimeState.INVALID,
         )
+
+    def test_marked_fresh_runtime_finalizes_receipt_before_becoming_current(
+        self,
+    ) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        self.make_nonempty_store()
+        marker = runtime_state.publish_failure_marker(self.root)
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.INVALID,
+        )
+        self.assertTrue(
+            hasattr(runtime_state, "finalize_marked_current_receipt"),
+        )
+
+        receipt = runtime_state.finalize_marked_current_receipt(self.root)
+
+        self.assertTrue(receipt.is_file())
+        self.assertFalse(marker.exists())
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.CURRENT,
+        )
+
+    def test_failure_marker_syncs_new_store_and_idempotent_existing_marker(
+        self,
+    ) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        with mock.patch.object(
+            runtime_state.os,
+            "fsync",
+            wraps=runtime_state.os.fsync,
+        ) as synced:
+            marker = runtime_state.publish_failure_marker(self.root)
+            first_syncs = synced.call_count
+            self.assertGreaterEqual(first_syncs, 3)
+
+            self.assertEqual(
+                runtime_state.publish_failure_marker(self.root),
+                marker,
+            )
+            self.assertGreaterEqual(synced.call_count - first_syncs, 2)
 
     def test_any_failure_marker_type_is_invalid(self) -> None:
         self.write_compose(CURRENT_IMAGE)

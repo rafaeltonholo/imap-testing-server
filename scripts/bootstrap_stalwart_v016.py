@@ -4327,6 +4327,7 @@ class BootstrapOrchestratorDependencies:
 class FreshInitializationDependencies:
     """Injected stages for the one-shot fresh-store initializer."""
 
+    acquire_operation_lock: Callable[[Path], object]
     classify: Callable[[Path], str]
     validate_definition: Callable[[Path], None]
     prepare: Callable[[Path], None]
@@ -4825,6 +4826,7 @@ def production_orchestrator_dependencies() -> BootstrapOrchestratorDependencies:
 
 FRESH_RECOVERY_USERNAME = "fresh-recovery"
 FRESH_RECOVERY_PASSWORD = "secret"
+FRESH_FAILURE_MARKER_NAME = ".mail-sandbox-fresh-initialization-failed"
 FRESH_RECOVERY_ENV_RELATIVE = (
     Path("debug-dashboard")
     / ".runtime"
@@ -4916,60 +4918,79 @@ def _validate_fresh_compose_model(
     current_image: str,
 ) -> None:
     value = _strict_json_model(data)
-    services = value.get("services")
-    service = services.get("stalwart") if isinstance(services, dict) else None
-    if not isinstance(service, dict):
-        raise BootstrapError("current Stalwart Compose model is malformed")
-    expected_ports = [
-        {
-            "host_ip": "127.0.0.1",
-            "mode": "ingress",
-            "protocol": "tcp",
-            "published": "8443",
-            "target": 8080,
-        },
-        {
-            "host_ip": "127.0.0.1",
-            "mode": "ingress",
-            "protocol": "tcp",
-            "published": "8587",
-            "target": 587,
-        },
-    ]
-    volumes = service.get("volumes")
-    if not isinstance(volumes, list):
-        raise BootstrapError("current Stalwart Compose model is malformed")
-    observed_mounts = {
-        item.get("target"): (
-            item.get("source"),
-            item.get("read_only", False),
-            item.get("type"),
-        )
-        for item in volumes
-        if isinstance(item, dict) and type(item.get("target")) is str
-    }
-    environment = service.get("environment")
+    project = value.get("name")
     if (
-        service.get("image") != current_image
-        or service.get("user") != "2000:2000"
-        or service.get("restart") != "unless-stopped"
-        or service.get("ports") != expected_ports
-        or observed_mounts
-        != {
-            "/etc/stalwart": (
-                str(repository / "stalwart"),
-                True,
-                "bind",
-            ),
-            "/var/lib/stalwart": (
-                str(repository / "stalwart-data"),
-                False,
-                "bind",
-            ),
-        }
-        or environment
-        != {"STALWART_PUBLIC_URL": "http://127.0.0.1:8443"}
+        type(project) is not str
+        or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None
     ):
+        raise BootstrapError("current Stalwart Compose model is malformed")
+    expected = {
+        "name": project,
+        "networks": {
+            "default": {
+                "name": f"{project}_default",
+                "ipam": {},
+            },
+        },
+        "services": {
+            "stalwart": {
+                "command": None,
+                "container_name": "stalwart-dev",
+                "entrypoint": None,
+                "environment": {
+                    "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
+                },
+                "healthcheck": {
+                    "test": [
+                        "CMD",
+                        "curl",
+                        "-fsS",
+                        "http://127.0.0.1:8080/healthz/ready",
+                    ],
+                    "timeout": "2s",
+                    "interval": "2s",
+                    "retries": 30,
+                    "start_period": "2s",
+                },
+                "image": current_image,
+                "networks": {"default": None},
+                "ports": [
+                    {
+                        "host_ip": "127.0.0.1",
+                        "mode": "ingress",
+                        "protocol": "tcp",
+                        "published": "8443",
+                        "target": 8080,
+                    },
+                    {
+                        "host_ip": "127.0.0.1",
+                        "mode": "ingress",
+                        "protocol": "tcp",
+                        "published": "8587",
+                        "target": 587,
+                    },
+                ],
+                "restart": "unless-stopped",
+                "user": "2000:2000",
+                "volumes": [
+                    {
+                        "bind": {},
+                        "read_only": True,
+                        "source": str(repository / "stalwart"),
+                        "target": "/etc/stalwart",
+                        "type": "bind",
+                    },
+                    {
+                        "bind": {},
+                        "source": str(repository / "stalwart-data"),
+                        "target": "/var/lib/stalwart",
+                        "type": "bind",
+                    },
+                ],
+            },
+        },
+    }
+    if value != expected:
         raise BootstrapError("current Stalwart Compose model is malformed")
 
 
@@ -5019,8 +5040,23 @@ class _ProductionFreshRuntime:
 
     def validate_definition(self, repository: Path) -> None:
         # Load and validate all immutable assets before Docker evaluates Compose.
-        load_desired_state(BootstrapPaths.for_repository(repository))
-        load_normal_runtime_contract(BootstrapPaths.for_repository(repository))
+        paths = BootstrapPaths.for_repository(repository)
+        load_desired_state(paths)
+        load_normal_runtime_contract(paths)
+        _binding, config = _snapshot_regular(
+            repository / "stalwart" / "config.json",
+            root=repository,
+            label="current Stalwart config",
+            required_mode=0o644,
+            maximum=1024,
+        )
+        expected_config = getattr(
+            self._runtime_state,
+            "CURRENT_CONFIG_BYTES",
+            None,
+        )
+        if type(expected_config) is not bytes or config != expected_config:
+            raise BootstrapError("current Stalwart config is not canonical")
         command = [
             *_fresh_compose_prefix(repository, recovery=False),
             "config",
@@ -5038,19 +5074,26 @@ class _ProductionFreshRuntime:
     def prepare(self, repository: Path) -> None:
         store = repository / "stalwart-data"
         try:
-            store.mkdir(mode=0o700)
-        except FileExistsError:
-            try:
-                metadata = store.lstat()
-                empty = next(store.iterdir(), None) is None
-            except OSError:
-                raise BootstrapError("fresh Stalwart store is unsafe") from None
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
-                metadata.st_mode,
-            ) or not empty:
-                raise BootstrapError("fresh Stalwart store is unsafe")
+            metadata = store.lstat()
+            entries = tuple(store.iterdir())
         except OSError:
-            raise BootstrapError("fresh Stalwart store could not be created") from None
+            raise BootstrapError("fresh Stalwart store is unsafe") from None
+        marker = store / FRESH_FAILURE_MARKER_NAME
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or entries != (marker,)
+        ):
+            raise BootstrapError("fresh Stalwart store is unsafe")
+        _binding, marker_content = _snapshot_regular(
+            marker,
+            root=repository,
+            label="fresh Stalwart failure marker",
+            required_mode=0o600,
+            maximum=32,
+        )
+        if marker_content != b"invalid\n":
+            raise BootstrapError("fresh Stalwart store is unsafe")
         runtime = repository / "debug-dashboard" / ".runtime"
         for directory in (runtime, runtime / "stalwart"):
             self._migration.ensure_owner_directory(
@@ -5312,7 +5355,7 @@ class _ProductionFreshRuntime:
         )
 
     def publish_receipt(self, repository: Path) -> Path:
-        return self._runtime_state.publish_current_receipt(repository)
+        return self._runtime_state.finalize_marked_current_receipt(repository)
 
     def mark_invalid(self, repository: Path) -> None:
         try:
@@ -5342,6 +5385,7 @@ def production_fresh_initialization_dependencies(
         runtime_state=runtime_state,
     )
     return FreshInitializationDependencies(
+        acquire_operation_lock=migration.acquire_stalwart_operation_lock,
         classify=runtime.classify,
         validate_definition=runtime.validate_definition,
         prepare=runtime.prepare,
@@ -7400,69 +7444,78 @@ def initialize_fresh(
     """Initialize one empty root store and publish its current receipt once."""
     root = _normalized_absolute(repository_root, "repository root")
     _validate_fresh_initialization_dependencies(dependencies)
-    state = dependencies.classify(root)
-    if state != "fresh":
-        raise BootstrapError("Stalwart runtime is not fresh")
+    lock_context = dependencies.acquire_operation_lock(root)
+    with lock_context as operation_lock:
+        _assert_operation_lock(operation_lock, root)
+        state = dependencies.classify(root)
+        if state != "fresh":
+            raise BootstrapError("Stalwart runtime is not fresh")
 
-    # This check is deliberately before every mutating stage.  In particular,
-    # the temporary v0.15 root Compose hold cannot create even an empty store.
-    dependencies.validate_definition(root)
+        # Validate every immutable input while the shared Stalwart lock is
+        # held, before publishing the durable invalid marker or touching the
+        # provider store.
+        dependencies.validate_definition(root)
+        _assert_operation_lock(operation_lock, root)
 
-    mutation_started = True
-    try:
-        dependencies.prepare(root)
-        dependencies.start_recovery(root)
-        dependencies.apply_contract(root)
-        dependencies.prove(root, "recovery")
-        dependencies.stop_recovery(root)
-        dependencies.start_normal(root)
-        dependencies.prove(root, "normal")
-        dependencies.restart_normal(root)
-        dependencies.prove(root, "restarted")
-        receipt = dependencies.publish_receipt(root)
-        if not isinstance(receipt, Path) or not receipt.is_absolute():
-            raise BootstrapError("current runtime receipt path is malformed")
-        if dependencies.classify(root) != "current":
-            raise BootstrapError("current runtime receipt did not reclassify")
-        return receipt
-    except BaseException as failure:
-        cleanup_failed = False
-        if mutation_started:
-            for cleanup in (
-                dependencies.stop_normal,
-                dependencies.stop_recovery,
-                dependencies.mark_invalid,
-            ):
+        mutation_started = True
+        try:
+            dependencies.mark_invalid(root)
+            _assert_operation_lock(operation_lock, root)
+            dependencies.prepare(root)
+            dependencies.start_recovery(root)
+            dependencies.apply_contract(root)
+            dependencies.prove(root, "recovery")
+            dependencies.stop_recovery(root)
+            dependencies.start_normal(root)
+            dependencies.prove(root, "normal")
+            dependencies.restart_normal(root)
+            dependencies.prove(root, "restarted")
+            _assert_operation_lock(operation_lock, root)
+            receipt = dependencies.publish_receipt(root)
+            if not isinstance(receipt, Path) or not receipt.is_absolute():
+                raise BootstrapError("current runtime receipt path is malformed")
+            if dependencies.classify(root) != "current":
+                raise BootstrapError("current runtime receipt did not reclassify")
+            _assert_operation_lock(operation_lock, root)
+            return receipt
+        except BaseException as failure:
+            cleanup_failed = False
+            if mutation_started:
+                for cleanup in (
+                    dependencies.stop_normal,
+                    dependencies.stop_recovery,
+                    dependencies.mark_invalid,
+                ):
+                    try:
+                        cleanup(root)
+                    except BaseException as cleanup_error:
+                        cleanup_failed = True
+                        if not isinstance(cleanup_error, Exception):
+                            try:
+                                cleanup_error.add_note(
+                                    "fresh Stalwart cleanup continued",
+                                )
+                            except BaseException:
+                                pass
                 try:
-                    cleanup(root)
-                except BaseException as cleanup_error:
-                    cleanup_failed = True
-                    if not isinstance(cleanup_error, Exception):
-                        try:
-                            cleanup_error.add_note(
-                                "fresh Stalwart cleanup continued",
-                            )
-                        except BaseException:
-                            pass
-            try:
-                cleanup_failed = (
-                    dependencies.classify(root) != "invalid"
-                    or cleanup_failed
-                )
-            except BaseException:
-                cleanup_failed = True
-        if not isinstance(failure, Exception):
-            if cleanup_failed:
-                try:
-                    failure.add_note(
-                        "fresh Stalwart cleanup failed safely",
+                    cleanup_failed = (
+                        dependencies.classify(root) != "invalid"
+                        or cleanup_failed
                     )
                 except BaseException:
-                    pass
-            raise
-        raise BootstrapError(
-            "fresh Stalwart initialization failed safely",
-        ) from None
+                    cleanup_failed = True
+            if not isinstance(failure, Exception):
+                if cleanup_failed:
+                    try:
+                        failure.add_note(
+                            "fresh Stalwart cleanup failed safely",
+                        )
+                    except BaseException:
+                        pass
+                raise
+            raise BootstrapError(
+                "fresh Stalwart initialization failed safely",
+            ) from None
 
 
 def build_routing_verifier_command(

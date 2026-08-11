@@ -3796,6 +3796,12 @@ class FreshInitializationTest(unittest.TestCase):
         "stalwartlabs/stalwart:v0.16.17@"
         "sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa"
     )
+    CURRENT_CONFIG_BYTES = (
+        b'{\n'
+        b'  "@type": "RocksDb",\n'
+        b'  "path": "/var/lib/stalwart/"\n'
+        b'}'
+    )
 
     def dependencies(
         self,
@@ -3817,7 +3823,24 @@ class FreshInitializationTest(unittest.TestCase):
             events.append(("classify", repository))
             return states.pop(0)
 
-        return bootstrap.FreshInitializationDependencies(
+        class OperationLock:
+            def __enter__(self) -> "OperationLock":
+                events.append(("enter-lock",))
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                events.append(("release-lock",))
+
+            def assert_valid_for(self, repository: Path) -> None:
+                events.append(("assert-lock", repository))
+
+        def acquire_lock(repository: Path) -> OperationLock:
+            events.append(("acquire-lock", repository))
+            if fail_at == "acquire-lock":
+                raise bootstrap.BootstrapError("operation lock is held")
+            return OperationLock()
+
+        arguments = dict(
             classify=classify,
             validate_definition=step("validate-definition"),
             prepare=step("prepare"),
@@ -3834,6 +3857,12 @@ class FreshInitializationTest(unittest.TestCase):
             ),
             mark_invalid=step("mark-invalid"),
         )
+        if (
+            "acquire_operation_lock"
+            in bootstrap.FreshInitializationDependencies.__dataclass_fields__
+        ):
+            arguments["acquire_operation_lock"] = acquire_lock
+        return bootstrap.FreshInitializationDependencies(**arguments)
 
     def test_initialize_fresh_orders_proofs_restart_and_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3851,10 +3880,21 @@ class FreshInitializationTest(unittest.TestCase):
 
             self.assertEqual(receipt, Path("/unit/current.json"))
             self.assertEqual(
-                [event[0] for event in events],
+                [
+                    event[0]
+                    for event in events
+                    if event[0]
+                    not in {
+                        "acquire-lock",
+                        "enter-lock",
+                        "assert-lock",
+                        "release-lock",
+                    }
+                ],
                 [
                     "classify",
                     "validate-definition",
+                    "mark-invalid",
                     "prepare",
                     "start-recovery",
                     "apply-contract",
@@ -3899,7 +3939,17 @@ class FreshInitializationTest(unittest.TestCase):
                 )
 
             self.assertEqual(
-                [event[0] for event in events],
+                [
+                    event[0]
+                    for event in events
+                    if event[0]
+                    not in {
+                        "acquire-lock",
+                        "enter-lock",
+                        "assert-lock",
+                        "release-lock",
+                    }
+                ],
                 ["classify", "validate-definition"],
             )
 
@@ -3924,10 +3974,21 @@ class FreshInitializationTest(unittest.TestCase):
 
             self.assertNotIn("secret failure detail", str(raised.exception))
             self.assertEqual(
-                [event[0] for event in events],
+                [
+                    event[0]
+                    for event in events
+                    if event[0]
+                    not in {
+                        "acquire-lock",
+                        "enter-lock",
+                        "assert-lock",
+                        "release-lock",
+                    }
+                ],
                 [
                     "classify",
                     "validate-definition",
+                    "mark-invalid",
                     "prepare",
                     "start-recovery",
                     "apply-contract",
@@ -3936,6 +3997,65 @@ class FreshInitializationTest(unittest.TestCase):
                     "mark-invalid",
                     "classify",
                 ],
+            )
+
+    def test_initialize_fresh_holds_operation_lock_across_full_transition(
+        self,
+    ) -> None:
+        self.assertIn(
+            "acquire_operation_lock",
+            bootstrap.FreshInitializationDependencies.__dataclass_fields__,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+
+            bootstrap.initialize_fresh(
+                root,
+                dependencies=self.dependencies(
+                    events,
+                    ["fresh", "current"],
+                ),
+            )
+
+            names = [event[0] for event in events]
+            self.assertEqual(names[0:3], [
+                "acquire-lock",
+                "enter-lock",
+                "assert-lock",
+            ])
+            self.assertLess(names.index("classify"), names.index("mark-invalid"))
+            self.assertLess(names.index("mark-invalid"), names.index("prepare"))
+            self.assertLess(names.index("publish-receipt"), names.index("release-lock"))
+            self.assertEqual(names[-1], "release-lock")
+
+    def test_initialize_fresh_lock_contention_prevents_classification_or_mutation(
+        self,
+    ) -> None:
+        self.assertIn(
+            "acquire_operation_lock",
+            bootstrap.FreshInitializationDependencies.__dataclass_fields__,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events: list[object] = []
+
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "operation lock is held",
+            ):
+                bootstrap.initialize_fresh(
+                    root,
+                    dependencies=self.dependencies(
+                        events,
+                        [],
+                        fail_at="acquire-lock",
+                    ),
+                )
+
+            self.assertEqual(
+                [event[0] for event in events],
+                ["acquire-lock"],
             )
 
     def test_production_failure_marker_uses_runtime_state_contract(self) -> None:
@@ -3960,16 +4080,143 @@ class FreshInitializationTest(unittest.TestCase):
 
             publish.assert_called_once_with(root)
 
+    def test_definition_rejects_unsafe_or_noncanonical_config_before_compose(
+        self,
+    ) -> None:
+        cases = ("missing", "wrong-bytes", "wrong-mode", "symlink")
+        for case in cases:
+            with self.subTest(case=case), TemporaryRepository() as repository:
+                config = repository.root / "stalwart" / "config.json"
+                if case == "wrong-bytes":
+                    write_file(config, b"{}", 0o644)
+                elif case == "wrong-mode":
+                    write_file(config, self.CURRENT_CONFIG_BYTES, 0o600)
+                elif case == "symlink":
+                    target = repository.root / "outside-config.json"
+                    write_file(target, self.CURRENT_CONFIG_BYTES, 0o644)
+                    config.symlink_to(target)
+                runtime = bootstrap._ProductionFreshRuntime(
+                    migration=object(),
+                    registry=object(),
+                    runtime_state=SimpleNamespace(
+                        CURRENT_IMAGE=self.CURRENT_IMAGE,
+                        CURRENT_CONFIG_BYTES=self.CURRENT_CONFIG_BYTES,
+                    ),
+                )
+                with (
+                    mock.patch.object(
+                        bootstrap,
+                        "_run_fresh_command",
+                        return_value=b"{}",
+                    ) as run,
+                    self.assertRaises(bootstrap.BootstrapError),
+                ):
+                    runtime.validate_definition(repository.root)
+                run.assert_not_called()
+
+    def test_definition_accepts_exact_plain_config_before_render_validation(
+        self,
+    ) -> None:
+        with TemporaryRepository() as repository:
+            config = repository.root / "stalwart" / "config.json"
+            write_file(config, self.CURRENT_CONFIG_BYTES, 0o644)
+            runtime = bootstrap._ProductionFreshRuntime(
+                migration=object(),
+                registry=object(),
+                runtime_state=SimpleNamespace(
+                    CURRENT_IMAGE=self.CURRENT_IMAGE,
+                    CURRENT_CONFIG_BYTES=self.CURRENT_CONFIG_BYTES,
+                ),
+            )
+            with (
+                mock.patch.object(
+                    bootstrap,
+                    "_run_fresh_command",
+                    return_value=b"rendered",
+                ) as run,
+                mock.patch.object(
+                    bootstrap,
+                    "_validate_fresh_compose_model",
+                ) as validate,
+            ):
+                runtime.validate_definition(repository.root)
+
+            run.assert_called_once()
+            validate.assert_called_once_with(
+                b"rendered",
+                repository=repository.root,
+                current_image=self.CURRENT_IMAGE,
+            )
+
+    def test_prepare_accepts_only_the_authoritative_fresh_failure_marker(
+        self,
+    ) -> None:
+        marker_name = ".mail-sandbox-fresh-initialization-failed"
+        with TemporaryRepository() as repository:
+            store = repository.root / "stalwart-data"
+            store.mkdir(mode=0o700)
+            marker = store / marker_name
+            write_file(marker, b"invalid\n", 0o600)
+            runtime = bootstrap._ProductionFreshRuntime(
+                migration=SimpleNamespace(
+                    ensure_owner_directory=lambda *_args, **_kwargs: None,
+                ),
+                registry=object(),
+                runtime_state=object(),
+            )
+
+            runtime.prepare(repository.root)
+
+            self.assertEqual(marker.read_bytes(), b"invalid\n")
+            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+            self.assertTrue(
+                (
+                    repository.root
+                    / bootstrap.FRESH_RECOVERY_ENV_RELATIVE
+                ).is_file(),
+            )
+
+        with TemporaryRepository() as repository:
+            store = repository.root / "stalwart-data"
+            store.mkdir(mode=0o700)
+            write_file(store / marker_name, b"invalid\n", 0o600)
+            write_file(store / "unexpected", b"data", 0o600)
+            runtime = bootstrap._ProductionFreshRuntime(
+                migration=SimpleNamespace(
+                    ensure_owner_directory=lambda *_args, **_kwargs: None,
+                ),
+                registry=object(),
+                runtime_state=object(),
+            )
+            with self.assertRaises(bootstrap.BootstrapError):
+                runtime.prepare(repository.root)
+
     def test_rendered_root_definition_is_exact_image_ports_and_mounts(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             service = {
+                "command": None,
+                "container_name": "stalwart-dev",
+                "entrypoint": None,
                 "environment": {
                     "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
                 },
+                "healthcheck": {
+                    "test": [
+                        "CMD",
+                        "curl",
+                        "-fsS",
+                        "http://127.0.0.1:8080/healthz/ready",
+                    ],
+                    "timeout": "2s",
+                    "interval": "2s",
+                    "retries": 30,
+                    "start_period": "2s",
+                },
                 "image": self.CURRENT_IMAGE,
+                "networks": {"default": None},
                 "ports": [
                     {
                         "host_ip": "127.0.0.1",
@@ -3990,12 +4237,14 @@ class FreshInitializationTest(unittest.TestCase):
                 "user": "2000:2000",
                 "volumes": [
                     {
+                        "bind": {},
                         "read_only": True,
                         "source": str(root / "stalwart"),
                         "target": "/etc/stalwart",
                         "type": "bind",
                     },
                     {
+                        "bind": {},
                         "source": str(root / "stalwart-data"),
                         "target": "/var/lib/stalwart",
                         "type": "bind",
@@ -4004,7 +4253,18 @@ class FreshInitializationTest(unittest.TestCase):
             }
 
             bootstrap._validate_fresh_compose_model(
-                json.dumps({"services": {"stalwart": service}}).encode(),
+                json.dumps(
+                    {
+                        "name": "fresh-project",
+                        "networks": {
+                            "default": {
+                                "name": "fresh-project_default",
+                                "ipam": {},
+                            },
+                        },
+                        "services": {"stalwart": service},
+                    },
+                ).encode(),
                 repository=root,
                 current_image=self.CURRENT_IMAGE,
             )
@@ -4023,6 +4283,15 @@ class FreshInitializationTest(unittest.TestCase):
                 "recovery-env": lambda value: value["environment"].update(
                     {"STALWART_RECOVERY_MODE": "1"},
                 ),
+                "privileged": lambda value: value.update(
+                    {"privileged": True},
+                ),
+                "host-network": lambda value: value.update(
+                    {"network_mode": "host"},
+                ),
+                "command": lambda value: value.update(
+                    {"command": ["sh", "-c", "sleep infinity"]},
+                ),
             }
             for label, mutate in mutations.items():
                 with self.subTest(label=label):
@@ -4031,11 +4300,40 @@ class FreshInitializationTest(unittest.TestCase):
                     with self.assertRaises(bootstrap.BootstrapError):
                         bootstrap._validate_fresh_compose_model(
                             json.dumps(
-                                {"services": {"stalwart": changed}},
+                                {
+                                    "name": "fresh-project",
+                                    "networks": {
+                                        "default": {
+                                            "name": "fresh-project_default",
+                                            "ipam": {},
+                                        },
+                                    },
+                                    "services": {"stalwart": changed},
+                                },
                             ).encode(),
                             repository=root,
                             current_image=self.CURRENT_IMAGE,
                         )
+
+            extra_service = {
+                "name": "fresh-project",
+                "networks": {
+                    "default": {
+                        "name": "fresh-project_default",
+                        "ipam": {},
+                    },
+                },
+                "services": {
+                    "stalwart": service,
+                    "shadow": {"image": "example.invalid/shadow:fixed"},
+                },
+            }
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap._validate_fresh_compose_model(
+                    json.dumps(extra_service).encode(),
+                    repository=root,
+                    current_image=self.CURRENT_IMAGE,
+                )
 
 
 class ProductionOrchestratorTest(unittest.TestCase):

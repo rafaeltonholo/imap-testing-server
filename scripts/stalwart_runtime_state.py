@@ -44,6 +44,9 @@ RECEIPT_RELATIVE = (
 )
 FAILURE_MARKER_NAME = ".mail-sandbox-fresh-initialization-failed"
 FAILURE_MARKER_RELATIVE = Path("stalwart-data") / FAILURE_MARKER_NAME
+FAILURE_INTENT_RELATIVE = Path(
+    ".mail-sandbox-fresh-initialization-intent",
+)
 MAXIMUM_RECEIPT_BYTES = 64 * 1024
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 LEGACY_SERVICE_MODEL = (
@@ -258,7 +261,8 @@ def _service_block(compose: str, service: str) -> str | None:
             return False
         name = re.escape(key)
         return re.fullmatch(
-            rf"(?:{name}|'(?:{name})'|\"(?:{name})\")(?:\s*:.*)?",
+            rf"(?:!!str\s+)?(?:{name}|'(?:{name})'|\"(?:{name})\")"
+            rf"(?:\s*:.*)?",
             line[expected_indent:],
         ) is not None
 
@@ -425,6 +429,8 @@ def classify_repository(repository: Path) -> RuntimeState:
         return RuntimeState.INVALID
     if _plain_directory(root) is None:
         return RuntimeState.INVALID
+    if _entry_presence(root / FAILURE_INTENT_RELATIVE) is not False:
+        return RuntimeState.INVALID
     receipt = root / RECEIPT_RELATIVE
     config_parent_state = _descendant_directory_state(root, root / "stalwart")
     receipt_parent_state = _descendant_directory_state(root, receipt.parent)
@@ -467,8 +473,11 @@ def classify_repository(repository: Path) -> RuntimeState:
     )
 
 
-def publish_current_receipt(repository: Path) -> Path:
-    """Atomically publish one no-overwrite receipt after external live proofs."""
+def _publish_current_receipt(
+    repository: Path,
+    *,
+    require_failure_marker: bool,
+) -> Path:
     root = _repository_path(repository)
     if _plain_directory(root) is None:
         raise ValueError("repository is invalid")
@@ -481,16 +490,34 @@ def publish_current_receipt(repository: Path) -> Path:
     store_kind, store = _store_state(root)
     compose = _compose_kind(root)
     config = _plain_regular(root / "stalwart" / "config.json", 1024)
+    intent_presence = _entry_presence(root / FAILURE_INTENT_RELATIVE)
+    marker = root / FAILURE_MARKER_RELATIVE
     if store_kind == "absent":
         marker_presence: bool | None = False
     elif store_kind in {"empty", "nonempty"}:
         marker_presence = _entry_presence(root / FAILURE_MARKER_RELATIVE)
     else:
         marker_presence = None
+    marker_snapshot = (
+        _plain_regular(marker, 32)
+        if marker_presence is True
+        else None
+    )
+    marker_is_exact = (
+        marker_snapshot is not None
+        and marker_snapshot[0] == b"invalid\n"
+        and stat.S_IMODE(marker_snapshot[1].st_mode) == 0o600
+    )
+    marker_is_acceptable = (
+        marker_is_exact
+        if require_failure_marker
+        else marker_presence is False
+    )
     if (
         store_kind != "nonempty"
         or store is None
-        or marker_presence is not False
+        or intent_presence is not False
+        or not marker_is_acceptable
         or compose is None
         or compose[0] != "current"
         or config is None
@@ -506,6 +533,17 @@ def publish_current_receipt(repository: Path) -> Path:
         "payload_sha256": hashlib.sha256(_canonical_json(payload)).hexdigest(),
     }
     content = _canonical_json(envelope) + b"\n"
+    receipt_presence = _entry_presence(receipt)
+    if receipt_presence is None:
+        raise ValueError("current runtime receipt path is invalid")
+    if receipt_presence:
+        if require_failure_marker and _valid_receipt(
+            root,
+            store,
+            compose[1],
+        ):
+            return receipt
+        raise ValueError("current runtime receipt already exists")
     temporary = parent / f".{receipt.name}.{os.getpid()}.tmp"
     descriptor = -1
     try:
@@ -535,67 +573,140 @@ def publish_current_receipt(repository: Path) -> Path:
     return receipt
 
 
-def publish_failure_marker(repository: Path) -> Path:
-    """Durably mark a partial fresh initialization as permanently invalid."""
-    root = _repository_path(repository)
-    if _plain_directory(root) is None:
-        raise ValueError("repository is invalid")
-    store = root / "stalwart-data"
-    store_kind, _metadata = _store_state(root)
-    if store_kind == "absent":
-        try:
-            store.mkdir(mode=0o700)
-        except OSError as error:
-            raise ValueError("failure marker store could not be created") from error
-        store_kind, _metadata = _store_state(root)
-    if store_kind == "invalid":
-        raise ValueError("failure marker store is invalid")
-    marker = root / FAILURE_MARKER_RELATIVE
-    presence = _entry_presence(marker)
+def publish_current_receipt(repository: Path) -> Path:
+    """Atomically publish one no-overwrite receipt after external live proofs."""
+    return _publish_current_receipt(
+        repository,
+        require_failure_marker=False,
+    )
+
+
+def _sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_invalid_evidence(path: Path, parent: Path) -> None:
+    presence = _entry_presence(path)
     if presence is None:
-        raise ValueError("failure marker path is invalid")
+        raise ValueError("failure evidence path is invalid")
     if presence:
-        snapshot = _plain_regular(marker, 32)
+        snapshot = _plain_regular(path, 32)
         if (
             snapshot is None
             or snapshot[0] != b"invalid\n"
             or stat.S_IMODE(snapshot[1].st_mode) != 0o600
         ):
-            raise ValueError("failure marker path is invalid")
-        return marker
+            raise ValueError("failure evidence path is invalid")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _sync_directory(parent)
+        return
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = -1
+    descriptor = os.open(path, flags, 0o600)
     try:
-        descriptor = os.open(marker, flags, 0o600)
         os.fchmod(descriptor, 0o600)
         content = b"invalid\n"
         written = 0
         while written < len(content):
             count = os.write(descriptor, content[written:])
             if count <= 0:
-                raise OSError("short failure marker write")
+                raise OSError("short failure evidence write")
             written += count
         os.fsync(descriptor)
+    finally:
         os.close(descriptor)
-        descriptor = -1
-        directory_flags = os.O_RDONLY
-        if hasattr(os, "O_DIRECTORY"):
-            directory_flags |= os.O_DIRECTORY
-        if hasattr(os, "O_NOFOLLOW"):
-            directory_flags |= os.O_NOFOLLOW
-        directory = os.open(store, directory_flags)
+    _sync_directory(parent)
+
+
+def _remove_invalid_evidence(path: Path, parent: Path) -> None:
+    snapshot = _plain_regular(path, 32)
+    if (
+        snapshot is None
+        or snapshot[0] != b"invalid\n"
+        or stat.S_IMODE(snapshot[1].st_mode) != 0o600
+    ):
+        raise ValueError("failure evidence path is invalid")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        path.unlink()
+        after = os.fstat(descriptor)
+        if (
+            (before.st_dev, before.st_ino, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or after.st_nlink != 0
+        ):
+            raise OSError("failure evidence changed during removal")
+    finally:
+        os.close(descriptor)
+    _sync_directory(parent)
+
+
+def finalize_marked_current_receipt(repository: Path) -> Path:
+    """Publish a receipt, then durably clear one exact fresh-failure marker."""
+    root = _repository_path(repository)
+    receipt = _publish_current_receipt(
+        root,
+        require_failure_marker=True,
+    )
+    marker = root / FAILURE_MARKER_RELATIVE
+    try:
+        _remove_invalid_evidence(marker, marker.parent)
+    except OSError as error:
+        raise ValueError("failure marker could not be cleared") from error
+    if classify_repository(root) is not RuntimeState.CURRENT:
+        raise ValueError("current runtime did not reclassify")
+    return receipt
+
+
+def publish_failure_marker(repository: Path) -> Path:
+    """Durably mark a partial fresh initialization as permanently invalid."""
+    root = _repository_path(repository)
+    if _plain_directory(root) is None:
+        raise ValueError("repository is invalid")
+    intent = root / FAILURE_INTENT_RELATIVE
+    try:
+        _publish_invalid_evidence(intent, root)
+    except OSError as error:
+        raise ValueError("failure intent could not be published") from error
+    store = root / "stalwart-data"
+    store_kind, _metadata = _store_state(root)
+    if store_kind == "absent":
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            store.mkdir(mode=0o700)
+            _sync_directory(root)
+        except OSError as error:
+            raise ValueError("failure marker store could not be created") from error
+        store_kind, _metadata = _store_state(root)
+    if store_kind == "invalid":
+        raise ValueError("failure marker store is invalid")
+    marker = root / FAILURE_MARKER_RELATIVE
+    try:
+        _publish_invalid_evidence(marker, store)
+        _remove_invalid_evidence(intent, root)
     except OSError as error:
         raise ValueError("failure marker could not be published") from error
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
     return marker
 
 
