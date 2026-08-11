@@ -12587,6 +12587,10 @@ class ApplyPreparationTest(unittest.TestCase):
         (repository / "debug-dashboard").mkdir(parents=True)
         return stalwart_v016.MigrationPaths.for_repository(repository)
 
+    @staticmethod
+    def _unexpected_current_finalizer(_repository: Path) -> Path:
+        raise AssertionError("current finalizer unexpectedly reached")
+
     def test_production_retirement_holds_one_lock_across_both_bootstrap_phases(
         self,
     ) -> None:
@@ -12833,6 +12837,87 @@ class ApplyPreparationTest(unittest.TestCase):
             self.assertEqual(events.count("prepare"), 2)
             rollback.assert_not_called()
 
+    def test_malformed_current_receipt_stops_before_retirement_prepare(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._paths(directory)
+            paths.migration_root.mkdir(parents=True)
+            current = (
+                paths.repository_root
+                / "debug-dashboard"
+                / ".runtime"
+                / "stalwart"
+                / "current.json"
+            )
+            current.parent.mkdir(parents=True)
+            current.write_text('{"malformed":true}\n', encoding="utf-8")
+            current.chmod(0o600)
+
+            class BootstrapModule:
+                class BootstrapPaths:
+                    @staticmethod
+                    def for_repository(repository: Path) -> Path:
+                        return repository
+
+                @staticmethod
+                def validate_final_bootstrap_for_retirement(
+                    _paths: object,
+                    *,
+                    task6_validator: object,
+                ) -> object:
+                    return task6_validator(paths.apply_receipt)
+
+                finalize_migrated_current_runtime = staticmethod(
+                    bootstrap_stalwart_v016.finalize_migrated_current_runtime
+                )
+
+            prepare = mock.Mock()
+            executor = mock.Mock()
+            executor_factory = mock.Mock(return_value=executor)
+            verifier_factory = mock.Mock()
+            rollback = mock.Mock()
+            existing_plan_loader = mock.Mock(return_value=None)
+            dependencies = (
+                stalwart_v016.ProductionRecoveryRetirementDependencies(
+                    acquire_operation_lock=lambda repository: self._LockContext(
+                        repository,
+                        [],
+                    ),
+                    prepare=prepare,
+                    bootstrap_module_loader=lambda _root: BootstrapModule,
+                    bootstrap_apply_validator_factory=mock.Mock(),
+                    retirement_executor_factory=executor_factory,
+                    postflight_verifier_factory=verifier_factory,
+                    state_runner=mock.Mock(),
+                    runtime_runner=mock.Mock(),
+                    jmap_probe_runner=mock.Mock(),
+                    rollback_activator=rollback,
+                    existing_retirement_plan_loader=existing_plan_loader,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                stalwart_v016.MigrationError,
+                "current runtime finalization failed safely",
+            ):
+                stalwart_v016.run_production_recovery_retirement(
+                    paths,
+                    dependencies=dependencies,
+                    expected_script_sha256="a" * 64,
+                )
+
+            self.assertEqual(
+                current.read_text(encoding="utf-8"),
+                '{"malformed":true}\n',
+            )
+            prepare.assert_not_called()
+            executor_factory.assert_not_called()
+            executor.assert_not_called()
+            verifier_factory.assert_not_called()
+            rollback.assert_not_called()
+            existing_plan_loader.assert_not_called()
+
     def test_production_retirement_failure_activates_rollback_before_or_after_deletion(
         self,
     ) -> None:
@@ -12903,6 +12988,10 @@ class ApplyPreparationTest(unittest.TestCase):
                         return task6_validator(
                             fixture.paths.apply_receipt,
                         )
+
+                    finalize_migrated_current_runtime = staticmethod(
+                        ApplyPreparationTest._unexpected_current_finalizer
+                    )
 
                 def prepare(_paths: object, **kwargs: object) -> Path:
                     kwargs["executor"](plan, object(), object())
@@ -13109,6 +13198,10 @@ class ApplyPreparationTest(unittest.TestCase):
                             fixture.paths.apply_receipt,
                         )
 
+                    finalize_migrated_current_runtime = staticmethod(
+                        ApplyPreparationTest._unexpected_current_finalizer
+                    )
+
                 def prepare(_paths: object, **kwargs: object) -> Path:
                     if restart_state == "attempt-only":
                         raise stalwart_v016.MigrationError(
@@ -13314,6 +13407,10 @@ class ApplyPreparationTest(unittest.TestCase):
                             fixture.paths.apply_receipt,
                         )
 
+                    finalize_migrated_current_runtime = staticmethod(
+                        ApplyPreparationTest._unexpected_current_finalizer
+                    )
+
                 def runtime_runner(
                     args: list[str],
                     **_kwargs: object,
@@ -13490,6 +13587,10 @@ class ApplyPreparationTest(unittest.TestCase):
                         return task6_validator(
                             fixture.paths.apply_receipt,
                         )
+
+                    finalize_migrated_current_runtime = staticmethod(
+                        ApplyPreparationTest._unexpected_current_finalizer
+                    )
 
                 def runtime_runner(
                     args: list[str],
@@ -13758,6 +13859,10 @@ class ApplyPreparationTest(unittest.TestCase):
                     task6_validator: object,
                 ) -> object:
                     return task6_validator(paths.apply_receipt)
+
+                finalize_migrated_current_runtime = staticmethod(
+                    ApplyPreparationTest._unexpected_current_finalizer
+                )
 
             dependencies = (
                 stalwart_v016.ProductionRecoveryRetirementDependencies(
@@ -19028,6 +19133,10 @@ class ApplyPreparationTest(unittest.TestCase):
                     task6_validator(fixture.paths.apply_receipt)
                     return fixture.bootstrap_token
 
+                finalize_migrated_current_runtime = staticmethod(
+                    ApplyPreparationTest._unexpected_current_finalizer
+                )
+
             dependencies = replace(
                 (
                     stalwart_v016
@@ -19528,6 +19637,10 @@ class ApplyPreparationTest(unittest.TestCase):
                 ) -> object:
                     task6_validator(fixture.paths.apply_receipt)
                     return fixture.bootstrap_token
+
+                finalize_migrated_current_runtime = staticmethod(
+                    ApplyPreparationTest._unexpected_current_finalizer
+                )
 
             def runtime_runner(
                 args: list[str],

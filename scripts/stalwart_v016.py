@@ -11276,6 +11276,58 @@ def run_production_recovery_retirement(
                 operation_lock,
                 paths.repository_root,
             )
+            current_finalizer = getattr(
+                bootstrap_module,
+                "finalize_migrated_current_runtime",
+                None,
+            )
+            if not callable(current_finalizer):
+                raise MigrationError(
+                    "current runtime finalizer is unavailable",
+                )
+            expected_current = (
+                paths.repository_root
+                / "debug-dashboard"
+                / ".runtime"
+                / "stalwart"
+                / "current.json"
+            )
+
+            def finalize_current_runtime() -> Path:
+                if trusted_bootstrap_module is not None:
+                    _assert_trusted_production_bootstrap_module(
+                        trusted_bootstrap_module,
+                        Path(__file__).resolve().with_name(
+                            "bootstrap_stalwart_v016.py",
+                        ),
+                    )
+                try:
+                    current_receipt = current_finalizer(
+                        paths.repository_root,
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception:
+                    raise MigrationError(
+                        "current runtime finalization failed safely",
+                    ) from None
+                if current_receipt != expected_current:
+                    raise MigrationError(
+                        "current runtime finalizer returned a non-fixed receipt",
+                    )
+                require_regular_0600(
+                    current_receipt,
+                    root=paths.repository_root,
+                    label="current runtime receipt",
+                )
+                _assert_production_retirement_lock(
+                    operation_lock,
+                    paths.repository_root,
+                )
+                return current_receipt
+
+            if _path_present(expected_current):
+                finalize_current_runtime()
             bootstrap_paths_type = getattr(
                 bootstrap_module,
                 "BootstrapPaths",
@@ -11607,52 +11659,7 @@ def run_production_recovery_retirement(
                 operation_lock,
                 paths.repository_root,
             )
-            if trusted_bootstrap_module is not None:
-                _assert_trusted_production_bootstrap_module(
-                    trusted_bootstrap_module,
-                    Path(__file__).resolve().with_name(
-                        "bootstrap_stalwart_v016.py",
-                    ),
-                )
-            current_finalizer = getattr(
-                bootstrap_module,
-                "finalize_migrated_current_runtime",
-                None,
-            )
-            if not callable(current_finalizer):
-                raise MigrationError(
-                    "current runtime finalizer is unavailable",
-                )
-            try:
-                current_receipt = current_finalizer(
-                    paths.repository_root,
-                )
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except Exception:
-                raise MigrationError(
-                    "current runtime finalization failed safely",
-                ) from None
-            expected_current = (
-                paths.repository_root
-                / "debug-dashboard"
-                / ".runtime"
-                / "stalwart"
-                / "current.json"
-            )
-            if current_receipt != expected_current:
-                raise MigrationError(
-                    "current runtime finalizer returned a non-fixed receipt",
-                )
-            require_regular_0600(
-                current_receipt,
-                root=paths.repository_root,
-                label="current runtime receipt",
-            )
-            _assert_production_retirement_lock(
-                operation_lock,
-                paths.repository_root,
-            )
+            finalize_current_runtime()
             return retirement_receipt
     except (MigrationError, KeyboardInterrupt, SystemExit):
         raise
