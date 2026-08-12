@@ -231,12 +231,7 @@ def _default_local_ipv4_provider() -> tuple[str, ...]:
     return _addresses_from_output(output)
 
 
-def _normalize_host(
-    value: str,
-    *,
-    hostname_resolver: HostResolver,
-    local_ipv4_provider: AddressProvider,
-) -> str:
+def _normalize_host_shape(value: str) -> tuple[str, bool]:
     if not isinstance(value, str) or not value:
         raise NetworkConfigurationError(f"invalid {HOST_OVERRIDE}. {_OVERRIDE_GUIDANCE}")
     if value != value.strip() or any(character.isspace() for character in value):
@@ -255,7 +250,7 @@ def _normalize_host(
                 f"invalid {HOST_OVERRIDE}; expected non-loopback unicast IPv4. "
                 f"{_OVERRIDE_GUIDANCE}"
             )
-        return str(eligible)
+        return str(eligible), True
 
     if all(character.isdigit() or character == "." for character in value):
         raise NetworkConfigurationError(f"invalid {HOST_OVERRIDE}. {_OVERRIDE_GUIDANCE}")
@@ -266,6 +261,18 @@ def _normalize_host(
     labels = hostname.split(".")
     if not labels or any(_HOST_LABEL.fullmatch(label) is None for label in labels):
         raise NetworkConfigurationError(f"invalid {HOST_OVERRIDE}. {_OVERRIDE_GUIDANCE}")
+    return hostname, False
+
+
+def _normalize_host(
+    value: str,
+    *,
+    hostname_resolver: HostResolver,
+    local_ipv4_provider: AddressProvider,
+) -> str:
+    hostname, is_ipv4 = _normalize_host_shape(value)
+    if is_ipv4:
+        return hostname
 
     try:
         resolved_values = tuple(hostname_resolver(hostname))
@@ -341,7 +348,7 @@ def resolve_network_configuration(
     )
 
 
-def _ensure_directory(path: Path, *, mode: int) -> None:
+def _ensure_directory(path: Path, *, mode: int, enforce_mode: bool = True) -> None:
     if path.exists() or path.is_symlink():
         metadata = os.lstat(path)
         if stat.S_ISLNK(metadata.st_mode):
@@ -352,12 +359,13 @@ def _ensure_directory(path: Path, *, mode: int) -> None:
             raise NetworkConfigurationError(f"runtime path is not a directory: {path}")
     else:
         path.mkdir(mode=mode)
-    path.chmod(mode)
+    if enforce_mode:
+        path.chmod(mode)
 
 
 def _ensure_runtime_directory(repository: Path) -> Path:
     dashboard = repository / "debug-dashboard"
-    _ensure_directory(dashboard, mode=0o755)
+    _ensure_directory(dashboard, mode=0o755, enforce_mode=False)
     runtime = dashboard / ".runtime"
     _ensure_directory(runtime, mode=0o700)
     stalwart = runtime / "stalwart"
@@ -382,6 +390,9 @@ def _validate_configuration(configuration: NetworkConfiguration) -> None:
     expected_url = f"http://{configuration.host}:{PUBLIC_PORT}"
     if configuration.environment_path != expected_path:
         raise NetworkConfigurationError("network environment path escaped repository")
+    normalized_host, _is_ipv4 = _normalize_host_shape(configuration.host)
+    if normalized_host != configuration.host:
+        raise NetworkConfigurationError("network host is not normalized")
     if configuration.public_url != expected_url:
         raise NetworkConfigurationError("network public URL is inconsistent")
 
@@ -422,15 +433,17 @@ def write_network_environment(configuration: NetworkConfiguration) -> Path:
     return target
 
 
-def _require_owner_directory(path: Path) -> None:
+def _require_directory(path: Path, *, required_mode: int | None = None) -> None:
     try:
         metadata = os.lstat(path)
     except OSError as exc:
         raise NetworkConfigurationError(f"missing runtime directory: {path}") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise NetworkConfigurationError(f"runtime path must be a regular directory: {path}")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise NetworkConfigurationError(f"runtime directory must have mode 0700: {path}")
+    if required_mode is not None and stat.S_IMODE(metadata.st_mode) != required_mode:
+        raise NetworkConfigurationError(
+            f"runtime directory must have mode {required_mode:04o}: {path}"
+        )
 
 
 def load_network_configuration(
@@ -442,10 +455,12 @@ def load_network_configuration(
     """Read a strictly formed current network file without modifying it."""
 
     root = _repository_path(repository)
-    runtime = root / "debug-dashboard" / ".runtime"
+    dashboard = root / "debug-dashboard"
+    runtime = dashboard / ".runtime"
     directory = runtime / "stalwart"
-    _require_owner_directory(runtime)
-    _require_owner_directory(directory)
+    _require_directory(dashboard)
+    _require_directory(runtime, required_mode=0o700)
+    _require_directory(directory, required_mode=0o700)
     target = root / NETWORK_ENV_RELATIVE
     try:
         metadata = os.lstat(target)

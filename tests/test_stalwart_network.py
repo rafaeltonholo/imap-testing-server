@@ -379,6 +379,42 @@ class NetworkEnvironmentFileTests(unittest.TestCase):
 
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_existing_dashboard_directory_mode_is_preserved(self) -> None:
+        dashboard = self.repository / "debug-dashboard"
+        dashboard.mkdir(mode=0o700)
+
+        network.write_network_environment(self.configuration)
+
+        self.assertEqual(stat.S_IMODE(dashboard.stat().st_mode), 0o700)
+
+    def test_forged_configuration_cannot_write_multiple_environment_lines(self) -> None:
+        forged = network.NetworkConfiguration(
+            repository=self.repository,
+            host="192.168.86.36\nINJECTED=true",
+            public_url="http://192.168.86.36\nINJECTED=true:8443",
+            environment_path=self.configuration.environment_path,
+        )
+
+        with self.assertRaises(network.NetworkConfigurationError):
+            network.write_network_environment(forged)
+
+        self.assertFalse(forged.environment_path.exists())
+
+    def test_failed_atomic_replace_preserves_old_file_and_cleans_temporary(self) -> None:
+        target = network.write_network_environment(self.configuration)
+        original = target.read_bytes()
+        replacement = network.resolve_network_configuration(
+            self.repository,
+            environment={"MAIL_SANDBOX_LAN_HOST": "192.168.86.37"},
+        )
+
+        with mock.patch.object(network.os, "replace", side_effect=OSError("boom")):
+            with self.assertRaisesRegex(OSError, "boom"):
+                network.write_network_environment(replacement)
+
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(list(target.parent.glob("network.env.tmp-*")), [])
+
     def test_loader_requires_exact_content_regular_file_and_owner_modes(self) -> None:
         target = network.write_network_environment(self.configuration)
         loaded = network.load_network_configuration(self.repository)
@@ -418,6 +454,29 @@ class NetworkEnvironmentFileTests(unittest.TestCase):
         with self.assertRaisesRegex(
             network.NetworkConfigurationError,
             "regular file",
+        ):
+            network.load_network_configuration(self.repository)
+
+    def test_loader_rejects_symlinked_dashboard_ancestor(self) -> None:
+        outside = self.repository / "outside"
+        outside.mkdir()
+        runtime = outside / ".runtime"
+        runtime.mkdir(mode=0o700)
+        directory = runtime / "stalwart"
+        directory.mkdir(mode=0o700)
+        target = directory / "network.env"
+        target.write_bytes(
+            b"STALWART_PUBLIC_URL=http://192.168.86.36:8443\n",
+        )
+        target.chmod(0o600)
+        (self.repository / "debug-dashboard").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+
+        with self.assertRaisesRegex(
+            network.NetworkConfigurationError,
+            "debug-dashboard",
         ):
             network.load_network_configuration(self.repository)
 

@@ -21,6 +21,14 @@ docker-compose up -d
 docker-compose down
 ```
 
+**Prepare or inspect the generated Stalwart LAN URL (does not start services):**
+
+```sh
+MAIL_SANDBOX_LAN_HOST=192.168.86.36 \
+  python3 scripts/stalwart_network.py prepare --repository "$(pwd -P)"
+python3 scripts/stalwart_network.py show --repository "$(pwd -P)"
+```
+
 **View Dovecot logs:**
 
 ```sh
