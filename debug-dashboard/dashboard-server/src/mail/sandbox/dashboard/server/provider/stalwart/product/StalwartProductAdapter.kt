@@ -302,21 +302,38 @@ internal class StalwartProductAdapter(
                 ids = listOf(accountId),
             ).singleOrNull()
                 ?: throw StalwartProductException("Stalwart Account was not found")
-            val passwordKey = account.requiredObject("credentials")
-                .entries
-                .singleOrNull { (_, credential) ->
+            val credentials = account.requiredObject("credentials")
+            val passwordKeys = credentials.entries
+                .filter { (_, credential) ->
                     (credential as? JsonObject)?.optionalString("@type") == "Password"
                 }
-                ?.key
-                ?: throw StalwartProductException(
-                    "Stalwart Account has no mutable Password credential",
+                .map { (key) -> key }
+            val patch = when {
+                passwordKeys.size == 1 -> buildJsonObject {
+                    put("credentials/${passwordKeys.single()}/secret", newPassword)
+                }
+                passwordKeys.size > 1 -> throw StalwartProductException(
+                    "Stalwart Account has multiple Password credentials",
                 )
+                else -> {
+                    val credentialKey = (0..credentials.size)
+                        .first { candidate -> candidate.toString() !in credentials }
+                    buildJsonObject {
+                        put(
+                            "credentials/$credentialKey",
+                            buildJsonObject {
+                                put("@type", "Password")
+                                put("secret", newPassword)
+                                put("allowedIps", buildJsonObject {})
+                            },
+                        )
+                    }
+                }
+            }
             val response = client.registryUpdate(
                 objectType = ACCOUNT_OBJECT,
                 objectId = accountId,
-                patch = buildJsonObject {
-                    put("credentials/$passwordKey/secret", newPassword)
-                },
+                patch = patch,
                 accountId = managementAccountId,
             )
             requireUpdated(

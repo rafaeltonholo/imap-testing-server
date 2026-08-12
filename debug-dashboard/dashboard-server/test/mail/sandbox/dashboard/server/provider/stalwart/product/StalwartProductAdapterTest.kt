@@ -338,6 +338,129 @@ class StalwartProductAdapterTest {
     }
 
     @Test
+    fun changePasswordCreatesANumericPasswordCredentialWhenCredentialsAreEmpty() = runBlocking {
+        val transport = RecordingTransport(
+            expectedCall(
+                "x:Account/get",
+                getPayload(
+                    "management-account",
+                    accountObject(
+                        id = "account-one",
+                        localPart = "dev",
+                        domainId = "domain-one",
+                        credentials = buildJsonObject {},
+                    ),
+                ),
+            ),
+            expectedCall(
+                "x:Account/set",
+                setUpdatedPayload("management-account", "account-one"),
+            ) { arguments ->
+                val patch = arguments.requiredObject("update")
+                    .requiredObject("account-one")
+                assertEquals(setOf("credentials/0"), patch.keys)
+                val credential = patch.requiredObject("credentials/0")
+                assertEquals("Password", credential.requiredString("@type"))
+                assertEquals("new-password", credential.requiredString("secret"))
+                assertTrue(credential.requiredObject("allowedIps").isEmpty())
+            },
+        )
+        val catalog = InMemoryStalwartAccountCredentialCatalog()
+        val adapter = adapter(transport, catalog)
+
+        adapter.changePassword("account-one", "new-password")
+
+        assertNull(catalog.find("account-one"))
+        transport.assertExhausted()
+    }
+
+    @Test
+    fun changePasswordUsesTheLowestUnusedNumericKeyWhenNoPasswordCredentialExists() = runBlocking {
+        val credentials = buildJsonObject {
+            listOf("0", "2").forEach { key ->
+                put(
+                    key,
+                    buildJsonObject {
+                        put("@type", "ApiKey")
+                        put("credentialId", "api-key-$key")
+                        put("secret", "********")
+                    },
+                )
+            }
+        }
+        val transport = RecordingTransport(
+            expectedCall(
+                "x:Account/get",
+                getPayload(
+                    "management-account",
+                    accountObject(
+                        id = "account-one",
+                        localPart = "dev",
+                        domainId = "domain-one",
+                        credentials = credentials,
+                    ),
+                ),
+            ),
+            expectedCall(
+                "x:Account/set",
+                setUpdatedPayload("management-account", "account-one"),
+            ) { arguments ->
+                val patch = arguments.requiredObject("update")
+                    .requiredObject("account-one")
+                assertEquals(setOf("credentials/1"), patch.keys)
+                val credential = patch.requiredObject("credentials/1")
+                assertEquals("Password", credential.requiredString("@type"))
+                assertEquals("new-password", credential.requiredString("secret"))
+                assertTrue(credential.requiredObject("allowedIps").isEmpty())
+            },
+        )
+        val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())
+
+        adapter.changePassword("account-one", "new-password")
+
+        transport.assertExhausted()
+    }
+
+    @Test
+    fun changePasswordRejectsMultiplePasswordCredentialsAsAmbiguous() = runBlocking {
+        val credentials = buildJsonObject {
+            listOf("0", "2").forEach { key ->
+                put(
+                    key,
+                    buildJsonObject {
+                        put("@type", "Password")
+                        put("credentialId", "password-$key")
+                        put("secret", "********")
+                        put("allowedIps", buildJsonObject {})
+                    },
+                )
+            }
+        }
+        val transport = RecordingTransport(
+            expectedCall(
+                "x:Account/get",
+                getPayload(
+                    "management-account",
+                    accountObject(
+                        id = "account-one",
+                        localPart = "dev",
+                        domainId = "domain-one",
+                        credentials = credentials,
+                    ),
+                ),
+            ),
+        )
+        val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())
+
+        val failure = assertFailsWith<StalwartProductException> {
+            adapter.changePassword("account-one", "new-password")
+        }
+
+        assertTrue("multiple Password credentials" in failure.message.orEmpty())
+        transport.assertExhausted()
+    }
+
+    @Test
     fun changePasswordRejectsUnsupportedPasswordBeforeNetwork() = runBlocking {
         val transport = RecordingTransport()
         val catalog = InMemoryStalwartAccountCredentialCatalog().also {
@@ -964,6 +1087,17 @@ class StalwartProductAdapterTest {
             id: String,
             localPart: String,
             domainId: String,
+            credentials: JsonObject = buildJsonObject {
+                put(
+                    "0",
+                    buildJsonObject {
+                        put("@type", "Password")
+                        put("credentialId", "password-one")
+                        put("secret", "********")
+                        put("allowedIps", buildJsonObject {})
+                    },
+                )
+            },
             permissions: JsonObject = buildJsonObject {
                 put("@type", "Replace")
                 put(
@@ -981,20 +1115,7 @@ class StalwartProductAdapterTest {
             put("@type", "User")
             put("name", localPart)
             put("domainId", domainId)
-            put(
-                "credentials",
-                buildJsonObject {
-                    put(
-                        "0",
-                        buildJsonObject {
-                            put("@type", "Password")
-                            put("credentialId", "password-one")
-                            put("secret", "********")
-                            put("allowedIps", buildJsonObject {})
-                        },
-                    )
-                },
-            )
+            put("credentials", credentials)
             put("permissions", permissions)
         }
 
