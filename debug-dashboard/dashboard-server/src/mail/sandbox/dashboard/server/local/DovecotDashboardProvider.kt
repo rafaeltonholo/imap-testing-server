@@ -112,15 +112,29 @@ internal class DovecotDashboardProvider(
         withPasswordBytes(password) { passwordBytes ->
             adapter.createAccount(record.address, passwordBytes)
         }
-        val credentials = AccountCredentials(record.address, password)
-        requireAuthenticated(mailboxClient.probe(credentials))
-        val existingFolders = mailboxClient.listFolders(credentials)
-            .mapTo(hashSetOf()) { folder -> folder.name }
-        DEFAULT_CREATED_FOLDERS.filterNot(existingFolders::contains).forEach { folder ->
-            mailboxClient.createFolder(credentials, folder)
+        return try {
+            val credentials = AccountCredentials(record.address, password)
+            requireAuthenticated(mailboxClient.probe(credentials))
+            val existingFolders = mailboxClient.listFolders(credentials)
+                .mapTo(hashSetOf()) { folder -> folder.name }
+            DEFAULT_CREATED_FOLDERS.filterNot(existingFolders::contains).forEach { folder ->
+                mailboxClient.createFolder(credentials, folder)
+            }
+            catalog.put(record)
+            accountInfo(record.address, CredentialReadiness.READY)
+        } catch (failure: Throwable) {
+            try {
+                adapter.deleteAccount(record.address)
+            } catch (rollbackFailure: Throwable) {
+                if (rollbackFailure !== failure) failure.addSuppressed(rollbackFailure)
+            }
+            try {
+                catalog.remove(provider, record.address)
+            } catch (cleanupFailure: Throwable) {
+                if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+            }
+            throw failure
         }
-        catalog.put(record)
-        return accountInfo(record.address, CredentialReadiness.READY)
     }
 
     override suspend fun dashboardLogAccount(

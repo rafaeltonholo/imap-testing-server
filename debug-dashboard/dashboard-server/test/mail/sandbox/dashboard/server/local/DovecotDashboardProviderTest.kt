@@ -1,5 +1,7 @@
 package mail.sandbox.dashboard.server.local
 
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlinx.coroutines.runBlocking
@@ -433,6 +435,231 @@ class DovecotDashboardProviderTest {
                 directory.toFile().deleteRecursively()
             }
         }
+
+    @Test
+    fun createRollsBackAuthenticationAndCatalogWhenOrdinaryAuthenticationFails() =
+        runBlocking {
+            val directory = createTempDirectory("dovecot-dashboard-create-auth-rollback")
+                .toRealPath()
+            try {
+                val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+                catalog.put(
+                    LocalAccountRecord(
+                        provider = Provider.DOVECOT,
+                        address = "alice@local.test",
+                        password = "stale-password",
+                        protocols = ALL_PROTOCOLS,
+                    ),
+                )
+                val registry = MutablePlainAccountRegistry()
+                val provider = DovecotDashboardProvider(
+                    adapter = DovecotProductAdapter(
+                        registry,
+                        QueueRunner(
+                            DovecotCommandResult.success(),
+                            missingDovecotUser(),
+                        ),
+                    ),
+                    catalog = catalog,
+                    mailboxClient = RecordingMailboxClient(
+                        probeOutcome = AuthenticationOutcome.WrongPassword(
+                            "authentication failed",
+                        ),
+                    ),
+                )
+
+                val failure = assertFailsWith<IllegalStateException> {
+                    provider.createAccount(
+                        CreateAccountRequest(
+                            "alice@local.test",
+                            "new-password",
+                            Provider.DOVECOT,
+                            ALL_PROTOCOLS,
+                        ),
+                    )
+                }
+
+                assertEquals(
+                    "Ordinary Dovecot authentication failed: authentication failed",
+                    failure.message,
+                )
+                assertTrue(registry.list().isEmpty())
+                assertEquals(null, catalog.find(Provider.DOVECOT, "alice@local.test"))
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun createRollsBackAuthenticationWhenDefaultFolderBootstrapFails() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-create-folder-rollback")
+            .toRealPath()
+        try {
+            val bootstrapFailure = IllegalStateException("folder bootstrap failed")
+            val registry = MutablePlainAccountRegistry()
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    registry,
+                    QueueRunner(
+                        DovecotCommandResult.success(),
+                        missingDovecotUser(),
+                    ),
+                ),
+                catalog = catalog,
+                mailboxClient = RecordingMailboxClient(
+                    createFolderFailure = bootstrapFailure,
+                ),
+            )
+
+            val failure = assertFailsWith<IllegalStateException> {
+                provider.createAccount(
+                    CreateAccountRequest(
+                        "alice@local.test",
+                        "new-password",
+                        Provider.DOVECOT,
+                        ALL_PROTOCOLS,
+                    ),
+                )
+            }
+
+            assertTrue(failure === bootstrapFailure)
+            assertTrue(registry.list().isEmpty())
+            assertEquals(null, catalog.find(Provider.DOVECOT, "alice@local.test"))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun createRollsBackAuthenticationWhenCatalogPersistenceFails() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-create-catalog-rollback")
+            .toRealPath()
+        try {
+            val catalogPath = directory.resolve("accounts.json")
+            catalogPath.writeText("""{"version":2,"accounts":[]}""")
+            val registry = MutablePlainAccountRegistry()
+            val catalog = LocalAccountCatalog(catalogPath)
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    registry,
+                    QueueRunner(
+                        DovecotCommandResult.success(),
+                        missingDovecotUser(),
+                    ),
+                ),
+                catalog = catalog,
+                mailboxClient = RecordingMailboxClient(),
+            )
+            Files.setPosixFilePermissions(
+                directory,
+                PosixFilePermissions.fromString("r-x------"),
+            )
+            try {
+                assertFailsWith<Exception> {
+                    provider.createAccount(
+                        CreateAccountRequest(
+                            "alice@local.test",
+                            "new-password",
+                            Provider.DOVECOT,
+                            ALL_PROTOCOLS,
+                        ),
+                    )
+                }
+
+                assertTrue(registry.list().isEmpty())
+                assertEquals(null, catalog.find(Provider.DOVECOT, "alice@local.test"))
+            } finally {
+                Files.setPosixFilePermissions(
+                    directory,
+                    PosixFilePermissions.fromString("rwx------"),
+                )
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun createDoesNotRollBackWhenInitialAdapterCreationFails() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-create-uncertain")
+            .toRealPath()
+        try {
+            val registry = MutablePlainAccountRegistry()
+            val catalog = LocalAccountCatalog(directory.resolve("accounts.json"))
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    registry,
+                    QueueRunner(dovecotCommandFailure("creation verification failed")),
+                ),
+                catalog = catalog,
+                mailboxClient = RecordingMailboxClient(),
+            )
+
+            val failure = assertFailsWith<IllegalStateException> {
+                provider.createAccount(
+                    CreateAccountRequest(
+                        "alice@local.test",
+                        "new-password",
+                        Provider.DOVECOT,
+                        ALL_PROTOCOLS,
+                    ),
+                )
+            }
+
+            assertTrue("creation verification failed" in failure.message.orEmpty())
+            assertEquals("new-password", registry.plainPassword("alice@local.test"))
+            assertEquals(null, catalog.find(Provider.DOVECOT, "alice@local.test"))
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun createPreservesTheOriginalFailureWhenAuthenticationRollbackFails() = runBlocking {
+        val directory = createTempDirectory("dovecot-dashboard-create-rollback-failure")
+            .toRealPath()
+        try {
+            val registry = MutablePlainAccountRegistry()
+            val provider = DovecotDashboardProvider(
+                adapter = DovecotProductAdapter(
+                    registry,
+                    QueueRunner(
+                        DovecotCommandResult.success(),
+                        DovecotCommandResult.success(),
+                    ),
+                ),
+                catalog = LocalAccountCatalog(directory.resolve("accounts.json")),
+                mailboxClient = RecordingMailboxClient(
+                    probeOutcome = AuthenticationOutcome.WrongPassword(
+                        "original authentication failure",
+                    ),
+                ),
+            )
+
+            val failure = assertFailsWith<IllegalStateException> {
+                provider.createAccount(
+                    CreateAccountRequest(
+                        "alice@local.test",
+                        "new-password",
+                        Provider.DOVECOT,
+                        ALL_PROTOCOLS,
+                    ),
+                )
+            }
+
+            assertEquals(
+                "Ordinary Dovecot authentication failed: original authentication failure",
+                failure.message,
+            )
+            assertEquals(
+                "Dovecot did not confirm account removal",
+                failure.suppressed.single().message,
+            )
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun passwordChangeMustLogInAsTheUserWithTheChangedPassword() = runBlocking {
@@ -928,6 +1155,7 @@ private class RecordingMailboxClient(
     private val probeOutcome: AuthenticationOutcome =
         AuthenticationOutcome.Authenticated("authenticated"),
     probeOutcomes: List<AuthenticationOutcome> = emptyList(),
+    private val createFolderFailure: Throwable? = null,
 ) : DovecotMailboxClient {
     private val messageSnapshots = ArrayDeque(messageSnapshots)
     private val probeOutcomes = ArrayDeque(probeOutcomes)
@@ -954,6 +1182,7 @@ private class RecordingMailboxClient(
         name: String,
     ): DovecotFolder {
         this.credentials += credentials
+        createFolderFailure?.let { throw it }
         created += name
         return DovecotFolder(name).also(folders::add)
     }
@@ -1054,3 +1283,17 @@ private class QueueRunner(
         return results.removeFirstOrNull() ?: error("No Dovecot result configured")
     }
 }
+
+private fun missingDovecotUser(): DovecotCommandResult = DovecotCommandResult(
+    exitCode = 67,
+    timedOut = false,
+    stdout = ByteArray(0),
+    stderr = "user doesn't exist".toByteArray(),
+)
+
+private fun dovecotCommandFailure(message: String): DovecotCommandResult = DovecotCommandResult(
+    exitCode = 1,
+    timedOut = false,
+    stdout = ByteArray(0),
+    stderr = message.toByteArray(),
+)
