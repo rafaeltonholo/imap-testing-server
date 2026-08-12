@@ -291,7 +291,8 @@ machinery obscuring the provider behavior.
 1. create TLS fixtures if absent;
 2. create `config/users` from defaults if absent;
 3. classify Stalwart state as fresh, migration-current, or migration-required;
-4. run root `docker compose up -d` for Dovecot, Postfix, and OAuth2;
+4. rebuild only the local `oauth2-mock` image, then run root `docker compose up -d` for
+   Dovecot, Postfix, and OAuth2 without forcing a Postfix rebuild;
 5. initialize and receipt a genuinely absent/empty Stalwart store with the current version,
    or start a non-empty store only when its migration receipt is current;
 6. probe each service independently without requiring every service to become healthy;

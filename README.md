@@ -36,29 +36,32 @@ clients, automation, and development workflows.
 
 ### Mail Flight Recorder dashboard
 
-The dashboard is a disposable, loopback-only developer tool for reproducing client/provider
-issues against isolated Dovecot and Stalwart stores. Start the complete dashboard stack from
-the repository root:
+The dashboard is a trusted local developer tool for reproducing client/provider issues
+against the repository's existing Dovecot, Postfix, OAuth2, and Stalwart services. It reads
+and mutates the real root-stack accounts, mailboxes, and logs; there is no isolated provider
+project or second mail store. Start it from the repository root:
 
 ```sh
 ./debug-dashboard/start-local.sh
 ```
 
 Open <http://127.0.0.1:50734>. The launcher uses only the Kotlin Toolchain wrapper for the
-Kotlin/Wasm UI and Ktor server. It starts a dedicated Compose project and does not reuse the
-normal sandbox provider data.
+Kotlin/Wasm UI and Ktor server. It rebuilds only the local OAuth mock image, converges the
+root Dovecot/Postfix/OAuth services, and starts the root Stalwart service only when its
+persisted store is fresh or has a current migration receipt. A legacy store is preserved
+and shown as **Stalwart upgrade required** instead of being migrated implicitly.
 
 Account protocol choices are a client test profile: they drive dashboard actions and setup
 guidance, but are not an authorization boundary. Provider-internal mailbox access may remain
 enabled so the dashboard can inspect and mutate the account during diagnostics.
 
 Stalwart accounts use their ordinary disposable account password on purpose. The create and
-change-password workflows must exercise the same credential an email client uses, so this
-loopback-only tool does not add an AppPassword isolation layer.
+change-password workflows exercise the same credential an email client uses; this test-only
+tool does not add an AppPassword isolation layer.
 
-The dedicated Stalwart fixture enables an unbuffered debug tracer on standard output so the
-dashboard can correlate account activity and inspect server-wide logs. This setting applies
-only to the dashboard fixture; the normal Stalwart configuration and data are not changed.
+Server-wide and account-correlated logs come from the same root Compose services exercised
+by the email client. Dashboard startup never resets `config/users`, `vmail/`, or
+`stalwart-data/`.
 
 The dashboard dependency baseline was refreshed on 2026-08-04. Direct dependencies use the
 latest coherent stable Kotlin Toolchain set: Kotlin 2.4.10, Kotlin Toolchain 0.11.1, Compose
@@ -75,23 +78,29 @@ and Selenium 4.46.0. Three versions intentionally do not use a numerically newer
   Local Chrome 151 therefore emits Selenium's compatibility warning until upstream publishes
   matching bindings; the dashboard gate otherwise uses standard WebDriver behavior.
 
-| Dashboard provider endpoint | Address |
-| --------------------------- | ------- |
-| Dovecot IMAP / IMAPS | `127.0.0.1:21143` / `127.0.0.1:21993` |
-| Dovecot POP3 / POP3S | `127.0.0.1:21110` / `127.0.0.1:21995` |
-| Postfix SMTP / SMTPS / submission | `127.0.0.1:21025` / `127.0.0.1:21465` / `127.0.0.1:21587` |
-| Stalwart JMAP / SMTP | `127.0.0.1:18443` / `127.0.0.1:18587` |
-| OAuth mock | `127.0.0.1:28080` |
+| Root provider endpoint | Address for host/LAN clients |
+| ---------------------- | ---------------------------- |
+| Dovecot IMAP / IMAPS | `<host>:143` / `<host>:993` |
+| Dovecot POP3 / POP3S | `<host>:110` / `<host>:995` |
+| Postfix SMTP / SMTPS / submission | `<host>:1025` / `<host>:465` / `<host>:587` |
+| Current Stalwart JMAP/admin | `http://<host>:8443` |
+| OAuth mock | `http://<host>:8080` |
 
-Stop the isolated providers with:
+The dashboard backend uses stable loopback aliases (`1143`, `1993`, `1110`, `1995`,
+`1465`, and `1587`) for its own probes. Replace `<host>` with `localhost` on this machine or
+the machine's LAN address for a physical test device.
+
+Stop only the dashboard process with:
 
 ```sh
 ./debug-dashboard/stop-local.sh
 ```
 
-Use `./debug-dashboard/stop-local.sh --reset-stalwart` when a fresh dedicated Stalwart store
-is required. Dovecot account deletion removes access but intentionally retains that address's
-Maildir so recreating the same disposable address can reattach the reproduction data.
+The root mail providers remain running. To restore only the Dovecot authentication fixture,
+run `./debug-dashboard/reset-local-accounts.sh --dovecot-defaults`; the command requires an
+explicit confirmation and never removes mailbox data. Dashboard account deletion removes
+authentication access but intentionally retains the Dovecot Maildir so recreating the same
+address can reattach reproduction data.
 
 ### 1. First-Time Setup
 
@@ -104,17 +113,17 @@ python3 scripts/setup.py
 ### 2. Start the Services
 
 ```sh
-docker compose up -d --build
+docker compose up -d
 ```
 
 This starts four services:
 
-| Service     | Container      | Purpose                              |
-| ----------- | -------------- | ------------------------------------ |
-| Dovecot     | `dovecot-dev`  | IMAP server                          |
-| Postfix     | `postfix-dev`  | SMTP server                          |
-| Stalwart    | `stalwart-dev` | JMAP server (with built-in OAuth2)   |
-| OAuth2 Mock | `oauth2-mock`  | OAuth2 server (for IMAP/SMTP OAuth2) |
+| Service     | Compose service | Purpose                              |
+| ----------- | --------------- | ------------------------------------ |
+| Dovecot     | `dovecot`       | IMAP and POP3 server                 |
+| Postfix     | `postfix`       | SMTP server                          |
+| Stalwart    | `stalwart`      | JMAP server (with built-in OAuth2)   |
+| OAuth2 Mock | `oauth2-mock`   | OAuth2 server (for IMAP/SMTP OAuth2) |
 
 ### 3. Connection Details
 
@@ -144,6 +153,8 @@ template and are materialized into the runtime `config/users` authority:
 | `dev4@local.test`                          | `secret` |
 | `dev5@local.test`                          | `secret` |
 | `a_very_long-email_for_testing@local.test` | `secret` |
+| `inline_img@local.test`                    | `secret` |
+| `inline_msg@local.test`                    | `secret` |
 
 ## Authentication
 
@@ -685,7 +696,7 @@ python3 scripts/reset.py --destroy-all-provider-data
 ### Inspect Mail Inside the Container
 
 ```sh
-docker exec -it dovecot-dev doveadm fetch -u dev@local.test 'hdr.subject' mailbox INBOX
+docker compose exec dovecot doveadm fetch -u dev@local.test 'hdr.subject' mailbox INBOX
 ```
 
 ## Logs

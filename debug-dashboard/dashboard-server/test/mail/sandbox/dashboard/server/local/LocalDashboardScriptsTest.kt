@@ -26,6 +26,7 @@ class LocalDashboardScriptsTest {
     @Test
     fun normalRuntimeSourcesContainNoRetiredProjectOverlayOrPorts() {
         val normalSources = listOf(
+            repositoryRoot.resolve("README.md"),
             dashboardRoot.resolve("start-local.sh"),
             dashboardRoot.resolve("stop-local.sh"),
             dashboardRoot.resolve("stalwart-status.sh"),
@@ -75,7 +76,9 @@ class LocalDashboardScriptsTest {
         assertTrue("--lifecycle dashboard-start-local" in source)
         assertTrue("stalwart-status.sh" in source)
         assertTrue("initialize-fresh" in source)
-        assertTrue("up -d --build oauth2-mock dovecot postfix" in source)
+        assertTrue("build oauth2-mock" in source)
+        assertTrue("up -d oauth2-mock dovecot postfix" in source)
+        assertFalse("--build" in source)
         assertFalse("up -d --wait" in source)
         assertTrue("python3 \"\$dashboard_users_script\" verify" in source)
         assertTrue("DASHBOARD_STALWART_RUNTIME_STATE" in source)
@@ -106,7 +109,9 @@ class LocalDashboardScriptsTest {
                     "--lifecycle dashboard-start-local",
                 "python|stalwart_runtime_state.py classify --repository ${fixture.root}",
                 "docker|compose -f ${fixture.root}/docker-compose.yml " +
-                    "up -d --build oauth2-mock dovecot postfix",
+                    "build oauth2-mock",
+                "docker|compose -f ${fixture.root}/docker-compose.yml " +
+                    "up -d oauth2-mock dovecot postfix",
                 "python|users_file.py verify",
                 "python|bootstrap_stalwart_v016.py initialize-fresh --repository ${fixture.root}",
                 "python|stalwart_runtime_state.py classify --repository ${fixture.root}",
@@ -117,6 +122,45 @@ class LocalDashboardScriptsTest {
                     "--working-dir=${fixture.root}",
             )
             assertTrue(Files.isRegularFile(fixture.dashboardPidFile))
+        }
+    }
+
+    @Test
+    fun oauthBuildFailureStillConvergesProvidersAndLaunchesDegradedDashboard() {
+        LauncherFixture(dashboardRoot).use { fixture ->
+            val result = fixture.run(
+                firstState = "current",
+                failOAuthBuild = true,
+            )
+
+            assertEquals(0, result.exitCode, result.output)
+            assertTrue("OAuth image rebuild failed" in result.output)
+            assertInOrder(
+                result.trace,
+                "docker|compose -f ${fixture.root}/docker-compose.yml build oauth2-mock",
+                "docker|compose -f ${fixture.root}/docker-compose.yml " +
+                    "up -d oauth2-mock dovecot postfix",
+                "python|users_file.py verify",
+                "docker|compose -f ${fixture.root}/docker-compose.yml up -d stalwart",
+                "kotlin|state=CURRENT|run --module dashboard-server " +
+                    "--working-dir=${fixture.root}",
+            )
+        }
+    }
+
+    @Test
+    fun coreProviderStartFailureSkipsDovecotVerificationButKeepsStalwartIndependent() {
+        LauncherFixture(dashboardRoot).use { fixture ->
+            val result = fixture.run(
+                firstState = "current",
+                failCoreStart = true,
+            )
+
+            assertEquals(0, result.exitCode, result.output)
+            assertTrue("Dovecot/Postfix/OAuth startup failed" in result.output)
+            assertTrue(result.trace.none { it == "python|users_file.py verify" })
+            assertTrue(result.trace.any { it.endsWith("up -d stalwart") })
+            assertTrue(result.trace.any { it.startsWith("kotlin|state=CURRENT|run ") })
         }
     }
 
@@ -329,6 +373,8 @@ private class LauncherFixture(
         failInitialization: Boolean = false,
         failUsersVerify: Boolean = false,
         failStalwartStart: Boolean = false,
+        failOAuthBuild: Boolean = false,
+        failCoreStart: Boolean = false,
     ): ScriptResult {
         Files.deleteIfExists(traceFile)
         Files.deleteIfExists(classifyCount)
@@ -347,6 +393,10 @@ private class LauncherFixture(
                     if (failUsersVerify) "1" else "0"
                 environment()["DASHBOARD_TEST_FAIL_STALWART_START"] =
                     if (failStalwartStart) "1" else "0"
+                environment()["DASHBOARD_TEST_FAIL_OAUTH_BUILD"] =
+                    if (failOAuthBuild) "1" else "0"
+                environment()["DASHBOARD_TEST_FAIL_CORE_START"] =
+                    if (failCoreStart) "1" else "0"
             }
             .start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
@@ -397,6 +447,12 @@ private class LauncherFixture(
             |set -u
             |printf 'docker|%s\n' "${'$'}*" >> "${'$'}DASHBOARD_TEST_TRACE"
             |case "${'$'}*" in
+            |  *" build oauth2-mock")
+            |    test "${'$'}DASHBOARD_TEST_FAIL_OAUTH_BUILD" != 1
+            |    ;;
+            |  *" up -d oauth2-mock dovecot postfix")
+            |    test "${'$'}DASHBOARD_TEST_FAIL_CORE_START" != 1
+            |    ;;
             |  *" up -d stalwart")
             |    test "${'$'}DASHBOARD_TEST_FAIL_STALWART_START" != 1
             |    ;;
