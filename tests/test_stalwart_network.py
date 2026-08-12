@@ -245,6 +245,26 @@ default            10.0.0.1           UGScg         en1
                         platform_name=platform_name,
                     )
 
+    def test_equal_metric_routes_on_same_interface_are_ambiguous(self) -> None:
+        outputs = {
+            ("ip", "-4", "route", "show", "default"): (
+                "default via 192.168.86.1 dev eth0 metric 100\n"
+                "default via 192.168.86.254 dev eth0 metric 100\n"
+            ),
+            ("ip", "-o", "-4", "addr", "show", "dev", "eth0", "scope", "global"): (
+                "2: eth0 inet 192.168.86.36/24 scope global eth0\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            network.NetworkConfigurationError,
+            "default-route interface",
+        ):
+            network.detect_default_route_ipv4(
+                runner=lambda command: outputs[tuple(command)],
+                platform_name="Linux",
+            )
+
     def test_missing_or_multiple_interface_addresses_fail(self) -> None:
         address_outputs = (
             "",

@@ -119,14 +119,14 @@ def _route_error(detail: str) -> NetworkConfigurationError:
 
 
 def _darwin_default_interface(route_output: str) -> str:
-    interfaces: set[str] = set()
+    interfaces: list[str] = []
     for line in route_output.splitlines():
         fields = line.split()
         if len(fields) >= 4 and fields[0] == "default":
-            interfaces.add(fields[3])
+            interfaces.append(fields[3])
     if len(interfaces) != 1:
         raise _route_error("expected exactly one default-route interface")
-    return next(iter(interfaces))
+    return interfaces[0]
 
 
 def _linux_default_interface(route_output: str) -> str:
@@ -152,12 +152,12 @@ def _linux_default_interface(route_output: str) -> str:
     if not candidates:
         raise _route_error("no default-route interface was found")
     best_metric = min(metric for metric, _interface in candidates)
-    interfaces = {
+    interfaces = [
         interface for metric, interface in candidates if metric == best_metric
-    }
+    ]
     if len(interfaces) != 1:
         raise _route_error("expected exactly one default-route interface")
-    return next(iter(interfaces))
+    return interfaces[0]
 
 
 def _addresses_from_output(output: str) -> tuple[str, ...]:
