@@ -12,8 +12,15 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import mail.sandbox.dashboard.contract.AccountInfo
 import mail.sandbox.dashboard.contract.AuthenticationProbeResponse
 import mail.sandbox.dashboard.contract.AuthenticationProtocol
@@ -23,8 +30,11 @@ import mail.sandbox.dashboard.contract.LogResponse
 import mail.sandbox.dashboard.contract.LogService
 import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.MessageSummary
+import mail.sandbox.dashboard.contract.GenerateMessageResponse
+import mail.sandbox.dashboard.contract.OperationResponse
 import mail.sandbox.dashboard.contract.Provider
 import mail.sandbox.dashboard.contract.ProviderAvailability
+import mail.sandbox.dashboard.server.api.DashboardApiError
 import mail.sandbox.dashboard.server.local.LocalDashboardBackend
 import mail.sandbox.dashboard.server.provider.ProviderAuthenticationAttempt
 import mail.sandbox.dashboard.server.provider.ProviderAuthenticationConnector
@@ -33,6 +43,295 @@ import mail.sandbox.dashboard.server.provider.ProviderAuthenticationProtocol
 import mail.sandbox.dashboard.server.provider.ProviderAuthenticationTransportOutcome
 
 class SingleStackPreservationTest {
+    @Test
+    fun stalwartAcceptanceProfilesHaveStableProtocolsSlugsAndExactOwnedAddresses() {
+        val run = AcceptanceRunIdentity("dashboard-acceptance-1786380000-a1b2c3d4")
+
+        assertEquals(
+            listOf(
+                StalwartAcceptanceProfile.JMAP_ONLY,
+                StalwartAcceptanceProfile.SMTP_ONLY,
+                StalwartAcceptanceProfile.JMAP_SMTP,
+            ),
+            StalwartAcceptanceProfile.entries,
+        )
+        assertEquals("jmap-only", StalwartAcceptanceProfile.JMAP_ONLY.slug)
+        assertEquals(listOf(MailProtocol.JMAP), StalwartAcceptanceProfile.JMAP_ONLY.protocols)
+        assertEquals("smtp-only", StalwartAcceptanceProfile.SMTP_ONLY.slug)
+        assertEquals(listOf(MailProtocol.SMTP), StalwartAcceptanceProfile.SMTP_ONLY.protocols)
+        assertEquals("jmap-smtp", StalwartAcceptanceProfile.JMAP_SMTP.slug)
+        assertEquals(
+            listOf(MailProtocol.JMAP, MailProtocol.SMTP),
+            StalwartAcceptanceProfile.JMAP_SMTP.protocols,
+        )
+        assertEquals(
+            "${run.prefix}-dovecot@local.test",
+            run.accountAddress(Provider.DOVECOT),
+        )
+        assertEquals(
+            "${run.prefix}-stalwart-jmap-only@local.test",
+            run.accountAddress(StalwartAcceptanceProfile.JMAP_ONLY),
+        )
+        assertEquals(
+            "${run.prefix}-stalwart-smtp-only@local.test",
+            run.accountAddress(StalwartAcceptanceProfile.SMTP_ONLY),
+        )
+        assertEquals(
+            "${run.prefix}-stalwart-jmap-smtp@local.test",
+            run.accountAddress(StalwartAcceptanceProfile.JMAP_SMTP),
+        )
+
+        val exactOwned = setOf(
+            run.accountAddress(Provider.DOVECOT),
+            *StalwartAcceptanceProfile.entries.map(run::accountAddress).toTypedArray(),
+        )
+        assertTrue(exactOwned.all(run::ownsAddress))
+        assertFalse(run.ownsAddress("${run.prefix}-stalwart@local.test"))
+        assertFalse(run.ownsAddress("${run.prefix}-stalwart-jmap-only-extra@local.test"))
+    }
+
+    @Test
+    fun generatedStalwartCleanupRequiresTheExactReturnedProviderAccountId() {
+        TestRoot().use { fixture ->
+            val environment = fixture.load()
+            val returned = AccountInfo(
+                address = environment.run.accountAddress(StalwartAcceptanceProfile.JMAP_ONLY),
+                provider = Provider.STALWART,
+                protocols = StalwartAcceptanceProfile.JMAP_ONLY.protocols,
+                credentialReadiness = CredentialReadiness.READY,
+                providerAccountId = "returned-account-id",
+            )
+
+            environment.requireGeneratedAccount(returned, "returned-account-id")
+            assertFailsWith<IllegalArgumentException> {
+                environment.requireGeneratedAccount(returned, null)
+            }
+            assertFailsWith<IllegalArgumentException> {
+                environment.requireGeneratedAccount(returned, "different-account-id")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                environment.requireGeneratedAccount(
+                    returned.copy(address = "${environment.run.prefix}-stalwart@local.test"),
+                    "returned-account-id",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun uncertainCreateRecoverySelectsOnlyAnExactNonBaselineRunOwnedIdentity() {
+        val run = AcceptanceRunIdentity("dashboard-acceptance-1786380000-a1b2c3d4")
+        val address = run.accountAddress(StalwartAcceptanceProfile.JMAP_ONLY)
+        val generated = AccountInfo(
+            address = address,
+            provider = Provider.STALWART,
+            protocols = StalwartAcceptanceProfile.JMAP_ONLY.protocols,
+            credentialReadiness = CredentialReadiness.READY,
+            providerAccountId = "generated-id",
+        )
+        val existing = ProviderIdentitySnapshot(
+            provider = Provider.STALWART,
+            address = "existing@local.test",
+            providerAccountId = "existing-id",
+        )
+
+        assertEquals(
+            GeneratedAccountCleanupIdentity(generated, "generated-id"),
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(generated),
+            ),
+        )
+        assertNull(
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(
+                    existing,
+                    ProviderIdentitySnapshot(
+                        provider = Provider.STALWART,
+                        address = address,
+                        providerAccountId = "generated-id",
+                    ),
+                ),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(generated),
+            ),
+            "A provider identity present in the baseline must never be selected for deletion",
+        )
+        val baselineAtSameAddress = ProviderIdentitySnapshot(
+            provider = Provider.STALWART,
+            address = address,
+            providerAccountId = "baseline-id",
+        )
+        assertEquals(
+            GeneratedAccountCleanupIdentity(generated, "generated-id"),
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing, baselineAtSameAddress),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(
+                    generated.copy(providerAccountId = "baseline-id"),
+                    generated,
+                ),
+            ),
+            "Recovery may select only the generated provider identity absent from the baseline",
+        )
+        assertNull(
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(
+                    generated.copy(address = run.accountAddress(StalwartAcceptanceProfile.SMTP_ONLY)),
+                ),
+            ),
+        )
+        assertNull(
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(generated.copy(providerAccountId = null)),
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing),
+                provider = Provider.STALWART,
+                address = address,
+                inventory = listOf(
+                    generated,
+                    generated.copy(providerAccountId = "another-generated-id"),
+                ),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            recoverGeneratedAccountCleanupIdentity(
+                run = run,
+                baseline = listOf(existing),
+                provider = Provider.STALWART,
+                address = "not-run-owned@local.test",
+                inventory = listOf(generated),
+            )
+        }
+    }
+
+    @Test
+    fun cancelledWorkflowRunsCleanupNonCancellablyAndKeepsTheOriginalFailure() {
+        val original = CancellationException("workflow cancelled")
+        val cleanupFailure = IllegalStateException("cleanup failed")
+        var cleanupCompleted = false
+
+        val thrown = assertFailsWith<CancellationException> {
+            runBlocking {
+                currentCoroutineContext().cancel(original)
+                try {
+                    yield()
+                } finally {
+                    runAcceptanceCleanup(original) {
+                        delay(1)
+                        cleanupCompleted = true
+                        throw cleanupFailure
+                    }
+                }
+            }
+        }
+
+        assertSame(original, thrown)
+        assertTrue(cleanupCompleted)
+        assertContentEquals(arrayOf(cleanupFailure), thrown.suppressed)
+    }
+
+    @Test
+    fun authenticationProtocolsAndPrimaryProtocolAreDerivedFromTheSelectedProfile() {
+        val dovecot = generatedAccount(Provider.DOVECOT)
+        val jmapOnly = generatedStalwartAccount(StalwartAcceptanceProfile.JMAP_ONLY)
+        val smtpOnly = generatedStalwartAccount(StalwartAcceptanceProfile.SMTP_ONLY)
+        val jmapSmtp = generatedStalwartAccount(StalwartAcceptanceProfile.JMAP_SMTP)
+
+        assertEquals(
+            listOf(
+                AuthenticationProtocol.IMAP,
+                AuthenticationProtocol.POP3,
+                AuthenticationProtocol.SMTP,
+                AuthenticationProtocol.OAUTH_IMAP,
+                AuthenticationProtocol.OAUTH_SMTP,
+            ),
+            dovecot.authenticationProtocols(),
+        )
+        assertEquals(AuthenticationProtocol.IMAP, dovecot.primaryAuthenticationProtocol())
+        val dovecotSmtpOnly = dovecot.copy(protocols = listOf(MailProtocol.SMTP))
+        assertEquals(
+            listOf(AuthenticationProtocol.SMTP, AuthenticationProtocol.OAUTH_SMTP),
+            dovecotSmtpOnly.authenticationProtocols(),
+        )
+        assertEquals(
+            AuthenticationProtocol.SMTP,
+            dovecotSmtpOnly.primaryAuthenticationProtocol(),
+        )
+        assertEquals(listOf(AuthenticationProtocol.JMAP), jmapOnly.authenticationProtocols())
+        assertEquals(AuthenticationProtocol.JMAP, jmapOnly.primaryAuthenticationProtocol())
+        assertEquals(listOf(AuthenticationProtocol.SMTP), smtpOnly.authenticationProtocols())
+        assertEquals(AuthenticationProtocol.SMTP, smtpOnly.primaryAuthenticationProtocol())
+        assertEquals(
+            listOf(AuthenticationProtocol.JMAP, AuthenticationProtocol.SMTP),
+            jmapSmtp.authenticationProtocols(),
+        )
+        assertEquals(AuthenticationProtocol.JMAP, jmapSmtp.primaryAuthenticationProtocol())
+    }
+
+    @Test
+    fun profileErrorsAndGeneratedIdCountsRequireExactEvidence() {
+        requireProfileBadRequest(
+            DashboardApiError("bad_request", "SMTP is not enabled for this Stalwart Account"),
+            "SMTP is not enabled",
+        )
+        assertFailsWith<IllegalStateException> {
+            requireProfileBadRequest(
+                DashboardApiError("internal_error", "SMTP is not enabled"),
+                "SMTP is not enabled",
+            )
+        }
+        assertFailsWith<IllegalStateException> {
+            requireProfileBadRequest(
+                DashboardApiError("bad_request", "unrelated"),
+                "SMTP is not enabled",
+            )
+        }
+
+        requireGeneratedMessageIds(
+            GenerateMessageResponse(
+                messageIds = listOf("message-id"),
+                operation = OperationResponse(true, "Appended 1 message"),
+            ),
+            expectedCount = 1,
+        )
+        requireGeneratedMessageIds(
+            GenerateMessageResponse(
+                messageIds = emptyList(),
+                operation = OperationResponse(true, "Delivered 1 message"),
+            ),
+            expectedCount = 0,
+        )
+        assertFailsWith<IllegalStateException> {
+            requireGeneratedMessageIds(
+                GenerateMessageResponse(
+                    messageIds = emptyList(),
+                    operation = OperationResponse(true, "Appended 1 message"),
+                ),
+                expectedCount = 1,
+            )
+        }
+    }
+
     @Test
     fun runnerCaptureOrComparisonExecutesOnlyWhenExplicitlySelected() = runBlocking {
         val mode = System.getenv("DASHBOARD_SINGLE_STACK_PRESERVATION_MODE") ?: return@runBlocking
@@ -404,8 +703,10 @@ class SingleStackPreservationTest {
         val dovecot = generatedAccount(Provider.DOVECOT)
         val stalwart = generatedAccount(Provider.STALWART)
 
-        verifier.requireRejected(dovecot, "former-dovecot-password")
-        verifier.requireRejected(stalwart, "former-stalwart-password")
+        runBlocking {
+            verifier.requireRejected(dovecot, "former-dovecot-password")
+            verifier.requireRejected(stalwart, "former-stalwart-password")
+        }
 
         assertEquals(ProviderAuthenticationProtocol.IMAP, attempts[0].protocol)
         assertEquals(1143, attempts[0].endpoint.port)
@@ -423,10 +724,10 @@ class SingleStackPreservationTest {
             ),
         )
         assertFailsWith<IllegalStateException> {
-            genericWrongPassword.requireRejected(dovecot, "former-password")
+            runBlocking { genericWrongPassword.requireRejected(dovecot, "former-password") }
         }
         assertFailsWith<IllegalStateException> {
-            genericWrongPassword.requireRejected(stalwart, "former-password")
+            runBlocking { genericWrongPassword.requireRejected(stalwart, "former-password") }
         }
 
         val canonicalRejections = DirectDeletedAccountCredentialVerifier(
@@ -446,8 +747,10 @@ class SingleStackPreservationTest {
                 },
             ),
         )
-        canonicalRejections.requireRejected(dovecot, "former-dovecot-password")
-        canonicalRejections.requireRejected(stalwart, "former-stalwart-password")
+        runBlocking {
+            canonicalRejections.requireRejected(dovecot, "former-dovecot-password")
+            canonicalRejections.requireRejected(stalwart, "former-stalwart-password")
+        }
 
         val authenticated = DirectDeletedAccountCredentialVerifier(
             ProviderAuthenticationProbe(
@@ -457,7 +760,7 @@ class SingleStackPreservationTest {
             ),
         )
         assertFailsWith<IllegalStateException> {
-            authenticated.requireRejected(dovecot, "still-valid-password")
+            runBlocking { authenticated.requireRejected(dovecot, "still-valid-password") }
         }
 
         val unavailable = DirectDeletedAccountCredentialVerifier(
@@ -468,8 +771,24 @@ class SingleStackPreservationTest {
             ),
         )
         assertFailsWith<IllegalStateException> {
-            unavailable.requireRejected(stalwart, "unproved-password")
+            runBlocking { unavailable.requireRejected(stalwart, "unproved-password") }
         }
+
+        val jmapAttempts = mutableListOf<AccountInfo>()
+        val jmapOnlyVerifier = DirectDeletedAccountCredentialVerifier(
+            probe = ProviderAuthenticationProbe(
+                ProviderAuthenticationConnector { error("SMTP must not probe a JMAP-only profile") },
+            ),
+            jmapRejectionProbe = { account, _ ->
+                jmapAttempts += account
+                mail.sandbox.dashboard.server.provider.AuthenticationOutcome.MissingAccount(
+                    "JMAP ordinary Account was not found",
+                )
+            },
+        )
+        val jmapOnly = generatedStalwartAccount(StalwartAcceptanceProfile.JMAP_ONLY)
+        runBlocking { jmapOnlyVerifier.requireRejected(jmapOnly, "former-jmap-password") }
+        assertEquals(listOf(jmapOnly), jmapAttempts)
     }
 
     @Test
@@ -501,6 +820,15 @@ class SingleStackPreservationTest {
         credentialReadiness = CredentialReadiness.READY,
         providerAccountId = if (provider == Provider.STALWART) "account-id" else null,
     )
+
+    private fun generatedStalwartAccount(profile: StalwartAcceptanceProfile): AccountInfo =
+        AccountInfo(
+            address = "dashboard-acceptance-stalwart-${profile.slug}@local.test",
+            provider = Provider.STALWART,
+            protocols = profile.protocols,
+            credentialReadiness = CredentialReadiness.READY,
+            providerAccountId = "account-id-${profile.slug}",
+        )
 
     private class TestRoot(
         users: ByteArray? = canonicalUsers("existing@local.test", "existing-password"),

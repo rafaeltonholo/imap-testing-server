@@ -26,6 +26,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import mail.sandbox.dashboard.contract.AccountInfo
+import mail.sandbox.dashboard.contract.MailProtocol
 import mail.sandbox.dashboard.contract.Provider
 
 internal data class SingleStackCommandResult(
@@ -38,6 +39,15 @@ internal fun interface SingleStackCommandRunner {
     fun run(argv: List<String>): SingleStackCommandResult
 }
 
+internal enum class StalwartAcceptanceProfile(
+    val slug: String,
+    val protocols: List<MailProtocol>,
+) {
+    JMAP_ONLY("jmap-only", listOf(MailProtocol.JMAP)),
+    SMTP_ONLY("smtp-only", listOf(MailProtocol.SMTP)),
+    JMAP_SMTP("jmap-smtp", listOf(MailProtocol.JMAP, MailProtocol.SMTP)),
+}
+
 internal data class AcceptanceRunIdentity(val prefix: String) {
     init {
         require(PREFIX.matches(prefix)) {
@@ -45,8 +55,13 @@ internal data class AcceptanceRunIdentity(val prefix: String) {
         }
     }
 
-    fun accountAddress(provider: Provider): String =
-        "$prefix-${provider.name.lowercase()}@local.test"
+    fun accountAddress(provider: Provider): String = when (provider) {
+        Provider.DOVECOT -> "$prefix-dovecot@local.test"
+        Provider.STALWART -> accountAddress(StalwartAcceptanceProfile.JMAP_SMTP)
+    }
+
+    fun accountAddress(profile: StalwartAcceptanceProfile): String =
+        "$prefix-stalwart-${profile.slug}@local.test"
 
     fun folderName(suffix: String): String {
         require(SUFFIX.matches(suffix)) { "Acceptance resource suffix is invalid" }
@@ -54,7 +69,8 @@ internal data class AcceptanceRunIdentity(val prefix: String) {
     }
 
     fun ownsAddress(address: String): Boolean =
-        Provider.entries.any { accountAddress(it) == address }
+        address == accountAddress(Provider.DOVECOT) ||
+            StalwartAcceptanceProfile.entries.any { accountAddress(it) == address }
 
     fun ownsName(name: String): Boolean =
         name == prefix || name.startsWith("$prefix-")
@@ -78,6 +94,62 @@ internal data class ProviderIdentitySnapshot(
     val address: String,
     val providerAccountId: String? = null,
 )
+
+internal data class GeneratedAccountCleanupIdentity(
+    val account: AccountInfo,
+    val providerAccountId: String?,
+) {
+    init {
+        when (account.provider) {
+            Provider.DOVECOT -> require(
+                account.providerAccountId == null && providerAccountId == null,
+            ) { "A generated Dovecot cleanup identity must not contain a provider Account ID" }
+            Provider.STALWART -> require(
+                !providerAccountId.isNullOrBlank() && account.providerAccountId == providerAccountId,
+            ) { "A generated Stalwart cleanup identity requires one immutable provider Account ID" }
+        }
+    }
+}
+
+internal fun recoverGeneratedAccountCleanupIdentity(
+    run: AcceptanceRunIdentity,
+    baseline: List<ProviderIdentitySnapshot>,
+    provider: Provider,
+    address: String,
+    inventory: List<AccountInfo>,
+): GeneratedAccountCleanupIdentity? {
+    require(run.ownsAddress(address)) { "Recovery target is not owned by this acceptance run" }
+    when (provider) {
+        Provider.DOVECOT -> require(address == run.accountAddress(Provider.DOVECOT)) {
+            "Dovecot recovery requires the exact generated Dovecot address"
+        }
+        Provider.STALWART -> require(
+            StalwartAcceptanceProfile.entries.any { address == run.accountAddress(it) },
+        ) { "Stalwart recovery requires one exact generated profile address" }
+    }
+    val candidates = inventory.filter { candidate ->
+        candidate.provider == provider &&
+            candidate.address == address &&
+            when (provider) {
+                Provider.DOVECOT -> candidate.providerAccountId == null
+                Provider.STALWART -> !candidate.providerAccountId.isNullOrBlank()
+            }
+    }.filterNot { candidate ->
+        baseline.any { identity ->
+            identity.provider == candidate.provider &&
+                identity.address == candidate.address &&
+                identity.providerAccountId == candidate.providerAccountId
+        }
+    }.distinctBy { candidate ->
+        Triple(candidate.provider, candidate.address, candidate.providerAccountId)
+    }
+    check(candidates.size <= 1) {
+        "Recovery found multiple provider identities for one generated acceptance address"
+    }
+    return candidates.singleOrNull()?.let { account ->
+        GeneratedAccountCleanupIdentity(account, account.providerAccountId)
+    }
+}
 
 @Serializable
 internal data class TreeEntrySnapshot(
@@ -153,16 +225,36 @@ internal class SingleStackAcceptanceEnvironment private constructor(
         }
     }
 
-    fun requireGeneratedAccount(account: AccountInfo): AccountInfo = account.also {
-        require(account.address == run.accountAddress(account.provider)) {
+    fun requireGeneratedAccount(
+        account: AccountInfo,
+        returnedProviderAccountId: String? = null,
+    ): AccountInfo = account.also {
+        require(run.ownsAddress(account.address)) {
             "Account cleanup identity does not belong to this acceptance run"
         }
         when (account.provider) {
-            Provider.DOVECOT -> require(account.providerAccountId == null) {
-                "Generated Dovecot cleanup must not carry a provider Account ID"
+            Provider.DOVECOT -> {
+                require(account.address == run.accountAddress(Provider.DOVECOT)) {
+                    "Generated Dovecot cleanup requires its exact run-owned address"
+                }
+                require(account.providerAccountId == null && returnedProviderAccountId == null) {
+                    "Generated Dovecot cleanup must not carry a provider Account ID"
+                }
             }
-            Provider.STALWART -> require(!account.providerAccountId.isNullOrBlank()) {
-                "Generated Stalwart cleanup requires its exact provider Account ID"
+            Provider.STALWART -> {
+                require(
+                    StalwartAcceptanceProfile.entries.any {
+                        account.address == run.accountAddress(it)
+                    },
+                ) {
+                    "Generated Stalwart cleanup requires an exact profile address"
+                }
+                require(!returnedProviderAccountId.isNullOrBlank()) {
+                    "Generated Stalwart cleanup requires the provider Account ID returned by create"
+                }
+                require(account.providerAccountId == returnedProviderAccountId) {
+                    "Generated Stalwart cleanup identity does not match the returned provider Account ID"
+                }
             }
         }
     }
