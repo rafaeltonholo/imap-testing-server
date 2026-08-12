@@ -147,6 +147,20 @@ class DovecotImapClientTest {
     }
 
     @Test
+    fun readUsesABoundedSixtyFourMebibyteCeilingForPersistedMessages() {
+        val state = RecordingMailboxState()
+
+        client(state).readMessage(
+            credentials(),
+            "INBOX",
+            7,
+            DovecotMailboxState(uidValidity = state.uidValidity),
+        )
+
+        assertEquals(listOf(64 * 1024 * 1024), state.readMaximumBytes)
+    }
+
+    @Test
     fun nativeMoveDoesNotCopyOrMarkMessagesDeleted() {
         val state = RecordingMailboxState(nativeMoveSupported = true)
         val client = client(state)
@@ -243,6 +257,30 @@ class DovecotImapClientTest {
         val folders = client(state).listFolders(credentials())
 
         assertEquals(1_001, folders.size)
+    }
+
+    @Test
+    fun legalPunctuationAndUnicodeMailboxNamesArePreservedForImapOperations() {
+        val state = RecordingMailboxState()
+        val client = client(state)
+        val credentials = credentials()
+        val source = "INBOX.Q&A 🐞"
+        val destination = "INBOX.Client's"
+
+        assertEquals(DovecotFolder(source), client.createFolder(credentials, source))
+        client.listMessages(credentials, source)
+        client.mutate(
+            credentials,
+            DovecotMessageCommand.Copy(
+                source,
+                listOf(7),
+                DovecotMailboxState(uidValidity = state.uidValidity),
+                destination,
+            ),
+        )
+
+        assertEquals(listOf(source, source), state.openedMailboxes)
+        assertEquals(listOf("copy:$destination:7"), state.operations)
     }
 
     @Test
@@ -408,7 +446,9 @@ private class RecordingStore(
     override fun deleteFolder(name: String) = Unit
 
     override fun openFolder(name: String, writable: Boolean): DovecotImapFolder =
-        state.openFailure?.let { throw it } ?: RecordingFolder(state)
+        state.openFailure?.let { throw it } ?: RecordingFolder(state).also {
+            state.openedMailboxes += name
+        }
 
     override fun close() {
         state.storeCloseCount++
@@ -431,6 +471,7 @@ private class RecordingFolder(
         state.readFailure?.let { throw it }
         require(uid == 7L)
         state.readCount++
+        state.readMaximumBytes += maximumBytes
         return "Subject: fixture\r\n\r\nbody"
     }
 
@@ -477,9 +518,11 @@ private data class RecordingMailboxState(
     ),
     val storedMessages: List<DovecotStoredMessage> = listOf(storedMessage()),
     val operations: MutableList<String> = mutableListOf(),
+    val openedMailboxes: MutableList<String> = mutableListOf(),
     var storeCloseCount: Int = 0,
     var folderCloseCount: Int = 0,
     var readCount: Int = 0,
+    val readMaximumBytes: MutableList<Int> = mutableListOf(),
     val folderCloseExpungeArguments: MutableList<Boolean> = mutableListOf(),
 )
 

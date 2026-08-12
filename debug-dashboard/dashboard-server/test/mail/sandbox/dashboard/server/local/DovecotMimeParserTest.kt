@@ -163,5 +163,31 @@ class DovecotMimeParserTest {
         assertTrue(parsed.textBody.orEmpty().contains("part-300"))
     }
 
+    @Test
+    fun skipsAnAttachmentLargerThanTheFormerReaderLimitAndKeepsTheTextBody() {
+        val attachmentPayload = "A".repeat(9 * 1024 * 1024)
+        val raw = lines(
+            "Content-Type: multipart/mixed; boundary=large",
+            "",
+            "--large",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            "visible debugging body",
+            "--large",
+            "Content-Type: application/octet-stream",
+            "Content-Disposition: attachment; filename=fixture.bin",
+            "Content-Transfer-Encoding: base64",
+            "",
+            attachmentPayload,
+            "--large--",
+        )
+
+        val parsed = DovecotMimeParser.parse(raw)
+
+        assertEquals("visible debugging body", parsed.textBody)
+        assertNull(parsed.htmlBody)
+        assertTrue(attachmentPayload !in parsed.textBody.orEmpty())
+    }
+
     private fun lines(vararg values: String): String = values.joinToString("\r\n")
 }

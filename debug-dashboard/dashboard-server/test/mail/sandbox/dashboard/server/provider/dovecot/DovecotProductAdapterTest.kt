@@ -132,10 +132,10 @@ class DovecotProductAdapterTest {
         val adapter = DovecotProductAdapter(RecordingAccountRegistry(), runner)
         val eml = validEml().toByteArray(StandardCharsets.UTF_8)
 
-        adapter.saveRawEmail("alice@local.test", "INBOX.Bug Repro", eml)
+        adapter.saveRawEmail("alice@local.test", "INBOX.Client's & 🐞", eml)
 
         assertEquals(
-            doveadm("save", "-u", "alice@local.test", "-m", "INBOX.Bug Repro"),
+            doveadm("save", "-u", "alice@local.test", "-m", "INBOX.Client's & 🐞"),
             runner.singleRequest().argv,
         )
         assertContentEquals(eml, runner.singleRequest().stdin)

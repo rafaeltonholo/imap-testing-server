@@ -215,7 +215,7 @@ internal class DovecotImapClient(
         folder: String,
     ): List<DovecotMessageSummary> = withFolder(
         credentials = credentials,
-        mailbox = requireMailbox(folder),
+        mailbox = requireDovecotMailbox(folder),
         writable = false,
     ) { selected ->
         val state = DovecotMailboxState(uidValidity = selected.uidValidity)
@@ -241,7 +241,7 @@ internal class DovecotImapClient(
         expectedState: DovecotMailboxState,
     ): String = withFolder(
         credentials = credentials,
-        mailbox = requireMailbox(folder),
+        mailbox = requireDovecotMailbox(folder),
         writable = false,
     ) { selected ->
         if (selected.uidValidity != expectedState.uidValidity) {
@@ -253,7 +253,7 @@ internal class DovecotImapClient(
     }
 
     override fun mutate(credentials: AccountCredentials, command: DovecotMessageCommand) {
-        val mailbox = requireMailbox(command.folder)
+        val mailbox = requireDovecotMailbox(command.folder)
         val uids = requireUids(command.uids)
         withFolder(credentials, mailbox, writable = true) { selected ->
             if (selected.uidValidity != command.expectedState.uidValidity) {
@@ -267,9 +267,9 @@ internal class DovecotImapClient(
                 is DovecotMessageCommand.SetFlagged ->
                     selected.setFlag(uids, "\\Flagged", command.flagged)
                 is DovecotMessageCommand.Copy ->
-                    selected.copy(uids, requireMailbox(command.destination))
+                    selected.copy(uids, requireDovecotMailbox(command.destination))
                 is DovecotMessageCommand.Move ->
-                    move(selected, uids, requireMailbox(command.destination))
+                    move(selected, uids, requireDovecotMailbox(command.destination))
                 is DovecotMessageCommand.Trash ->
                     move(selected, uids, TRASH_MAILBOX)
                 is DovecotMessageCommand.Delete ->
@@ -323,28 +323,7 @@ internal class DovecotImapClient(
         }
     }
 
-    private fun requireMailbox(mailbox: String): String {
-        require(
-            mailbox.length in 1..MAXIMUM_MAILBOX_LENGTH &&
-                (mailbox == "INBOX" || mailbox.startsWith("INBOX.")) &&
-                mailbox == mailbox.trim() &&
-                mailbox.none(Char::isISOControl),
-        ) { "Dovecot mailbox is invalid" }
-        val segments = mailbox.split('.')
-        require(
-            segments.first() == "INBOX" &&
-                segments.drop(1).all { segment ->
-                    segment.isNotEmpty() &&
-                        segment.length <= MAXIMUM_MAILBOX_SEGMENT_LENGTH &&
-                        segment.all { character ->
-                            character.isLetterOrDigit() || character in " -_"
-                        }
-                },
-        ) { "Dovecot mailbox is invalid" }
-        return mailbox
-    }
-
-    private fun requireMutableMailbox(mailbox: String): String = requireMailbox(mailbox).also {
+    private fun requireMutableMailbox(mailbox: String): String = requireDovecotMailbox(mailbox).also {
         require(it != "INBOX") { "INBOX cannot be created or deleted" }
     }
 
@@ -363,9 +342,7 @@ internal class DovecotImapClient(
 
     private companion object {
         const val MAXIMUM_MUTATION_UIDS = 500
-        const val MAXIMUM_RAW_MESSAGE_BYTES = 8 * 1024 * 1024
-        const val MAXIMUM_MAILBOX_LENGTH = 255
-        const val MAXIMUM_MAILBOX_SEGMENT_LENGTH = 64
+        const val MAXIMUM_RAW_MESSAGE_BYTES = 64 * 1024 * 1024
         const val TRASH_MAILBOX = "INBOX.Trash"
     }
 }

@@ -20,6 +20,16 @@ internal data class DovecotAccount(
 
 internal data class DovecotFolder(val name: String)
 
+internal fun requireDovecotMailbox(mailbox: String): String {
+    require(
+        mailbox.length in 1..MAXIMUM_DOVECOT_MAILBOX_LENGTH &&
+            (mailbox == "INBOX" || mailbox.startsWith("INBOX.")) &&
+            mailbox.none(Char::isISOControl) &&
+            mailbox.split('.').none(String::isEmpty),
+    ) { "Dovecot mailbox is invalid" }
+    return mailbox
+}
+
 internal data class DovecotMailboxState(
     val uidValidity: Long,
 ) {
@@ -88,7 +98,7 @@ internal class DovecotProductAdapter(
         requireValidEml(eml)
         execute(
             doveadm(
-                "save", "-u", requireLocalAddress(address), "-m", requireMailbox(mailbox),
+                "save", "-u", requireLocalAddress(address), "-m", requireDovecotMailbox(mailbox),
             ),
             stdin = eml,
             maximumOutputBytes = COMMAND_OUTPUT_BYTES,
@@ -176,29 +186,6 @@ internal class DovecotProductAdapter(
         }
     }
 
-    private fun requireMailbox(mailbox: String): String {
-        require(
-            mailbox.length in 1..MAXIMUM_MAILBOX_LENGTH &&
-                (mailbox == "INBOX" || mailbox.startsWith("INBOX.")) &&
-                mailbox == mailbox.trim() &&
-                mailbox.none(Char::isISOControl),
-        ) {
-            "Dovecot mailbox is invalid"
-        }
-        val segments = mailbox.split('.')
-        require(
-            segments.first() == "INBOX" &&
-                segments.drop(1).all { segment ->
-                    segment.isNotEmpty() &&
-                        segment.length <= MAXIMUM_MAILBOX_SEGMENT_LENGTH &&
-                        segment.all { it.isLetterOrDigit() || it == ' ' || it == '-' || it == '_' }
-                },
-        ) {
-            "Dovecot mailbox is invalid"
-        }
-        return mailbox
-    }
-
     private fun doveadm(vararg arguments: String): List<String> = DOVEADM_PREFIX + arguments
 
     private fun verifyAccountPresent(address: String) {
@@ -274,8 +261,6 @@ internal class DovecotProductAdapter(
         )
         private val COMMAND_TIMEOUT: Duration = Duration.ofSeconds(30)
         private const val LOCAL_DOMAIN = "local.test"
-        private const val MAXIMUM_MAILBOX_LENGTH = 255
-        private const val MAXIMUM_MAILBOX_SEGMENT_LENGTH = 64
         private const val MAXIMUM_PASSWORD_BYTES = 4 * 1024
         private const val MAXIMUM_EML_BYTES = 5 * 1024 * 1024
         private const val COMMAND_OUTPUT_BYTES = 256 * 1024
@@ -287,6 +272,8 @@ internal class DovecotProductAdapter(
         )
     }
 }
+
+private const val MAXIMUM_DOVECOT_MAILBOX_LENGTH = 255
 
 private fun ByteArray.decodeUtf8(): String = StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(CodingErrorAction.REPORT)
