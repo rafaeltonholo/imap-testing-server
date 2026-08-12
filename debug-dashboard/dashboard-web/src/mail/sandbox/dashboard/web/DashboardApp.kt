@@ -1389,6 +1389,7 @@ private fun FolderPane(
             TextButton(
                 onClick = onCreate,
                 enabled = controller.mailActionsEnabled && controller.busyLabel == null,
+                modifier = Modifier.semantics { contentDescription = "Create folder" },
             ) { Text("New") }
         },
     ) {
@@ -1451,7 +1452,13 @@ private fun FolderRow(
             )
         }
         if (!folder.isInbox()) {
-            TextButton(onClick = onDelete, enabled = canDelete) {
+            TextButton(
+                onClick = onDelete,
+                enabled = canDelete,
+                modifier = Modifier.semantics {
+                    contentDescription = "Delete folder ${folder.name}"
+                },
+            ) {
                 Text("Delete")
             }
         }
@@ -1689,7 +1696,11 @@ private fun ColumnScope.MessageReader(
                     )
                 },
             )
-            OperationButton("Trash", enabled = mailActionsEnabled && !busy) {
+            OperationButton(
+                label = "Trash",
+                enabled = mailActionsEnabled && !busy,
+                semanticLabel = "Trash message",
+            ) {
                 onAction(MessageAction.TRASH, null)
             }
             TextButton(
@@ -1719,6 +1730,7 @@ private fun ColumnScope.MessageReader(
                         label = folder.name,
                         selected = selectedDestination == folder.id,
                         onClick = { onDestinationChanged(folder.id) },
+                        semanticLabel = "Message destination ${folder.name}",
                     )
                 }
             }
@@ -1740,9 +1752,16 @@ private fun ColumnScope.MessageReader(
 private fun OperationButton(
     label: String,
     enabled: Boolean,
+    semanticLabel: String? = null,
     onClick: () -> Unit,
 ) {
-    OutlinedButton(onClick = onClick, enabled = enabled) { Text(label) }
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.semantics {
+            semanticLabel?.let { contentDescription = it }
+        },
+    ) { Text(label) }
 }
 
 @Composable
@@ -2039,6 +2058,7 @@ private fun SelectionButton(
     onClick: () -> Unit,
     compact: Boolean = false,
     enabled: Boolean = true,
+    semanticLabel: String? = null,
 ) {
     OutlinedButton(
         onClick = onClick,
@@ -2050,7 +2070,10 @@ private fun SelectionButton(
         border = BorderStroke(1.dp, InstrumentGraphite),
         modifier = Modifier
             .height(if (compact) 32.dp else 38.dp)
-            .semantics { this.selected = selected },
+            .semantics {
+                this.selected = selected
+                semanticLabel?.let { contentDescription = it }
+            },
         contentPadding = if (compact) ButtonDefaults.TextButtonContentPadding else ButtonDefaults.ContentPadding,
     ) {
         Text(label, fontSize = if (compact) 11.sp else 13.sp)
@@ -2567,6 +2590,7 @@ private fun FolderDialog(
                     onValueChange = { name = it },
                     label = { Text("Folder name") },
                     singleLine = true,
+                    modifier = Modifier.semantics { contentDescription = "Folder name" },
                 )
             }
         },
@@ -2762,14 +2786,20 @@ private fun GenerateMessageDialog(
                         label = { Text("Raw .eml / RFC 5322 content") },
                         supportingText = { Text("Paste the complete headers and body.") },
                         minLines = 10,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                contentDescription = "Raw .eml / RFC 5322 content"
+                            },
                     )
                     MessageSourceType.TEXT -> OutlinedTextField(
                         value = content,
                         onValueChange = { content = it },
                         label = { Text("Plain-text body") },
                         minLines = 7,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = "Plain-text body" },
                     )
                     MessageSourceType.RANDOM -> OutlinedTextField(
                         value = seed,
@@ -2780,7 +2810,11 @@ private fun GenerateMessageDialog(
                         supportingText = {
                             Text(if (seedValid) "Reuse a seed to reproduce the same fixture data." else "Seed must be a whole number.")
                         },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                contentDescription = "Deterministic seed (optional)"
+                            },
                     )
                 }
             }
