@@ -4911,12 +4911,56 @@ def _strict_object(
     return value
 
 
+def _current_network_public_url(repository: Path) -> str:
+    try:
+        network = _load_sibling_module(
+            "stalwart_network.py",
+            "_mail_sandbox_stalwart_network_bootstrap",
+        )
+        load_network_configuration = getattr(
+            network,
+            "load_network_configuration",
+        )
+        network_error = getattr(network, "NetworkConfigurationError")
+        if (
+            not callable(load_network_configuration)
+            or not isinstance(network_error, type)
+        ):
+            raise BootstrapError(
+                "current Stalwart network configuration is unavailable",
+            )
+        configuration = load_network_configuration(repository)
+    except BootstrapError:
+        raise
+    except Exception:
+        raise BootstrapError(
+            "current Stalwart network configuration is invalid",
+        ) from None
+    public_url = getattr(configuration, "public_url", None)
+    expected_path = (
+        repository
+        / "debug-dashboard"
+        / ".runtime"
+        / "stalwart"
+        / "network.env"
+    )
+    if (
+        type(public_url) is not str
+        or getattr(configuration, "environment_path", None) != expected_path
+    ):
+        raise BootstrapError(
+            "current Stalwart network configuration is malformed",
+        )
+    return public_url
+
+
 def _validate_fresh_compose_model(
     data: bytes,
     *,
     repository: Path,
     current_image: str,
 ) -> None:
+    public_url = _current_network_public_url(repository)
     value = _strict_json_model(data)
     project = value.get("name")
     if (
@@ -4938,7 +4982,7 @@ def _validate_fresh_compose_model(
                 "container_name": "stalwart-dev",
                 "entrypoint": None,
                 "environment": {
-                    "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
+                    "STALWART_PUBLIC_URL": public_url,
                 },
                 "healthcheck": {
                     "test": [
@@ -4956,14 +5000,14 @@ def _validate_fresh_compose_model(
                 "networks": {"default": None},
                 "ports": [
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8443",
                         "target": 8080,
                     },
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8587",
@@ -5226,19 +5270,58 @@ class _ProductionFreshRuntime:
         account_id = self._protected_account_id(repository)
         for attempt in range(30):
             try:
-                credential = self._registry.BasicCredential(
-                    MANAGEMENT_ADDRESS,
-                    FRESH_RECOVERY_PASSWORD,
-                )
-                client = self._registry.RegistryClient(
-                    credential,
-                    expected_username=MANAGEMENT_ADDRESS,
-                    expected_account_id=account_id,
-                    timeout_seconds=5.0,
-                )
-                with client:
-                    session = client.discover()
-                    if getattr(session, "account_id", None) != account_id:
+                if phase == "recovery":
+                    credential = self._registry.BasicCredential(
+                        MANAGEMENT_ADDRESS,
+                        FRESH_RECOVERY_PASSWORD,
+                    )
+                    client = self._registry.RegistryClient(
+                        credential,
+                        expected_username=MANAGEMENT_ADDRESS,
+                        expected_account_id=account_id,
+                        timeout_seconds=5.0,
+                    )
+                    with client:
+                        session = client.discover()
+                        if getattr(session, "account_id", None) != account_id:
+                            raise BootstrapError(
+                                "fresh JMAP identity proof is malformed",
+                            )
+                else:
+                    probe = getattr(
+                        self._migration,
+                        "run_fixed_normal_basic_jmap_auth_probe",
+                        None,
+                    )
+                    if not callable(probe):
+                        raise BootstrapError(
+                            "fresh normal JMAP proof is unavailable",
+                        )
+                    raw = bytearray(
+                        (
+                            f"{MANAGEMENT_ADDRESS}:"
+                            f"{FRESH_RECOVERY_PASSWORD}"
+                        ).encode("ascii"),
+                    )
+                    view = memoryview(raw).toreadonly()
+                    try:
+                        result = probe(
+                            view,
+                            expected_api_url=(
+                                f"{_current_network_public_url(repository)}"
+                                "/jmap/"
+                            ),
+                        )
+                    finally:
+                        view.release()
+                        for index in range(len(raw)):
+                            raw[index] = 0
+                    if (
+                        getattr(result, "status", None) != 200
+                        or getattr(result, "account_id", None) != account_id
+                        or getattr(result, "username", None)
+                        != MANAGEMENT_ADDRESS
+                    ):
                         raise BootstrapError(
                             "fresh JMAP identity proof is malformed",
                         )

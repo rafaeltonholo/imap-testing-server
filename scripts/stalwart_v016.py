@@ -152,8 +152,12 @@ MIGRATION_RECOVERY_CONTAINER_INSPECT_FORMAT = (
     ',"Cmd":{{json .Config.Cmd}}'
     ',"Restart":{{json .HostConfig.RestartPolicy.Name}}}'
 )
-NORMAL_RUNTIME_BASE_URL = "http://127.0.0.1:8443"
-NORMAL_RUNTIME_API_URL = "http://127.0.0.1:8443/jmap/"
+NORMAL_RUNTIME_TRANSPORT_BASE_URL = "http://127.0.0.1:8443"
+NORMAL_RUNTIME_TRANSPORT_API_URL = "http://127.0.0.1:8443/jmap/"
+# Receipt metadata continues to describe only the fixed host-side transport;
+# the DHCP-sensitive advertised URL is validated live and never serialized.
+NORMAL_RUNTIME_BASE_URL = NORMAL_RUNTIME_TRANSPORT_BASE_URL
+NORMAL_RUNTIME_API_URL = NORMAL_RUNTIME_TRANSPORT_API_URL
 DASHBOARD_MANAGEMENT_USERNAME = "dashboard-management@local.test"
 DASHBOARD_MANAGEMENT_PASSWORD = "secret"
 NORMAL_RUNTIME_SMTP_HOST = "127.0.0.1"
@@ -168,9 +172,10 @@ NORMAL_RUNTIME_ENVIRONMENT = frozenset(
             "STALWART_HEALTHCHECK_URL="
             "https://127.0.0.1:443/healthz/live"
         ),
-        "STALWART_PUBLIC_URL=http://127.0.0.1:8443",
     },
 )
+_NETWORK_MODULE_NAME = "_mail_sandbox_stalwart_network_v016"
+_NETWORK_MODULE: object | None = None
 NORMAL_CONTAINER_INSPECT_FORMAT = (
     '{"Id":{{json .Id}}'
     ',"Image":{{json .Config.Image}}'
@@ -1025,10 +1030,93 @@ def _valid_jmap_probe_credential_view(
     return True
 
 
+def _normal_runtime_public_url(repository: Path) -> str:
+    """Read the current LAN URL through the strict generated-state loader."""
+    global _NETWORK_MODULE
+    if _NETWORK_MODULE is None:
+        path = Path(__file__).resolve().with_name("stalwart_network.py")
+        try:
+            specification = importlib.util.spec_from_file_location(
+                _NETWORK_MODULE_NAME,
+                path,
+            )
+            if specification is None or specification.loader is None:
+                raise ImportError("network loader is unavailable")
+            module = importlib.util.module_from_spec(specification)
+            sys.modules[_NETWORK_MODULE_NAME] = module
+            try:
+                specification.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(_NETWORK_MODULE_NAME, None)
+                raise
+            _NETWORK_MODULE = module
+        except (OSError, ImportError):
+            raise MigrationError(
+                "normal runtime network configuration is unavailable",
+            ) from None
+    load = getattr(_NETWORK_MODULE, "load_network_configuration", None)
+    network_error = getattr(
+        _NETWORK_MODULE,
+        "NetworkConfigurationError",
+        None,
+    )
+    if not callable(load) or not isinstance(network_error, type):
+        raise MigrationError(
+            "normal runtime network configuration is unavailable",
+        )
+    try:
+        configuration = load(repository)
+    except (network_error, ValueError, OSError):
+        raise MigrationError(
+            "normal runtime network configuration is invalid",
+        ) from None
+    public_url = getattr(configuration, "public_url", None)
+    environment_path = getattr(configuration, "environment_path", None)
+    expected_path = (
+        repository
+        / "debug-dashboard"
+        / ".runtime"
+        / "stalwart"
+        / "network.env"
+    )
+    if type(public_url) is not str or environment_path != expected_path:
+        raise MigrationError(
+            "normal runtime network configuration is invalid",
+        )
+    return public_url
+
+
+def _normal_runtime_environment(public_url: str) -> frozenset[str]:
+    if (
+        type(public_url) is not str
+        or re.fullmatch(r"http://[A-Za-z0-9.-]+:8443", public_url) is None
+        or public_url.startswith("http://127.")
+        or public_url in {
+            "http://0.0.0.0:8443",
+            "http://localhost:8443",
+        }
+    ):
+        raise MigrationError("normal runtime public URL is malformed")
+    return frozenset(
+        {
+            *NORMAL_RUNTIME_ENVIRONMENT,
+            f"STALWART_PUBLIC_URL={public_url}",
+        },
+    )
+
+
+def _normal_runtime_expected_api_url(
+    plan: RecoveryRetirementPlan,
+) -> str:
+    source = _normal_runtime_plan_context(plan)
+    return f"{_normal_runtime_public_url(source.checkout_root)}/jmap/"
+
+
 def _fixed_jmap_auth_exchange(
     credential: bytearray,
     *,
     scheme: str,
+    expected_api_url: str = NORMAL_RUNTIME_TRANSPORT_API_URL,
     connection_factory: object = http.client.HTTPConnection,
 ) -> dict[str, object]:
     """Child-only fixed JMAP exchange returning sanitized session metadata."""
@@ -1036,6 +1124,12 @@ def _fixed_jmap_auth_exchange(
         type(credential) is not bytearray
         or not callable(connection_factory)
         or scheme not in {"bearer", "basic"}
+        or type(expected_api_url) is not str
+        or re.fullmatch(
+            r"http://[A-Za-z0-9.-]+:8443/jmap/",
+            expected_api_url,
+        )
+        is None
     ):
         raise MigrationError("fixed JMAP authentication probe is malformed")
     view = memoryview(credential).toreadonly()
@@ -1225,7 +1319,7 @@ def _fixed_jmap_auth_exchange(
             type(username) is not str
             or not 1 <= len(username) <= 255
             or any(ord(item) < 0x21 or ord(item) > 0x7E for item in username)
-            or api_url != NORMAL_RUNTIME_API_URL
+            or api_url != expected_api_url
             or type(capabilities) is not dict
             or type(capabilities.get(JMAP_CORE_CAPABILITY)) is not dict
             or type(capabilities.get(JMAP_STALWART_CAPABILITY)) is not dict
@@ -1343,7 +1437,11 @@ def _validated_jmap_auth_probe_output(
     )
 
 
-def _fixed_jmap_auth_probe_child(scheme: str, size_text: str) -> int:
+def _fixed_jmap_auth_probe_child(
+    scheme: str,
+    size_text: str,
+    expected_api_url: str,
+) -> int:
     credential = bytearray()
     try:
         if (
@@ -1366,6 +1464,7 @@ def _fixed_jmap_auth_probe_child(scheme: str, size_text: str) -> int:
         result = _fixed_jmap_auth_exchange(
             credential,
             scheme=scheme,
+            expected_api_url=expected_api_url,
         )
         output = json.dumps(
             result,
@@ -1388,9 +1487,18 @@ def _run_fixed_jmap_auth_probe(
     *,
     scheme: str,
     authenticated: bool,
+    expected_api_url: str = NORMAL_RUNTIME_TRANSPORT_API_URL,
 ) -> JmapAuthProbe:
     """Pipe one mutable credential to the fixed short-lived JMAP child."""
-    if not _valid_jmap_probe_credential_view(credential, scheme=scheme):
+    if (
+        not _valid_jmap_probe_credential_view(credential, scheme=scheme)
+        or type(expected_api_url) is not str
+        or re.fullmatch(
+            r"http://[A-Za-z0-9.-]+:8443/jmap/",
+            expected_api_url,
+        )
+        is None
+    ):
         raise CommandError("fixed JMAP authentication probe is malformed")
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -1401,6 +1509,7 @@ def _run_fixed_jmap_auth_probe(
                 JMAP_AUTH_PROBE_MODE,
                 scheme,
                 str(len(credential)),
+                expected_api_url,
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1461,6 +1570,7 @@ def run_fixed_jmap_auth_probe(
     credential: memoryview,
     *,
     scheme: str,
+    expected_api_url: str = NORMAL_RUNTIME_TRANSPORT_API_URL,
 ) -> JmapAuthProbe:
     """Probe the API-key success or retired-recovery rejection contract."""
     # The shared child dispatcher is pinned by JMAP_AUTH_PROBE_MODE.
@@ -1468,17 +1578,21 @@ def run_fixed_jmap_auth_probe(
         credential,
         scheme=scheme,
         authenticated=scheme == "bearer",
+        expected_api_url=expected_api_url,
     )
 
 
 def run_fixed_normal_basic_jmap_auth_probe(
     credential: memoryview,
+    *,
+    expected_api_url: str = NORMAL_RUNTIME_TRANSPORT_API_URL,
 ) -> JmapAuthProbe:
     """Prove the fixed normal management Password over Basic JMAP."""
     return _run_fixed_jmap_auth_probe(
         credential,
         scheme="basic",
         authenticated=True,
+        expected_api_url=expected_api_url,
     )
 
 
@@ -6039,6 +6153,7 @@ def _validate_normal_compose_model(
 ) -> None:
     """Require the rendered base service to equal the approved normal model."""
     source = _normal_runtime_plan_context(plan)
+    public_url = _normal_runtime_public_url(source.checkout_root)
     if type(stdout) is not bytes or not stdout or len(stdout) > 1024 * 1024:
         raise MigrationError("normal runtime Compose model is malformed")
     try:
@@ -6070,7 +6185,7 @@ def _validate_normal_compose_model(
                 "container_name": "stalwart-dev",
                 "entrypoint": None,
                 "environment": {
-                    "STALWART_PUBLIC_URL": NORMAL_RUNTIME_BASE_URL,
+                    "STALWART_PUBLIC_URL": public_url,
                 },
                 "healthcheck": {
                     "test": [
@@ -6088,14 +6203,14 @@ def _validate_normal_compose_model(
                 "networks": {"default": None},
                 "ports": [
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8443",
                         "target": 8080,
                     },
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8587",
@@ -6342,6 +6457,7 @@ def _validate_normal_container_inspection(
         if revalidate_plan
         else _frozen_normal_runtime_plan_context(plan)
     )
+    public_url = _normal_runtime_public_url(source.checkout_root)
     if (
         type(container_id) is not str
         or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
@@ -6414,13 +6530,13 @@ def _validate_normal_container_inspection(
         != {
             "8080/tcp": [
                 {
-                    "HostIp": "127.0.0.1",
+                    "HostIp": "0.0.0.0",
                     "HostPort": "8443",
                 },
             ],
             "587/tcp": [
                 {
-                    "HostIp": "127.0.0.1",
+                    "HostIp": "0.0.0.0",
                     "HostPort": "8587",
                 },
             ],
@@ -6492,7 +6608,7 @@ def _validate_normal_container_inspection(
             re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", name) is None
             for name in environment_names
         )
-        or frozenset(environment) != NORMAL_RUNTIME_ENVIRONMENT
+        or frozenset(environment) != _normal_runtime_environment(public_url)
         or recovery_names
     ):
         raise MigrationError(
@@ -6660,6 +6776,7 @@ def _invoke_retirement_jmap_probe(
     credential: memoryview,
     *,
     scheme: str,
+    expected_api_url: str,
 ) -> JmapAuthProbe:
     if not callable(probe):
         raise MigrationError(
@@ -6668,7 +6785,11 @@ def _invoke_retirement_jmap_probe(
     failed = False
     result: object = None
     try:
-        result = probe(credential, scheme=scheme)
+        result = probe(
+            credential,
+            scheme=scheme,
+            expected_api_url=expected_api_url,
+        )
     except Exception:
         failed = True
     if failed or type(result) is not JmapAuthProbe:
@@ -6681,6 +6802,8 @@ def _invoke_retirement_jmap_probe(
 def _invoke_retirement_basic_jmap_probe(
     probe: object,
     credential: memoryview,
+    *,
+    expected_api_url: str,
 ) -> JmapAuthProbe:
     if not callable(probe):
         raise MigrationError(
@@ -6689,7 +6812,10 @@ def _invoke_retirement_basic_jmap_probe(
     failed = False
     result: object = None
     try:
-        result = probe(credential)
+        result = probe(
+            credential,
+            expected_api_url=expected_api_url,
+        )
     except Exception:
         failed = True
     if failed or type(result) is not JmapAuthProbe:
@@ -6721,6 +6847,7 @@ def _prove_normal_management_password(
     *,
     basic_jmap_probe: object,
     smtp_probe: object,
+    expected_api_url: str,
 ) -> None:
     credential = bytearray(
         (
@@ -6734,6 +6861,7 @@ def _prove_normal_management_password(
         basic = _invoke_retirement_basic_jmap_probe(
             basic_jmap_probe,
             view,
+            expected_api_url=expected_api_url,
         )
         if (
             basic.status != 200
@@ -6754,6 +6882,8 @@ def _prove_normal_management_key(
     paths: MigrationPaths,
     plan: RecoveryRetirementPlan,
     jmap_probe: object,
+    *,
+    expected_api_url: str,
 ) -> None:
     management_key = bytearray()
     management_view: memoryview | None = None
@@ -6764,6 +6894,7 @@ def _prove_normal_management_key(
             jmap_probe,
             management_view,
             scheme="bearer",
+            expected_api_url=expected_api_url,
         )
     finally:
         if management_view is not None:
@@ -6782,6 +6913,8 @@ def _prove_normal_management_key(
 def _prove_recovery_credential_rejected(
     recovery_credential: RecoveryCredentialLease,
     jmap_probe: object,
+    *,
+    expected_api_url: str,
 ) -> int:
     recovery_view = recovery_credential.borrow()
     try:
@@ -6789,6 +6922,7 @@ def _prove_recovery_credential_rejected(
             jmap_probe,
             recovery_view,
             scheme="basic",
+            expected_api_url=expected_api_url,
         )
     finally:
         recovery_view.release()
@@ -6811,7 +6945,8 @@ def _normal_runtime_writer_census(
     runner: object,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return exact writable-store and migration-container identities."""
-    _normal_runtime_plan_context(plan)
+    source = _normal_runtime_plan_context(plan)
+    public_url = _normal_runtime_public_url(source.checkout_root)
     if (
         not callable(runner)
         or type(expected_container_id) is not str
@@ -6986,7 +7121,7 @@ def _normal_runtime_writer_census(
                 != str(plan.source.base_compose)
                 or labels.get("com.docker.compose.oneoff") != "False"
                 or frozenset(environment)
-                != NORMAL_RUNTIME_ENVIRONMENT
+                != _normal_runtime_environment(public_url)
             ):
                 raise MigrationError(
                     "normal runtime writer census is malformed",
@@ -7201,15 +7336,18 @@ class RecoveryRetirementExecutor:
                 self._paths,
                 plan,
                 self._jmap_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             _prove_normal_management_password(
                 plan,
                 basic_jmap_probe=self._basic_jmap_probe_runner,
                 smtp_probe=self._smtp_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             old_recovery_status = _prove_recovery_credential_rejected(
                 recovery_credential,
                 self._jmap_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
 
             if _validate_receipt_bound_normal_config(plan) != normal_config:
@@ -7262,16 +7400,19 @@ class RecoveryRetirementExecutor:
                 self._paths,
                 plan,
                 self._jmap_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             _prove_normal_management_password(
                 plan,
                 basic_jmap_probe=self._basic_jmap_probe_runner,
                 smtp_probe=self._smtp_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             restarted_recovery_status = (
                 _prove_recovery_credential_rejected(
                     recovery_credential,
                     self._jmap_probe_runner,
+                    expected_api_url=_normal_runtime_expected_api_url(plan),
                 )
             )
             if restarted_recovery_status != old_recovery_status:
@@ -7440,11 +7581,13 @@ class RecoveryRetirementPostflightVerifier:
                 self._paths,
                 plan,
                 self._jmap_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             _prove_normal_management_password(
                 plan,
                 basic_jmap_probe=self._basic_jmap_probe_runner,
                 smtp_probe=self._smtp_probe_runner,
+                expected_api_url=_normal_runtime_expected_api_url(plan),
             )
             writer_ids, migration_ids = _normal_runtime_writer_census(
                 self._paths,
@@ -14845,8 +14988,12 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == JMAP_AUTH_PROBE_MODE:
         jmap_probe_exit = (
-            _fixed_jmap_auth_probe_child(sys.argv[2], sys.argv[3])
-            if len(sys.argv) == 4
+            _fixed_jmap_auth_probe_child(
+                sys.argv[2],
+                sys.argv[3],
+                sys.argv[4],
+            )
+            if len(sys.argv) == 5
             else 1
         )
         raise SystemExit(jmap_probe_exit)

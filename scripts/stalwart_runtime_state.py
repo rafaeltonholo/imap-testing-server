@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from enum import Enum
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -77,14 +78,14 @@ CURRENT_SERVICE_MODEL = (
     "    ports:",
     "      - target: 8080",
     '        published: "8443"',
-    "        host_ip: 127.0.0.1",
+    "        host_ip: 0.0.0.0",
     "        protocol: tcp",
     "      - target: 587",
     '        published: "8587"',
-    "        host_ip: 127.0.0.1",
+    "        host_ip: 0.0.0.0",
     "        protocol: tcp",
-    "    environment:",
-    "      STALWART_PUBLIC_URL: http://127.0.0.1:8443",
+    "    env_file:",
+    "      - ./debug-dashboard/.runtime/stalwart/network.env",
     "    volumes:",
     "      - type: bind",
     "        source: ./stalwart",
@@ -109,6 +110,9 @@ CURRENT_SERVICE_MODEL = (
     "      retries: 30",
     "      start_period: 2s",
 )
+
+_NETWORK_MODULE_NAME = "_mail_sandbox_stalwart_network_runtime_state"
+_NETWORK_MODULE: object | None = None
 
 
 class RuntimeState(Enum):
@@ -340,6 +344,51 @@ def _compose_kind(repository: Path) -> tuple[str, str] | None:
     return None
 
 
+def _current_network_configuration(repository: Path) -> object | None:
+    """Load the current owner-only LAN state through its strict helper."""
+    global _NETWORK_MODULE
+    if _NETWORK_MODULE is None:
+        path = Path(__file__).resolve().with_name("stalwart_network.py")
+        try:
+            specification = importlib.util.spec_from_file_location(
+                _NETWORK_MODULE_NAME,
+                path,
+            )
+            if specification is None or specification.loader is None:
+                return None
+            module = importlib.util.module_from_spec(specification)
+            sys.modules[_NETWORK_MODULE_NAME] = module
+            try:
+                specification.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(_NETWORK_MODULE_NAME, None)
+                raise
+            _NETWORK_MODULE = module
+        except (OSError, ImportError):
+            return None
+    load = getattr(_NETWORK_MODULE, "load_network_configuration", None)
+    error = getattr(_NETWORK_MODULE, "NetworkConfigurationError", None)
+    if not callable(load) or not isinstance(error, type):
+        return None
+    try:
+        configuration = load(repository)
+    except (error, ValueError, OSError):
+        return None
+    public_url = getattr(configuration, "public_url", None)
+    environment_path = getattr(configuration, "environment_path", None)
+    if (
+        type(public_url) is not str
+        or environment_path
+        != repository
+        / "debug-dashboard"
+        / ".runtime"
+        / "stalwart"
+        / "network.env"
+    ):
+        return None
+    return configuration
+
+
 def _store_identity(metadata: os.stat_result) -> list[int]:
     return [
         metadata.st_dev,
@@ -461,6 +510,8 @@ def classify_repository(repository: Path) -> RuntimeState:
         if not receipt_present:
             return RuntimeState.MIGRATION_REQUIRED
         return RuntimeState.INVALID
+    if _current_network_configuration(root) is None:
+        return RuntimeState.INVALID
     if receipt_parent_state != "plain":
         return RuntimeState.INVALID
     config = _plain_regular(root / "stalwart" / "config.json", 1024)
@@ -520,6 +571,7 @@ def _publish_current_receipt(
         or not marker_is_acceptable
         or compose is None
         or compose[0] != "current"
+        or _current_network_configuration(root) is None
         or config is None
         or config[0] != CURRENT_CONFIG_BYTES
     ):

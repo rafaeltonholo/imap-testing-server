@@ -56,14 +56,14 @@ def current_compose_text() -> str:
     ports:
       - target: 8080
         published: "8443"
-        host_ip: 127.0.0.1
+        host_ip: 0.0.0.0
         protocol: tcp
       - target: 587
         published: "8587"
-        host_ip: 127.0.0.1
+        host_ip: 0.0.0.0
         protocol: tcp
-    environment:
-      STALWART_PUBLIC_URL: http://127.0.0.1:8443
+    env_file:
+      - ./debug-dashboard/.runtime/stalwart/network.env
     volumes:
       - type: bind
         source: ./stalwart
@@ -88,6 +88,21 @@ def current_compose_text() -> str:
       retries: 30
       start_period: 2s
 """
+
+
+def write_network_environment(
+    root: Path,
+    public_url: str = "http://192.168.86.36:8443",
+) -> Path:
+    runtime = root / "debug-dashboard" / ".runtime"
+    directory = runtime / "stalwart"
+    directory.mkdir(parents=True, exist_ok=True)
+    runtime.chmod(0o700)
+    directory.chmod(0o700)
+    target = directory / "network.env"
+    target.write_bytes(f"STALWART_PUBLIC_URL={public_url}\n".encode("ascii"))
+    target.chmod(0o600)
+    return target
 
 
 def legacy_compose_text() -> str:
@@ -125,6 +140,7 @@ def prepare_current_repository(root: Path) -> Path:
     (root / "debug-dashboard" / ".runtime" / "stalwart").mkdir(
         parents=True,
     )
+    write_network_environment(root)
     (root / "stalwart" / "config.json").write_bytes(CONFIG_BYTES)
     (root / "docker-compose.yml").write_text(
         current_compose_text(),
@@ -198,6 +214,7 @@ class RuntimeStateClassificationTest(unittest.TestCase):
         (self.root / "debug-dashboard" / ".runtime" / "stalwart").mkdir(
             parents=True,
         )
+        write_network_environment(self.root)
         (self.root / "stalwart" / "config.json").write_bytes(CONFIG_BYTES)
 
     def test_root_failure_intent_is_ignored_by_git(self) -> None:
@@ -260,6 +277,16 @@ class RuntimeStateClassificationTest(unittest.TestCase):
             runtime_state.RuntimeState.MIGRATION_REQUIRED,
         )
 
+    def test_real_root_remains_the_exact_legacy_hold_before_authorization(self) -> None:
+        self.assertEqual(
+            runtime_state._compose_kind(REPOSITORY_ROOT)[0],
+            "legacy",
+        )
+        self.assertEqual(
+            runtime_state.classify_repository(REPOSITORY_ROOT),
+            runtime_state.RuntimeState.MIGRATION_REQUIRED,
+        )
+
     def test_legacy_model_under_an_extension_is_invalid(self) -> None:
         self.write_compose_content(
             under_shadow_parent(legacy_compose_text()),
@@ -295,7 +322,13 @@ class RuntimeStateClassificationTest(unittest.TestCase):
         self.make_nonempty_store()
 
         self.assertIsNotNone(runtime_state._compose_kind(self.root))
-        runtime_state.publish_current_receipt(self.root)
+        receipt = runtime_state.publish_current_receipt(self.root)
+
+        envelope = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "http://192.168.86.36:8443",
+            json.dumps(envelope["payload"], sort_keys=True),
+        )
 
         self.assertEqual(
             runtime_state.classify_repository(self.root),
@@ -341,18 +374,18 @@ class RuntimeStateClassificationTest(unittest.TestCase):
     ) -> None:
         canonical = current_compose_text()
         contradictions = {
-            "broad-port": canonical.replace(
-                "        host_ip: 127.0.0.1\n",
+            "loopback-port": canonical.replace(
                 "        host_ip: 0.0.0.0\n",
+                "        host_ip: 127.0.0.1\n",
                 1,
             ),
             "extra-port": canonical.replace(
-                "    environment:\n",
+                "    env_file:\n",
                 "      - target: 25\n"
                 "        published: \"8025\"\n"
                 "        host_ip: 127.0.0.1\n"
                 "        protocol: tcp\n"
-                "    environment:\n",
+                "    env_file:\n",
             ),
             "extra-mount": canonical.replace(
                 "    healthcheck:\n",
@@ -364,10 +397,9 @@ class RuntimeStateClassificationTest(unittest.TestCase):
                 "          create_host_path: false\n"
                 "    healthcheck:\n",
             ),
-            "extra-environment": canonical.replace(
-                "      STALWART_PUBLIC_URL: http://127.0.0.1:8443\n",
-                "      STALWART_PUBLIC_URL: http://127.0.0.1:8443\n"
-                "      EXTRA: value\n",
+            "replaced-env-file": canonical.replace(
+                "      - ./debug-dashboard/.runtime/stalwart/network.env\n",
+                "      - ./debug-dashboard/.runtime/stalwart/replaced.env\n",
             ),
             "network-mode": canonical.replace(
                 "    restart: unless-stopped\n",
@@ -393,6 +425,35 @@ class RuntimeStateClassificationTest(unittest.TestCase):
                     receipt.unlink()
                     with self.assertRaises(ValueError):
                         runtime_state.publish_current_receipt(root)
+
+    def test_current_requires_the_strict_current_network_environment(self) -> None:
+        cases = {
+            "missing": None,
+            "invalid": b"STALWART_PUBLIC_URL=http://127.0.0.1:8443\n",
+            "extra": (
+                b"STALWART_PUBLIC_URL=http://192.168.86.36:8443\n"
+                b"EXTRA=value\n"
+            ),
+        }
+        for label, content in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                prepare_current_repository(root)
+                network_file = (
+                    root / "debug-dashboard" / ".runtime" / "stalwart" / "network.env"
+                )
+                if content is None:
+                    network_file.unlink()
+                else:
+                    network_file.write_bytes(content)
+                    network_file.chmod(0o600)
+
+                self.assertEqual(
+                    runtime_state.classify_repository(root),
+                    runtime_state.RuntimeState.INVALID,
+                )
+                with self.assertRaises(ValueError):
+                    runtime_state.publish_current_receipt(root)
 
     def test_current_model_must_be_a_direct_child_of_services(self) -> None:
         self.write_compose(CURRENT_IMAGE)

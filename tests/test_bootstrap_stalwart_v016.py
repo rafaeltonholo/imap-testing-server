@@ -459,6 +459,11 @@ class TemporaryRepository:
             runtime / "stalwart-migration",
         ):
             directory.chmod(0o700)
+        write_file(
+            runtime / "stalwart" / "network.env",
+            b"STALWART_PUBLIC_URL=http://192.168.86.36:8443\n",
+            0o600,
+        )
 
     def close(self) -> None:
         self._temporary.cleanup()
@@ -4410,13 +4415,23 @@ class FreshInitializationTest(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
+            runtime = root / "debug-dashboard" / ".runtime"
+            network_directory = runtime / "stalwart"
+            network_directory.mkdir(parents=True)
+            runtime.chmod(0o700)
+            network_directory.chmod(0o700)
+            write_file(
+                network_directory / "network.env",
+                b"STALWART_PUBLIC_URL=http://192.168.86.36:8443\n",
+                0o600,
+            )
             service = {
                 "command": None,
                 "container_name": "stalwart-dev",
                 "entrypoint": None,
                 "environment": {
-                    "STALWART_PUBLIC_URL": "http://127.0.0.1:8443",
+                    "STALWART_PUBLIC_URL": "http://192.168.86.36:8443",
                 },
                 "healthcheck": {
                     "test": [
@@ -4434,14 +4449,14 @@ class FreshInitializationTest(unittest.TestCase):
                 "networks": {"default": None},
                 "ports": [
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8443",
                         "target": 8080,
                     },
                     {
-                        "host_ip": "127.0.0.1",
+                        "host_ip": "0.0.0.0",
                         "mode": "ingress",
                         "protocol": "tcp",
                         "published": "8587",
@@ -4489,8 +4504,8 @@ class FreshInitializationTest(unittest.TestCase):
                     {"image": "stalwartlabs/stalwart:latest"},
                 ),
                 "missing-smtp": lambda value: value["ports"].pop(),
-                "broad-jmap": lambda value: value["ports"][0].update(
-                    {"host_ip": "0.0.0.0"},
+                "loopback-jmap": lambda value: value["ports"][0].update(
+                    {"host_ip": "127.0.0.1"},
                 ),
                 "wrong-store": lambda value: value["volumes"][1].update(
                     {"source": str(root / "copy")},
@@ -4550,6 +4565,107 @@ class FreshInitializationTest(unittest.TestCase):
                     current_image=self.CURRENT_IMAGE,
                 )
 
+            (network_directory / "network.env").write_bytes(
+                b"STALWART_PUBLIC_URL=http://192.168.86.37:8443\n",
+            )
+            (network_directory / "network.env").chmod(0o600)
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap._validate_fresh_compose_model(
+                    json.dumps(
+                        {
+                            "name": "fresh-project",
+                            "networks": {
+                                "default": {
+                                    "name": "fresh-project_default",
+                                    "ipam": {},
+                                },
+                            },
+                            "services": {"stalwart": service},
+                        },
+                    ).encode(),
+                    repository=root,
+                    current_image=self.CURRENT_IMAGE,
+                )
+
+    def test_normal_proof_uses_loopback_transport_and_current_lan_api_url(
+        self,
+    ) -> None:
+        events: list[object] = []
+
+        def jmap_probe(
+            credential: memoryview,
+            *,
+            expected_api_url: str,
+        ) -> object:
+            events.append(
+                (
+                    "jmap",
+                    bytes(credential),
+                    expected_api_url,
+                ),
+            )
+            return SimpleNamespace(
+                status=200,
+                account_id="management-account",
+                username=bootstrap.MANAGEMENT_ADDRESS,
+            )
+
+        class Smtp:
+            def __init__(self, host: str, port: int, *, timeout: float) -> None:
+                events.append(("smtp-connect", host, port, timeout))
+
+            def __enter__(self) -> "Smtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                events.append(("smtp-close",))
+
+            def ehlo(self) -> None:
+                events.append(("ehlo",))
+
+            def login(self, username: str, password: str) -> None:
+                events.append(("login", username, password))
+
+            def noop(self) -> tuple[int, bytes]:
+                return 250, b"ok"
+
+        with TemporaryRepository() as repository:
+            runtime = bootstrap._ProductionFreshRuntime(
+                migration=SimpleNamespace(
+                    run_fixed_normal_basic_jmap_auth_probe=jmap_probe,
+                ),
+                registry=object(),
+                runtime_state=object(),
+            )
+            with (
+                mock.patch.object(
+                    runtime,
+                    "_protected_account_id",
+                    return_value="management-account",
+                ),
+                mock.patch.object(bootstrap.smtplib, "SMTP", Smtp),
+                mock.patch.object(bootstrap.time, "sleep"),
+            ):
+                runtime.prove(repository.root, "normal")
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    "jmap",
+                    b"dashboard-management@local.test:secret",
+                    "http://192.168.86.36:8443/jmap/",
+                ),
+                ("smtp-connect", "127.0.0.1", 8587, 5.0),
+                ("ehlo",),
+                (
+                    "login",
+                    "dashboard-management@local.test",
+                    "secret",
+                ),
+                ("smtp-close",),
+            ],
+        )
 
 class ProductionOrchestratorTest(unittest.TestCase):
     STARTED = "2026-07-28T12:00:00Z"

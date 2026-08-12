@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -87,6 +88,22 @@ def receipt_envelope(payload: dict[str, object]) -> dict[str, object]:
         "payload": payload,
         "payload_sha256": hashlib.sha256(canonical).hexdigest(),
     }
+
+
+def write_network_environment(
+    repository: Path,
+    public_url: str = "http://192.168.86.36:8443",
+) -> Path:
+    runtime = repository / "debug-dashboard" / ".runtime"
+    directory = runtime / "stalwart"
+    directory.mkdir(parents=True, exist_ok=True)
+    (repository / "debug-dashboard").chmod(0o700)
+    runtime.chmod(0o700)
+    directory.chmod(0o700)
+    target = directory / "network.env"
+    target.write_bytes(f"STALWART_PUBLIC_URL={public_url}\n".encode("ascii"))
+    target.chmod(0o600)
+    return target
 
 
 def verified_source_fixture(
@@ -957,6 +974,74 @@ class FixedContractTest(unittest.TestCase):
 
 @unittest.skipIf(stalwart_v016 is None, "migration script is not implemented")
 class RecoveryRetirementContractTest(unittest.TestCase):
+    def test_every_non_normal_stalwart_publication_remains_loopback_only(
+        self,
+    ) -> None:
+        gate_definitions = sorted(
+            (
+                REPOSITORY_ROOT
+                / "debug-dashboard"
+                / "dashboard-server"
+                / "testResources"
+                / "stalwart-gate0b"
+            ).glob("compose*.yml"),
+        )
+        definitions = [
+            REPOSITORY_ROOT / "docker-compose.stalwart-migration.yml",
+            *gate_definitions,
+        ]
+        for name in (
+            "docker-compose.stalwart-gate.yml",
+            "docker-compose.stalwart-recovery.yml",
+            "docker-compose.stalwart-rollback.yml",
+            "docker-compose.stalwart-rehearsal.yml",
+        ):
+            candidate = REPOSITORY_ROOT / name
+            if candidate.exists():
+                definitions.append(candidate)
+
+        self.assertEqual(
+            [path.name for path in gate_definitions],
+            ["compose.recovery.yml", "compose.yml"],
+        )
+
+        for path in definitions:
+            with self.subTest(path=path.relative_to(REPOSITORY_ROOT)):
+                self.assertTrue(path.is_file())
+                content = path.read_text(encoding="utf-8")
+                self.assertNotIn("0.0.0.0", content)
+                for match in re.finditer(
+                    r"[\"']?host_ip[\"']?\s*:\s*[\"']?([^\s#\"']+)",
+                    content,
+                ):
+                    self.assertEqual(match.group(1), "127.0.0.1")
+                for match in re.finditer(
+                    r'^\s*-\s*["\']?([^\s#"\']+)["\']?\s*(?:#.*)?$',
+                    content,
+                    re.MULTILINE,
+                ):
+                    publication = match.group(1)
+                    port = re.fullmatch(
+                        r"(?:(?P<host>[^:]+):)?\d+:\d+",
+                        publication,
+                    )
+                    if port is not None:
+                        self.assertEqual(
+                            port.group("host"),
+                            "127.0.0.1",
+                            publication,
+                        )
+
+        capture_source = (
+            REPOSITORY_ROOT / "scripts" / "capture_stalwart_v015.py"
+        ).read_text(encoding="utf-8")
+        rollback_host_ips = re.findall(
+            r'"(?:host_ip|HostIp)"\s*:\s*"([^"]+)"',
+            capture_source,
+        )
+        self.assertGreaterEqual(len(rollback_host_ips), 2)
+        self.assertEqual(set(rollback_host_ips), {"127.0.0.1"})
+
     def test_fixed_jmap_probe_result_contract_is_strict_and_redacted(
         self,
     ) -> None:
@@ -1087,6 +1172,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
         credential = bytearray(
             b"dashboard-management@local.test:secret",
         )
+
         view = memoryview(credential).toreadonly()
         try:
             status = stalwart_v016.run_fixed_normal_smtp_auth_probe(
@@ -1112,6 +1198,30 @@ class RecoveryRetirementContractTest(unittest.TestCase):
             ],
         )
 
+    def test_normal_runtime_public_url_is_loaded_strictly_at_proof_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            write_network_environment(repository)
+
+            self.assertEqual(
+                stalwart_v016._normal_runtime_public_url(repository),
+                "http://192.168.86.36:8443",
+            )
+
+            target = (
+                repository
+                / "debug-dashboard"
+                / ".runtime"
+                / "stalwart"
+                / "network.env"
+            )
+            target.write_bytes(
+                b"STALWART_PUBLIC_URL=http://127.0.0.1:8443\n",
+            )
+            target.chmod(0o600)
+            with self.assertRaises(stalwart_v016.MigrationError):
+                stalwart_v016._normal_runtime_public_url(repository)
+
     def test_fixed_jmap_probe_child_uses_only_fixed_endpoint_and_sanitized_output(
         self,
     ) -> None:
@@ -1124,7 +1234,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
                     "name": "dashboard-management@local.test",
                 },
             },
-            "apiUrl": "http://127.0.0.1:8443/jmap/",
+            "apiUrl": "http://192.168.86.36:8443/jmap/",
             "capabilities": {
                 "urn:ietf:params:jmap:core": {},
                 "urn:stalwart:jmap": {},
@@ -1196,6 +1306,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
         result = stalwart_v016._fixed_jmap_auth_exchange(
             secret,
             scheme="bearer",
+            expected_api_url="http://192.168.86.36:8443/jmap/",
             connection_factory=Connection,
         )
 
@@ -1277,6 +1388,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
                 stalwart_v016._fixed_jmap_auth_exchange(
                     rejected_credential,
                     scheme=scheme,
+                    expected_api_url="http://192.168.86.36:8443/jmap/",
                     connection_factory=RejectedConnection,
                 )
             self.assertEqual(cleanup, ["response", "connection"])
@@ -1396,6 +1508,7 @@ class RecoveryRetirementContractTest(unittest.TestCase):
                 basic_result = stalwart_v016._fixed_jmap_auth_exchange(
                     bytearray(b"unit-user:unit-secret"),
                     scheme="basic",
+                    expected_api_url="http://192.168.86.36:8443/jmap/",
                     connection_factory=BasicConnection,
                 )
                 self.assertEqual(
@@ -4038,6 +4151,8 @@ class ApplyPreparationTest(unittest.TestCase):
         ),
     ) -> SimpleNamespace:
         repository = Path(directory).resolve()
+        public_url = "http://192.168.86.36:8443"
+        network_environment = write_network_environment(repository, public_url)
         (repository / ".git").mkdir(mode=0o700)
         source_store = repository / "stalwart-data"
         source_store.mkdir(mode=0o700)
@@ -4185,6 +4300,8 @@ class ApplyPreparationTest(unittest.TestCase):
             paths=paths,
             source_store=source_store,
             compose_project=compose_project,
+            public_url=public_url,
+            network_environment=network_environment,
             normal_config=normal_config,
             script_digest=script_digest,
             state=state,
@@ -5842,6 +5959,28 @@ class ApplyPreparationTest(unittest.TestCase):
         fixture.events.clear()
         return fixture
 
+    def test_dynamic_public_url_is_absent_from_migration_receipt_payloads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self._applied_fixture(directory)
+
+            for receipt in (
+                fixture.paths.source_receipt,
+                fixture.paths.dry_run_receipt,
+                fixture.paths.reviewed,
+                fixture.paths.apply_attempt,
+                fixture.paths.apply_receipt,
+                fixture.paths.bootstrap_receipt,
+            ):
+                with self.subTest(receipt=receipt.name):
+                    document = json.loads(receipt.read_text(encoding="utf-8"))
+                    payload = document.get("payload", document)
+                    self.assertNotIn(
+                        fixture.public_url,
+                        json.dumps(payload, sort_keys=True),
+                    )
+
     @staticmethod
     def _bootstrap_identity(path: Path) -> list[int]:
         metadata = path.lstat()
@@ -6577,7 +6716,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     "entrypoint": None,
                     "environment": {
                         "STALWART_PUBLIC_URL": (
-                            stalwart_v016.NORMAL_RUNTIME_BASE_URL
+                            fixture.public_url
                         ),
                     },
                     "healthcheck": {
@@ -6599,14 +6738,14 @@ class ApplyPreparationTest(unittest.TestCase):
                     "networks": {"default": None},
                     "ports": [
                         {
-                            "host_ip": "127.0.0.1",
+                            "host_ip": "0.0.0.0",
                             "mode": "ingress",
                             "protocol": "tcp",
                             "published": "8443",
                             "target": 8080,
                         },
                         {
-                            "host_ip": "127.0.0.1",
+                            "host_ip": "0.0.0.0",
                             "mode": "ingress",
                             "protocol": "tcp",
                             "published": "8587",
@@ -6674,13 +6813,13 @@ class ApplyPreparationTest(unittest.TestCase):
             "Ports": {
                 "8080/tcp": [
                     {
-                        "HostIp": "127.0.0.1",
+                        "HostIp": "0.0.0.0",
                         "HostPort": "8443",
                     },
                 ],
                 "587/tcp": [
                     {
-                        "HostIp": "127.0.0.1",
+                        "HostIp": "0.0.0.0",
                         "HostPort": "8587",
                     },
                 ],
@@ -6688,7 +6827,9 @@ class ApplyPreparationTest(unittest.TestCase):
             "Running": True,
             "Health": "healthy",
             "Environment": sorted(
-                stalwart_v016.NORMAL_RUNTIME_ENVIRONMENT,
+                stalwart_v016._normal_runtime_environment(
+                    fixture.public_url,
+                ),
             ),
         }
 
@@ -6726,7 +6867,9 @@ class ApplyPreparationTest(unittest.TestCase):
             "State": {"Running": True},
             "Config": {
                 "Env": sorted(
-                    stalwart_v016.NORMAL_RUNTIME_ENVIRONMENT,
+                    stalwart_v016._normal_runtime_environment(
+                        fixture.public_url,
+                    ),
                 ),
                 "Labels": {
                     "com.docker.compose.oneoff": "False",
@@ -15143,6 +15286,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 "unit-secret",
                 "STALWART_RECOVERY_ADMIN",
                 str(paths.migration_root / "recovery.env"),
+                fixture.public_url,
             ):
                 self.assertNotIn(forbidden, serialized)
 
@@ -15269,7 +15413,7 @@ class ApplyPreparationTest(unittest.TestCase):
                             "entrypoint": None,
                             "environment": {
                                 "STALWART_PUBLIC_URL": (
-                                    "http://127.0.0.1:8443"
+                                    fixture.public_url
                                 ),
                             },
                             "healthcheck": {
@@ -15291,14 +15435,14 @@ class ApplyPreparationTest(unittest.TestCase):
                             "networks": {"default": None},
                             "ports": [
                                 {
-                                    "host_ip": "127.0.0.1",
+                                    "host_ip": "0.0.0.0",
                                     "mode": "ingress",
                                     "protocol": "tcp",
                                     "published": "8443",
                                     "target": 8080,
                                 },
                                 {
-                                    "host_ip": "127.0.0.1",
+                                    "host_ip": "0.0.0.0",
                                     "mode": "ingress",
                                     "protocol": "tcp",
                                     "published": "8587",
@@ -15341,9 +15485,9 @@ class ApplyPreparationTest(unittest.TestCase):
                     "root-user": lambda value: value["services"][
                         "stalwart"
                     ].update({"user": "0:0"}),
-                    "broad-port": lambda value: value["services"][
+                    "loopback-port": lambda value: value["services"][
                         "stalwart"
-                    ]["ports"][0].update({"host_ip": "0.0.0.0"}),
+                    ]["ports"][0].update({"host_ip": "127.0.0.1"}),
                     "extra-mount": lambda value: value["services"][
                         "stalwart"
                     ]["volumes"].append(
@@ -15359,6 +15503,15 @@ class ApplyPreparationTest(unittest.TestCase):
                         "services"
                     ]["stalwart"]["environment"].update(
                         {"STALWART_RECOVERY_MODE": "1"},
+                    ),
+                    "stale-public-url": lambda value: value[
+                        "services"
+                    ]["stalwart"]["environment"].update(
+                        {
+                            "STALWART_PUBLIC_URL": (
+                                "http://192.168.86.99:8443"
+                            ),
+                        },
                     ),
                     "extra-service": lambda value: value[
                         "services"
@@ -15441,13 +15594,13 @@ class ApplyPreparationTest(unittest.TestCase):
                     "Ports": {
                         "8080/tcp": [
                             {
-                                "HostIp": "127.0.0.1",
+                                "HostIp": "0.0.0.0",
                                 "HostPort": "8443",
                             },
                         ],
                         "587/tcp": [
                             {
-                                "HostIp": "127.0.0.1",
+                                "HostIp": "0.0.0.0",
                                 "HostPort": "8587",
                             },
                         ],
@@ -15465,7 +15618,7 @@ class ApplyPreparationTest(unittest.TestCase):
                         ),
                         (
                             "STALWART_PUBLIC_URL="
-                            "http://127.0.0.1:8443"
+                            f"{fixture.public_url}"
                         ),
                     ],
                 }
@@ -15498,6 +15651,16 @@ class ApplyPreparationTest(unittest.TestCase):
                         "Environment",
                         inspection["Environment"][:-1],
                     ),
+                    "stale-public-url": (
+                        "Environment",
+                        [
+                            *inspection["Environment"][:-1],
+                            (
+                                "STALWART_PUBLIC_URL="
+                                "http://192.168.86.99:8443"
+                            ),
+                        ],
+                    ),
                     "migration-overlay": (
                         "ConfigFiles",
                         (
@@ -15505,12 +15668,12 @@ class ApplyPreparationTest(unittest.TestCase):
                             f"{fixture.repository / 'docker-compose.stalwart-migration.yml'}"
                         ),
                     ),
-                    "broad-port": (
+                    "loopback-port": (
                         "Ports",
                         {
                             "8080/tcp": [
                                 {
-                                    "HostIp": "0.0.0.0",
+                                    "HostIp": "127.0.0.1",
                                     "HostPort": "8443",
                                 },
                             ],
@@ -15786,6 +15949,16 @@ class ApplyPreparationTest(unittest.TestCase):
                             plan=plan,
                         )
 
+            fixture.network_environment.write_bytes(
+                b"STALWART_PUBLIC_URL=http://192.168.86.37:8443\n",
+            )
+            fixture.network_environment.chmod(0o600)
+            with self.assertRaises(stalwart_v016.MigrationError):
+                stalwart_v016._validate_normal_compose_model(
+                    json.dumps(model).encode("utf-8"),
+                    plan=plan,
+                )
+
     def test_normal_compose_validator_accepts_installed_compose_render(
         self,
     ) -> None:
@@ -15800,14 +15973,14 @@ class ApplyPreparationTest(unittest.TestCase):
                 ports:
                   - target: 8080
                     published: "8443"
-                    host_ip: 127.0.0.1
+                    host_ip: 0.0.0.0
                     protocol: tcp
                   - target: 587
                     published: "8587"
-                    host_ip: 127.0.0.1
+                    host_ip: 0.0.0.0
                     protocol: tcp
-                environment:
-                  STALWART_PUBLIC_URL: http://127.0.0.1:8443
+                env_file:
+                  - ./debug-dashboard/.runtime/stalwart/network.env
                 volumes:
                   - type: bind
                     source: ./stalwart
@@ -16271,7 +16444,12 @@ class ApplyPreparationTest(unittest.TestCase):
                 credential: memoryview,
                 *,
                 scheme: str,
+                expected_api_url: str,
             ) -> object:
+                self.assertEqual(
+                    expected_api_url,
+                    f"{fixture.public_url}/jmap/",
+                )
                 observed_buffers.append(credential.obj)
                 if scheme == "bearer":
                     events.append("bearer")
@@ -16311,8 +16489,16 @@ class ApplyPreparationTest(unittest.TestCase):
                 events.append("smtp")
                 return 250
 
-            def basic_jmap_probe(credential: memoryview) -> object:
-                return auth_probe(credential, scheme="basic")
+            def basic_jmap_probe(
+                credential: memoryview,
+                *,
+                expected_api_url: str,
+            ) -> object:
+                return auth_probe(
+                    credential,
+                    scheme="basic",
+                    expected_api_url=expected_api_url,
+                )
 
             def recording_write(
                 target: Path,
@@ -16498,8 +16684,10 @@ class ApplyPreparationTest(unittest.TestCase):
                 credential: memoryview,
                 *,
                 scheme: str,
+                expected_api_url: str,
             ) -> object:
                 self.assertEqual(scheme, "bearer")
+                self.assertEqual(expected_api_url, f"{fixture.public_url}/jmap/")
                 events.append("bearer")
                 observed_management.append(credential.obj)
                 return stalwart_v016.JmapAuthProbe(
@@ -16633,8 +16821,10 @@ class ApplyPreparationTest(unittest.TestCase):
                 credential: memoryview,
                 *,
                 scheme: str,
+                expected_api_url: str,
             ) -> object:
                 self.assertEqual(scheme, "bearer")
+                self.assertEqual(expected_api_url, f"{fixture.public_url}/jmap/")
                 observed_key.append(credential.obj)
                 raise interruption
 
@@ -16773,7 +16963,12 @@ class ApplyPreparationTest(unittest.TestCase):
                     _credential: memoryview,
                     *,
                     scheme: str,
+                    expected_api_url: str,
                 ) -> object:
+                    self.assertEqual(
+                        expected_api_url,
+                        f"{fixture.public_url}/jmap/",
+                    )
                     if scheme == "bearer":
                         return stalwart_v016.JmapAuthProbe(
                             status=200,
@@ -16803,7 +16998,7 @@ class ApplyPreparationTest(unittest.TestCase):
                     runner=runtime_runner,
                     state_runner=mock.Mock(),
                     jmap_probe_runner=auth_probe,
-                    basic_jmap_probe_runner=lambda _credential: (
+                    basic_jmap_probe_runner=lambda _credential, *, expected_api_url: (
                         stalwart_v016.JmapAuthProbe(
                             status=200,
                             account_id=(
@@ -16929,6 +17124,8 @@ class ApplyPreparationTest(unittest.TestCase):
                 Path(directory).resolve() / "approved-primary-checkout"
             )
             source_root.mkdir(mode=0o700)
+            source_public_url = "http://192.168.86.37:8443"
+            write_network_environment(source_root, source_public_url)
             source_store = source_root / "stalwart-data"
             source_store.mkdir(mode=0o700)
             source_base = source_root / "docker-compose.yml"
@@ -16978,6 +17175,7 @@ class ApplyPreparationTest(unittest.TestCase):
                 repository=source_root,
                 source_store=source_store,
                 compose_project=plan.source.compose_project,
+                public_url=source_public_url,
             )
             container_id = "f" * 64
             events: list[str] = []
@@ -17064,8 +17262,13 @@ class ApplyPreparationTest(unittest.TestCase):
                 credential: memoryview,
                 *,
                 scheme: str,
+                expected_api_url: str,
             ) -> object:
                 self.assertEqual(scheme, "bearer")
+                self.assertEqual(
+                    expected_api_url,
+                    f"{source_fixture.public_url}/jmap/",
+                )
                 observed_key.append(bytes(credential))
                 return stalwart_v016.JmapAuthProbe(
                     status=200,
