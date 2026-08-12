@@ -39,11 +39,11 @@ CANONICAL_MIGRATION_OVERLAY_SHA256 = hashlib.sha256(
 AUDITED_CONVERTED_CONFIG_BYTES = (
     b'{\n'
     b'  "@type": "RocksDb",\n'
-    b'  "path": "/var/lib/stalwart/"\n'
+    b'  "path": "/var/lib/stalwart"\n'
     b"}"
 )
 AUDITED_CONVERTED_CONFIG_SHA256 = (
-    "8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963"
+    "b7aad53c4d32721e61984b0e5509764fc5d6b7405c68fd11f72c8423f04f2fb6"
 )
 
 stalwart_v016 = None
@@ -3833,12 +3833,12 @@ class ExportInventoryTest(unittest.TestCase):
             )
 
             for label, content in {
-                "compact": b'{"@type":"RocksDb","path":"/var/lib/stalwart/"}',
+                "compact": b'{"@type":"RocksDb","path":"/var/lib/stalwart"}',
                 "trailing-newline": AUDITED_CONVERTED_CONFIG_BYTES + b"\n",
                 "different-indentation": (
                     b'{\n'
                     b'    "@type": "RocksDb",\n'
-                    b'    "path": "/var/lib/stalwart/"\n'
+                    b'    "path": "/var/lib/stalwart"\n'
                     b"}"
                 ),
             }.items():
@@ -3869,7 +3869,7 @@ class ExportInventoryTest(unittest.TestCase):
                 json.dumps(
                     {
                         "@type": "RocksDb",
-                        "path": "/var/lib/stalwart",
+                        "path": "/var/lib/stalwart/",
                     },
                 ),
                 encoding="utf-8",

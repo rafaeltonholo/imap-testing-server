@@ -3907,7 +3907,7 @@ class FreshInitializationTest(unittest.TestCase):
     CURRENT_CONFIG_BYTES = (
         b'{\n'
         b'  "@type": "RocksDb",\n'
-        b'  "path": "/var/lib/stalwart/"\n'
+        b'  "path": "/var/lib/stalwart"\n'
         b'}'
     )
 

@@ -230,19 +230,21 @@ The migration tools validate it locally and use `--pull never`.
 ```json
 {
   "@type": "RocksDb",
-  "path": "/var/lib/stalwart/"
+  "path": "/var/lib/stalwart"
 }
 ```
 
-It is exactly 56 bytes, has no final LF, and has SHA-256
-`8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963`.
+This is the exact output of the pinned upstream converter for the legacy
+`/opt/stalwart/data` path: its path-patch parser removes trailing slashes. It
+is exactly 55 bytes, has no final LF, and has SHA-256
+`b7aad53c4d32721e61984b0e5509764fc5d6b7405c68fd11f72c8423f04f2fb6`.
 Compact one-line JSON and a trailing LF are explicitly rejected. Verify the
 tracked file without starting Stalwart:
 
 ```bash
-test "$(wc -c < stalwart/config.json | tr -d ' ')" = 56
+test "$(wc -c < stalwart/config.json | tr -d ' ')" = 55
 test "$(shasum -a 256 stalwart/config.json | awk '{print $1}')" = \
-  8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963
+  b7aad53c4d32721e61984b0e5509764fc5d6b7405c68fd11f72c8423f04f2fb6
 test "$(tail -c 1 stalwart/config.json | od -An -tuC | tr -d ' ')" = 125
 docker compose config --quiet
 docker compose config --images

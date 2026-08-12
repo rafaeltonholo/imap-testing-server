@@ -69,11 +69,11 @@ MIGRATION_COMPOSE_SHA256 = (
 CONVERTED_CONFIG_BYTES = (
     b'{\n'
     b'  "@type": "RocksDb",\n'
-    b'  "path": "/var/lib/stalwart/"\n'
+    b'  "path": "/var/lib/stalwart"\n'
     b"}"
 )
 CONVERTED_CONFIG_SHA256 = (
-    "8b48a8b7b4b4923083b045ff2fdd7eef690e3b53df2d449f891491172c791963"
+    "b7aad53c4d32721e61984b0e5509764fc5d6b7405c68fd11f72c8423f04f2fb6"
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_DATA_VARIABLE = "STALWART_MIGRATION_DATA_DIR"
@@ -4351,9 +4351,9 @@ def validate_converted_outputs(paths: MigrationPaths) -> None:
         raise MigrationError("converted config is not valid JSON") from None
     if _contains_legacy_path(store):
         raise MigrationError("converted outputs retain a decoded legacy Stalwart path")
-    if store != {"@type": "RocksDb", "path": "/var/lib/stalwart/"}:
+    if store != {"@type": "RocksDb", "path": "/var/lib/stalwart"}:
         raise MigrationError(
-            "converted config DataStore must be RocksDb at /var/lib/stalwart/",
+            "converted config DataStore must be RocksDb at /var/lib/stalwart",
         )
     try:
         lines = raw_outputs[paths.export].decode("utf-8").splitlines()

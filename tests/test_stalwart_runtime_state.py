@@ -26,7 +26,7 @@ LEGACY_IMAGE = (
     "stalwartlabs/stalwart:v0.15@"
     "sha256:dcf575db2d53d9ef86d6ced8abe4ba491984659a0f8862cc6079ee7b41c3c568"
 )
-CONFIG_BYTES = b'{\n  "@type": "RocksDb",\n  "path": "/var/lib/stalwart/"\n}'
+CONFIG_BYTES = b'{\n  "@type": "RocksDb",\n  "path": "/var/lib/stalwart"\n}'
 
 
 runtime_state = None

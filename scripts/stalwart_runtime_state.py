@@ -34,7 +34,7 @@ LEGACY_IMAGE = (
 CURRENT_CONFIG_BYTES = (
     b'{\n'
     b'  "@type": "RocksDb",\n'
-    b'  "path": "/var/lib/stalwart/"\n'
+    b'  "path": "/var/lib/stalwart"\n'
     b'}'
 )
 CURRENT_CONFIG_SHA256 = hashlib.sha256(CURRENT_CONFIG_BYTES).hexdigest()
