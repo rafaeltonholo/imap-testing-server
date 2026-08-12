@@ -388,6 +388,72 @@ class StalwartDashboardProviderTest {
     }
 
     @Test
+    fun jmapOnlyCreationAndRefreshUseJmapReadinessAndKeepTheExactProfile() = runBlocking {
+        withCatalog("stalwart-dashboard-create-jmap-only") { catalog ->
+            val gateway = RecordingStalwartGateway().apply {
+                createdAccount = StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.JMAP),
+                )
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+                jmapOutcomes += AuthenticationOutcome.Authenticated("JMAP login succeeded")
+            }
+            val smtpProbe = RecordingStalwartSmtpProbe()
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpAuthenticationProbe = smtpProbe,
+            )
+
+            val created = provider.createAccount(
+                CreateAccountRequest(
+                    address = "alice@local.test",
+                    password = "created-password",
+                    provider = Provider.STALWART,
+                    protocols = listOf(MailProtocol.JMAP),
+                ),
+            )
+            val refreshed = provider.listAccounts().single()
+
+            assertEquals(
+                listOf(
+                    StalwartCreateAccount(
+                        address = "alice@local.test",
+                        password = "created-password",
+                        enabledProtocols = setOf(StalwartProductProtocol.JMAP),
+                    ),
+                ),
+                gateway.createdRequests,
+            )
+            assertEquals(listOf(MailProtocol.JMAP), created.protocols)
+            assertEquals(CredentialReadiness.READY, created.credentialReadiness)
+            assertEquals(listOf(MailProtocol.JMAP), refreshed.protocols)
+            assertEquals(CredentialReadiness.READY, refreshed.credentialReadiness)
+            assertEquals(
+                listOf(
+                    StalwartLoginProbe(
+                        "account-one",
+                        "alice@local.test",
+                        "created-password",
+                    ),
+                    StalwartLoginProbe(
+                        "account-one",
+                        "alice@local.test",
+                        "created-password",
+                    ),
+                ),
+                gateway.jmapProbes,
+            )
+            assertTrue(smtpProbe.probes.isEmpty())
+            assertEquals(
+                listOf(MailProtocol.JMAP),
+                catalog.findByProviderAccountId(Provider.STALWART, "account-one")?.protocols,
+            )
+        }
+    }
+
+    @Test
     fun smtpOnlyCreationAndRefreshUseSmtpReadinessAndKeepTheExactProfile() = runBlocking {
         withCatalog("stalwart-dashboard-create-smtp-only") { catalog ->
             val gateway = RecordingStalwartGateway().apply {
@@ -470,6 +536,50 @@ class StalwartDashboardProviderTest {
 
             assertTrue("JMAP is not enabled" in failure.message.orEmpty())
             assertTrue(gateway.jmapProbes.isEmpty())
+        }
+    }
+
+    @Test
+    fun jmapOnlyProfileRejectsSmtpAuthenticationBeforeCallingTheProbe() = runBlocking {
+        withCatalog("stalwart-dashboard-jmap-only-smtp-probe") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "created-password",
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.JMAP),
+                ),
+            )
+            val smtpProbe = RecordingStalwartSmtpProbe()
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpAuthenticationProbe = smtpProbe,
+            )
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                provider.probeAuthentication(
+                    AuthenticationProbeRequest(
+                        address = "alice@local.test",
+                        provider = Provider.STALWART,
+                        protocol = AuthenticationProtocol.SMTP,
+                        providerAccountId = "account-one",
+                    ),
+                )
+            }
+
+            assertTrue("SMTP is not enabled" in failure.message.orEmpty())
+            assertTrue(smtpProbe.probes.isEmpty())
+            assertTrue(gateway.jmapProbes.isEmpty())
+            assertEquals(1, gateway.accountListingCalls)
         }
     }
 
@@ -960,6 +1070,54 @@ class StalwartDashboardProviderTest {
         }
     }
 
+    @Test
+    fun jmapOnlyProfileRejectsSmtpDeliveryBeforeCallingTheSender() = runBlocking {
+        withCatalog("stalwart-dashboard-jmap-only-delivery") { catalog ->
+            catalog.put(
+                LocalAccountRecord(
+                    provider = Provider.STALWART,
+                    address = "alice@local.test",
+                    password = "created-password",
+                    protocols = listOf(MailProtocol.JMAP),
+                    providerAccountId = "account-one",
+                ),
+            )
+            val gateway = RecordingStalwartGateway(
+                StalwartProductAccount(
+                    id = "account-one",
+                    address = "alice@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.JMAP),
+                ),
+            )
+            val smtp = StalwartRecordingSmtpSender()
+            val provider = StalwartDashboardProvider(
+                adapter = gateway,
+                catalog = catalog,
+                smtpSender = smtp,
+            )
+            val raw = message("<jmap-only@local.test>")
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                provider.deliverMessages(
+                    GenerateMessageRequest(
+                        targetAccount = "alice@local.test",
+                        provider = Provider.STALWART,
+                        providerAccountId = "account-one",
+                        sourceType = MessageSourceType.EML,
+                        deliveryMode = MessageDeliveryMode.SMTP_DELIVERY,
+                        content = raw,
+                    ),
+                    listOf(GeneratedMessage(raw)),
+                )
+            }
+
+            assertTrue("SMTP is not enabled" in failure.message.orEmpty())
+            assertEquals(0, smtp.calls)
+            assertEquals(0, gateway.folderListingCalls)
+            assertEquals(1, gateway.accountListingCalls)
+        }
+    }
+
     private fun message(messageId: String): String =
         "From: sender@local.test\r\n" +
             "To: alice@local.test\r\n" +
@@ -1093,6 +1251,7 @@ private class RecordingStalwartGateway(
     val jmapOutcomes = ArrayDeque<AuthenticationOutcome>()
     val jmapProbes = mutableListOf<StalwartLoginProbe>()
     val changedPasswords = mutableListOf<Pair<String, String>>()
+    val createdRequests = mutableListOf<StalwartCreateAccount>()
     var beforeJmapProbe: (StalwartLoginProbe) -> Unit = {}
     var createdAccount: StalwartProductAccount? = null
     var accountListingCalls = 0
@@ -1107,6 +1266,7 @@ private class RecordingStalwartGateway(
 
     override suspend fun createAccount(request: StalwartCreateAccount): StalwartProductAccount =
         requireNotNull(createdAccount) { "No created Account result was configured" }.also {
+            createdRequests += request
             accounts += it
         }
 

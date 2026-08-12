@@ -210,6 +210,90 @@ class StalwartProductAdapterTest {
     }
 
     @Test
+    fun listAccountsDecodesExactJmapOnlyAndCombinedReplaceProfiles() = runBlocking {
+        val transport = RecordingTransport(
+            expectedCall(
+                "x:Account/query",
+                queryPayload(
+                    "management-account",
+                    listOf("management-account", "jmap-only", "combined"),
+                ),
+            ),
+            expectedCall(
+                "x:Account/get",
+                getPayload(
+                    "management-account",
+                    accountObject(
+                        id = "management-account",
+                        localPart = "dashboard-management",
+                        domainId = "domain-one",
+                        permissions = buildJsonObject { put("@type", "Inherit") },
+                    ),
+                    accountObject(
+                        id = "jmap-only",
+                        localPart = "jmap",
+                        domainId = "domain-one",
+                        permissions = replacePermissions(JMAP_ONLY_ACCOUNT_PERMISSIONS),
+                    ),
+                    accountObject(
+                        id = "combined",
+                        localPart = "combined",
+                        domainId = "domain-one",
+                        permissions = replacePermissions(COMBINED_ACCOUNT_PERMISSIONS),
+                    ),
+                ),
+            ),
+            expectedCall(
+                "x:Domain/get",
+                getPayload(
+                    "management-account",
+                    buildJsonObject {
+                        put("id", "domain-one")
+                        put("name", "local.test")
+                    },
+                ),
+            ),
+        )
+        val adapter = adapter(transport, InMemoryStalwartAccountCredentialCatalog())
+
+        assertEquals(
+            listOf(
+                StalwartProductAccount(
+                    id = "combined",
+                    address = "combined@local.test",
+                    enabledProtocols = setOf(
+                        StalwartProductProtocol.JMAP,
+                        StalwartProductProtocol.SMTP,
+                    ),
+                ),
+                StalwartProductAccount(
+                    id = "jmap-only",
+                    address = "jmap@local.test",
+                    enabledProtocols = setOf(StalwartProductProtocol.JMAP),
+                ),
+            ),
+            adapter.listAccounts(),
+        )
+        transport.assertExhausted()
+    }
+
+    @Test
+    fun createJmapOnlyAccountUsesTheExactReplacePermissionPayload() = runBlocking {
+        assertCreatePermissionProfile(
+            protocols = setOf(StalwartProductProtocol.JMAP),
+            expectedPermissions = JMAP_ONLY_ACCOUNT_PERMISSIONS,
+        )
+    }
+
+    @Test
+    fun createCombinedAccountUsesTheExactReplacePermissionPayload() = runBlocking {
+        assertCreatePermissionProfile(
+            protocols = setOf(StalwartProductProtocol.JMAP, StalwartProductProtocol.SMTP),
+            expectedPermissions = COMBINED_ACCOUNT_PERMISSIONS,
+        )
+    }
+
+    @Test
     fun createSmtpOnlyAccountDoesNotGrantJmapPermissionsOrRememberAnUnverifiedPassword() =
         runBlocking {
         val transport = RecordingTransport(
@@ -273,6 +357,63 @@ class StalwartProductAdapterTest {
                     address = "new-user@local.test",
                     password = "test-password",
                     enabledProtocols = setOf(StalwartProductProtocol.SMTP),
+                ),
+            ),
+        )
+        assertNull(catalog.find("account-created"))
+        transport.assertExhausted()
+    }
+
+    private suspend fun assertCreatePermissionProfile(
+        protocols: Set<StalwartProductProtocol>,
+        expectedPermissions: Set<String>,
+    ) {
+        val transport = RecordingTransport(
+            expectedCall(
+                "x:Domain/query",
+                queryPayload("management-account", listOf("domain-one")),
+            ),
+            expectedCall(
+                "x:Domain/get",
+                getPayload(
+                    "management-account",
+                    buildJsonObject {
+                        put("id", "domain-one")
+                        put("name", "local.test")
+                    },
+                ),
+            ),
+            expectedCall(
+                "x:Account/set",
+                setCreatedPayload(
+                    accountId = "management-account",
+                    creationId = "dashboard-account",
+                    objectId = "account-created",
+                ),
+            ) { arguments ->
+                val permissions = arguments.requiredObject("create")
+                    .requiredObject("dashboard-account")
+                    .requiredObject("permissions")
+                assertEquals(
+                    replacePermissions(expectedPermissions),
+                    permissions,
+                )
+            },
+        )
+        val catalog = InMemoryStalwartAccountCredentialCatalog()
+        val adapter = adapter(transport, catalog)
+
+        assertEquals(
+            StalwartProductAccount(
+                id = "account-created",
+                address = "profile@local.test",
+                enabledProtocols = protocols,
+            ),
+            adapter.createAccount(
+                StalwartCreateAccount(
+                    address = "profile@local.test",
+                    password = "test-password",
+                    enabledProtocols = protocols,
                 ),
             ),
         )
@@ -1052,6 +1193,26 @@ class StalwartProductAdapterTest {
     private companion object {
         val BASE_URI: URI = URI("http://127.0.0.1:8443")
         val API_URI: URI = URI("http://127.0.0.1:8443/jmap/")
+        val JMAP_ONLY_ACCOUNT_PERMISSIONS: Set<String> = setOf(
+            "authenticate",
+            "emailReceive",
+            "jmapMailboxGet",
+            "jmapMailboxCreate",
+            "jmapMailboxUpdate",
+            "jmapMailboxDestroy",
+            "jmapEmailGet",
+            "jmapEmailQuery",
+            "jmapEmailUpdate",
+            "jmapEmailDestroy",
+            "jmapEmailImport",
+            "jmapIdentityGet",
+            "jmapEmailSubmissionGet",
+            "jmapEmailSubmissionCreate",
+            "jmapBlobGet",
+            "jmapBlobUpload",
+        )
+        val COMBINED_ACCOUNT_PERMISSIONS: Set<String> =
+            JMAP_ONLY_ACCOUNT_PERMISSIONS + "emailSend"
 
         fun decodeBasicCredential(request: GateHttpRequest): Pair<String, String> {
             val encoded = request.credential.authorizationHeader().removePrefix("Basic ")
@@ -1117,6 +1278,17 @@ class StalwartProductAdapterTest {
             put("domainId", domainId)
             put("credentials", credentials)
             put("permissions", permissions)
+        }
+
+        fun replacePermissions(enabled: Set<String>): JsonObject = buildJsonObject {
+            put("@type", "Replace")
+            put(
+                "enabledPermissions",
+                buildJsonObject {
+                    enabled.forEach { permission -> put(permission, true) }
+                },
+            )
+            put("disabledPermissions", buildJsonObject {})
         }
 
         fun setCreatedPayload(
