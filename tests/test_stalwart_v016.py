@@ -106,6 +106,53 @@ def write_network_environment(
     return target
 
 
+def normal_compose_text() -> str:
+    return textwrap.dedent(
+        """\
+        services:
+          stalwart:
+            image: stalwartlabs/stalwart:v0.16.17@sha256:a8108e19bd927e172d4d8c128907b8dfc93fd180ae8ee07dccdd42cb97eb9dfa
+            container_name: stalwart-dev
+            user: "2000:2000"
+            restart: unless-stopped
+            ports:
+              - target: 8080
+                published: "8443"
+                host_ip: 0.0.0.0
+                protocol: tcp
+              - target: 587
+                published: "8587"
+                host_ip: 0.0.0.0
+                protocol: tcp
+            env_file:
+              - ./debug-dashboard/.runtime/stalwart/network.env
+            volumes:
+              - type: bind
+                source: ./stalwart
+                target: /etc/stalwart
+                read_only: true
+                bind:
+                  create_host_path: false
+              - type: bind
+                source: ./stalwart-data
+                target: /var/lib/stalwart
+                read_only: false
+                bind:
+                  create_host_path: false
+            healthcheck:
+              test:
+                - CMD
+                - curl
+                - -fsS
+                - http://127.0.0.1:8080/healthz/ready
+              interval: 2s
+              timeout: 2s
+              retries: 30
+              start_period: 2s
+        """,
+    )
+
+
 def verified_source_fixture(
     checkout: Path,
     provider_store: Path,
@@ -4144,7 +4191,7 @@ class ApplyPreparationTest(unittest.TestCase):
         directory: str,
         *,
         compose_project: str = "mail-sandbox",
-        base_compose_content: str = "services: {}\n",
+        base_compose_content: str | None = None,
         operations: tuple[tuple[str, str], ...] = (
             ("create", "principal/unit-fixture"),
             ("update", "domain/unit.example"),
@@ -4157,7 +4204,14 @@ class ApplyPreparationTest(unittest.TestCase):
         source_store = repository / "stalwart-data"
         source_store.mkdir(mode=0o700)
         base_compose = repository / "docker-compose.yml"
-        base_compose.write_text(base_compose_content, encoding="utf-8")
+        base_compose.write_text(
+            (
+                normal_compose_text()
+                if base_compose_content is None
+                else base_compose_content
+            ),
+            encoding="utf-8",
+        )
         capture_script = repository / "scripts" / "capture_stalwart_v015.py"
         capture_script.parent.mkdir(mode=0o700)
         capture_script.write_text("# unit-only verifier fixture\n", encoding="utf-8")
@@ -5937,7 +5991,7 @@ class ApplyPreparationTest(unittest.TestCase):
         directory: str,
         *,
         compose_project: str = "mail-sandbox",
-        base_compose_content: str = "services: {}\n",
+        base_compose_content: str | None = None,
         operations: tuple[tuple[str, str], ...] = (
             ("create", "principal/unit-fixture"),
             ("update", "domain/unit.example"),
@@ -15958,6 +16012,66 @@ class ApplyPreparationTest(unittest.TestCase):
                     json.dumps(model).encode("utf-8"),
                     plan=plan,
                 )
+
+    def test_normal_compose_model_rejects_noncanonical_environment_source(
+        self,
+    ) -> None:
+        canonical = normal_compose_text()
+        substitutions = {
+            "direct-environment": canonical.replace(
+                "    env_file:\n"
+                "      - ./debug-dashboard/.runtime/stalwart/network.env\n",
+                "    environment:\n"
+                "      STALWART_PUBLIC_URL: http://192.168.86.36:8443\n",
+            ),
+            "replacement-env-file": canonical.replace(
+                "./debug-dashboard/.runtime/stalwart/network.env",
+                "./debug-dashboard/.runtime/stalwart/replaced.env",
+            ),
+        }
+        for label, compose in substitutions.items():
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = self._applied_fixture(
+                    directory,
+                    compose_project="dovecot-docker",
+                    base_compose_content=compose,
+                )
+                calls: list[list[str]] = []
+
+                def runtime_runner(
+                    args: list[str],
+                    **_kwargs: object,
+                ) -> object:
+                    calls.append(args)
+                    return stalwart_v016.RedactedCommandResult(
+                        json.dumps(
+                            self._valid_normal_compose_model(fixture),
+                        ).encode("utf-8"),
+                        b"",
+                    )
+
+                executor = stalwart_v016.RecoveryRetirementExecutor(
+                    paths=fixture.paths,
+                    runner=runtime_runner,
+                    state_runner=mock.Mock(),
+                    jmap_probe_runner=mock.Mock(),
+                    readiness_probe_runner=mock.Mock(),
+                )
+                with self.assertRaises(stalwart_v016.MigrationError):
+                    self._retire(
+                        fixture,
+                        executor,
+                        postflight_verifier=mock.Mock(),
+                    )
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(
+                    calls[0][-4:],
+                    ["config", "--format", "json", "stalwart"],
+                )
+                self.assertNotIn("up", calls[0])
 
     def test_normal_compose_validator_accepts_installed_compose_render(
         self,

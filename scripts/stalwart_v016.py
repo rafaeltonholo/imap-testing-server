@@ -176,6 +176,8 @@ NORMAL_RUNTIME_ENVIRONMENT = frozenset(
 )
 _NETWORK_MODULE_NAME = "_mail_sandbox_stalwart_network_v016"
 _NETWORK_MODULE: object | None = None
+_RUNTIME_STATE_MODULE_NAME = "_mail_sandbox_stalwart_runtime_state_v016"
+_RUNTIME_STATE_MODULE: object | None = None
 NORMAL_CONTAINER_INSPECT_FORMAT = (
     '{"Id":{{json .Id}}'
     ',"Image":{{json .Config.Image}}'
@@ -1084,6 +1086,51 @@ def _normal_runtime_public_url(repository: Path) -> str:
             "normal runtime network configuration is invalid",
         )
     return public_url
+
+
+def _require_normal_compose_definition(repository: Path) -> str:
+    global _RUNTIME_STATE_MODULE
+    if _RUNTIME_STATE_MODULE is None:
+        path = Path(__file__).resolve().with_name("stalwart_runtime_state.py")
+        try:
+            specification = importlib.util.spec_from_file_location(
+                _RUNTIME_STATE_MODULE_NAME,
+                path,
+            )
+            if specification is None or specification.loader is None:
+                raise ImportError("runtime-state loader is unavailable")
+            module = importlib.util.module_from_spec(specification)
+            sys.modules[_RUNTIME_STATE_MODULE_NAME] = module
+            try:
+                specification.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(_RUNTIME_STATE_MODULE_NAME, None)
+                raise
+            _RUNTIME_STATE_MODULE = module
+        except (OSError, ImportError):
+            raise MigrationError(
+                "normal runtime Compose definition is unavailable",
+            ) from None
+    require = getattr(
+        _RUNTIME_STATE_MODULE,
+        "require_current_compose_definition",
+        None,
+    )
+    if not callable(require):
+        raise MigrationError(
+            "normal runtime Compose definition is unavailable",
+        )
+    try:
+        digest = require(repository)
+    except (OSError, ValueError):
+        raise MigrationError(
+            "normal runtime Compose definition is invalid",
+        ) from None
+    if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise MigrationError(
+            "normal runtime Compose definition is invalid",
+        )
+    return digest
 
 
 def _normal_runtime_environment(public_url: str) -> frozenset[str]:
@@ -6153,6 +6200,7 @@ def _validate_normal_compose_model(
 ) -> None:
     """Require the rendered base service to equal the approved normal model."""
     source = _normal_runtime_plan_context(plan)
+    _require_normal_compose_definition(source.checkout_root)
     public_url = _normal_runtime_public_url(source.checkout_root)
     if type(stdout) is not bytes or not stdout or len(stdout) > 1024 * 1024:
         raise MigrationError("normal runtime Compose model is malformed")

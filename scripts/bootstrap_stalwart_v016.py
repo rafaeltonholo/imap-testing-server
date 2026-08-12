@@ -4954,12 +4954,51 @@ def _current_network_public_url(repository: Path) -> str:
     return public_url
 
 
+def _require_current_compose_definition(
+    repository: Path,
+    *,
+    runtime_state: object | None = None,
+) -> str:
+    dependency = (
+        _load_sibling_module(
+            "stalwart_runtime_state.py",
+            "_mail_sandbox_stalwart_runtime_state_compose",
+        )
+        if runtime_state is None
+        else runtime_state
+    )
+    require = getattr(
+        dependency,
+        "require_current_compose_definition",
+        None,
+    )
+    if not callable(require):
+        raise BootstrapError(
+            "current Stalwart Compose definition is unavailable",
+        )
+    try:
+        compose_sha256 = require(repository)
+    except (OSError, ValueError):
+        raise BootstrapError(
+            "current Stalwart Compose definition is invalid",
+        ) from None
+    if (
+        type(compose_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", compose_sha256) is None
+    ):
+        raise BootstrapError(
+            "current Stalwart Compose definition is invalid",
+        )
+    return compose_sha256
+
+
 def _validate_fresh_compose_model(
     data: bytes,
     *,
     repository: Path,
     current_image: str,
 ) -> None:
+    _require_current_compose_definition(repository)
     public_url = _current_network_public_url(repository)
     value = _strict_json_model(data)
     project = value.get("name")
@@ -5101,6 +5140,10 @@ class _ProductionFreshRuntime:
         )
         if type(expected_config) is not bytes or config != expected_config:
             raise BootstrapError("current Stalwart config is not canonical")
+        _require_current_compose_definition(
+            repository,
+            runtime_state=self._runtime_state,
+        )
         command = [
             *_fresh_compose_prefix(repository, recovery=False),
             "config",

@@ -344,6 +344,15 @@ def _compose_kind(repository: Path) -> tuple[str, str] | None:
     return None
 
 
+def require_current_compose_definition(repository: Path) -> str:
+    """Return the digest only for the exact canonical current service."""
+    root = _repository_path(repository)
+    compose = _compose_kind(root)
+    if compose is None or compose[0] != "current":
+        raise ValueError("current Stalwart Compose definition is invalid")
+    return compose[1]
+
+
 def _current_network_configuration(repository: Path) -> object | None:
     """Load the current owner-only LAN state through its strict helper."""
     global _NETWORK_MODULE

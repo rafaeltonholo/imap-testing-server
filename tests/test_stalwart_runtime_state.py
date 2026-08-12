@@ -268,6 +268,42 @@ class RuntimeStateClassificationTest(unittest.TestCase):
             runtime_state.RuntimeState.FRESH,
         )
 
+    def test_current_compose_definition_is_validated_while_store_is_fresh(
+        self,
+    ) -> None:
+        self.write_compose(CURRENT_IMAGE)
+        self.assertEqual(
+            runtime_state.classify_repository(self.root),
+            runtime_state.RuntimeState.FRESH,
+        )
+        helper = getattr(
+            runtime_state,
+            "require_current_compose_definition",
+            None,
+        )
+        self.assertIsNotNone(helper)
+        self.assertEqual(
+            helper(self.root),
+            hashlib.sha256(current_compose_text().encode("utf-8")).hexdigest(),
+        )
+
+        for label, compose in {
+            "direct-environment": current_compose_text().replace(
+                "    env_file:\n"
+                "      - ./debug-dashboard/.runtime/stalwart/network.env\n",
+                "    environment:\n"
+                "      STALWART_PUBLIC_URL: http://192.168.86.36:8443\n",
+            ),
+            "replacement-env-file": current_compose_text().replace(
+                "./debug-dashboard/.runtime/stalwart/network.env",
+                "./debug-dashboard/.runtime/stalwart/replaced.env",
+            ),
+        }.items():
+            with self.subTest(label=label):
+                self.write_compose_content(compose)
+                with self.assertRaises(ValueError):
+                    helper(self.root)
+
     def test_known_nonempty_v015_hold_requires_migration(self) -> None:
         self.write_compose(LEGACY_IMAGE)
         self.make_nonempty_store()

@@ -395,6 +395,14 @@ def write_envelope(path: Path, payload: dict[str, object]) -> None:
     write_file(path, canonical_json(envelope) + b"\n", 0o600)
 
 
+def current_compose_text() -> str:
+    runtime_state = bootstrap._load_sibling_module(
+        "stalwart_runtime_state.py",
+        "_unit_runtime_state_compose_fixture",
+    )
+    return "services:\n" + "\n".join(runtime_state.CURRENT_SERVICE_MODEL) + "\n"
+
+
 def file_metadata(path: Path, *, digest: bool = True) -> dict[str, object]:
     metadata = path.stat()
     identity = [
@@ -4346,6 +4354,9 @@ class FreshInitializationTest(unittest.TestCase):
                 runtime_state=SimpleNamespace(
                     CURRENT_IMAGE=self.CURRENT_IMAGE,
                     CURRENT_CONFIG_BYTES=self.CURRENT_CONFIG_BYTES,
+                    require_current_compose_definition=(
+                        lambda _repository: "a" * 64
+                    ),
                 ),
             )
             with (
@@ -4367,6 +4378,53 @@ class FreshInitializationTest(unittest.TestCase):
                 repository=repository.root,
                 current_image=self.CURRENT_IMAGE,
             )
+
+    def test_definition_rejects_noncanonical_environment_source_before_compose(
+        self,
+    ) -> None:
+        runtime_state = bootstrap._load_sibling_module(
+            "stalwart_runtime_state.py",
+            "_unit_runtime_state_compose_contract",
+        )
+        canonical = "\n".join(runtime_state.CURRENT_SERVICE_MODEL) + "\n"
+        substitutions = {
+            "direct-environment": canonical.replace(
+                "    env_file:\n"
+                "      - ./debug-dashboard/.runtime/stalwart/network.env\n",
+                "    environment:\n"
+                "      STALWART_PUBLIC_URL: http://192.168.86.36:8443\n",
+            ),
+            "replacement-env-file": canonical.replace(
+                "./debug-dashboard/.runtime/stalwart/network.env",
+                "./debug-dashboard/.runtime/stalwart/replaced.env",
+            ),
+        }
+        for label, service in substitutions.items():
+            with self.subTest(label=label), TemporaryRepository() as repository:
+                write_file(
+                    repository.root / "stalwart" / "config.json",
+                    self.CURRENT_CONFIG_BYTES,
+                    0o644,
+                )
+                (repository.root / "docker-compose.yml").write_text(
+                    "services:\n" + service,
+                    encoding="utf-8",
+                )
+                runtime = bootstrap._ProductionFreshRuntime(
+                    migration=object(),
+                    registry=object(),
+                    runtime_state=runtime_state,
+                )
+                with (
+                    mock.patch.object(
+                        bootstrap,
+                        "_run_fresh_command",
+                        return_value=b"rendered",
+                    ) as run,
+                    self.assertRaises(bootstrap.BootstrapError),
+                ):
+                    runtime.validate_definition(repository.root)
+                run.assert_not_called()
 
     def test_prepare_accepts_only_the_authoritative_fresh_failure_marker(
         self,
@@ -4425,6 +4483,10 @@ class FreshInitializationTest(unittest.TestCase):
                 network_directory / "network.env",
                 b"STALWART_PUBLIC_URL=http://192.168.86.36:8443\n",
                 0o600,
+            )
+            (root / "docker-compose.yml").write_text(
+                current_compose_text(),
+                encoding="utf-8",
             )
             service = {
                 "command": None,
@@ -4498,6 +4560,41 @@ class FreshInitializationTest(unittest.TestCase):
                 repository=root,
                 current_image=self.CURRENT_IMAGE,
             )
+
+            source = root / "docker-compose.yml"
+            original_source = source.read_text(encoding="utf-8")
+            for label, changed_source in {
+                "direct-environment": original_source.replace(
+                    "    env_file:\n"
+                    "      - ./debug-dashboard/.runtime/stalwart/network.env\n",
+                    "    environment:\n"
+                    "      STALWART_PUBLIC_URL: http://192.168.86.36:8443\n",
+                ),
+                "replacement-env-file": original_source.replace(
+                    "./debug-dashboard/.runtime/stalwart/network.env",
+                    "./debug-dashboard/.runtime/stalwart/replaced.env",
+                ),
+            }.items():
+                with self.subTest(source=label):
+                    source.write_text(changed_source, encoding="utf-8")
+                    with self.assertRaises(bootstrap.BootstrapError):
+                        bootstrap._validate_fresh_compose_model(
+                            json.dumps(
+                                {
+                                    "name": "fresh-project",
+                                    "networks": {
+                                        "default": {
+                                            "name": "fresh-project_default",
+                                            "ipam": {},
+                                        },
+                                    },
+                                    "services": {"stalwart": service},
+                                },
+                            ).encode(),
+                            repository=root,
+                            current_image=self.CURRENT_IMAGE,
+                        )
+            source.write_text(original_source, encoding="utf-8")
 
             mutations = {
                 "floating-image": lambda value: value.update(
