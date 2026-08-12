@@ -699,7 +699,7 @@ class LocalDashboardBackendTest {
     }
 
     @Test
-    fun dovecotAccountLogsCombineDovecotAndPostfixEvidence() = runBlocking {
+    fun dovecotAccountLogsCombineDovecotPostfixAndOAuthEvidence() = runBlocking {
         val logs = RecordingLogs()
         val backend = LocalDashboardBackend(
             providers = mapOf(Provider.DOVECOT to RecordingProvider(Provider.DOVECOT)),
@@ -707,7 +707,11 @@ class LocalDashboardBackendTest {
         )
 
         assertEquals(
-            listOf("[dovecot] line-DOVECOT", "[postfix] line-POSTFIX"),
+            listOf(
+                "[dovecot] line-DOVECOT",
+                "[postfix] line-POSTFIX",
+                "[oauth2] line-OAUTH2",
+            ),
             backend.accountLogs("dev@local.test", Provider.DOVECOT, null).lines,
         )
         assertEquals(
@@ -722,9 +726,36 @@ class LocalDashboardBackendTest {
                     DashboardLogAccount("dev@local.test"),
                     500,
                 ),
+                LogRead(
+                    LogService.OAUTH2,
+                    DashboardLogAccount("dev@local.test"),
+                    500,
+                ),
             ),
             logs.requests,
         )
+    }
+
+    @Test
+    fun dovecotAccountLogsRetainEvidenceFromEverySourceWhenOneSourceIsSaturated() = runBlocking {
+        val logs = RecordingLogs(
+            linesByService = mapOf(
+                LogService.DOVECOT to listOf("dovecot-auth"),
+                LogService.POSTFIX to listOf("postfix-delivery"),
+                LogService.OAUTH2 to (1..500).map { index -> "oauth-$index" },
+            ),
+        )
+        val backend = LocalDashboardBackend(
+            providers = mapOf(Provider.DOVECOT to RecordingProvider(Provider.DOVECOT)),
+            logSource = logs,
+        )
+
+        val lines = backend.accountLogs("dev@local.test", Provider.DOVECOT, null).lines
+
+        assertEquals(500, lines.size)
+        assertTrue("[dovecot] dovecot-auth" in lines)
+        assertTrue("[postfix] postfix-delivery" in lines)
+        assertTrue(lines.any { it.startsWith("[oauth2] oauth-") })
     }
 
     @Test
@@ -753,7 +784,9 @@ class LocalDashboardBackendTest {
     }
 }
 
-private class RecordingLogs : DashboardLogSource {
+private class RecordingLogs(
+    private val linesByService: Map<LogService, List<String>> = emptyMap(),
+) : DashboardLogSource {
     val requests = mutableListOf<LogRead>()
 
     override fun read(
@@ -762,7 +795,11 @@ private class RecordingLogs : DashboardLogSource {
         limit: Int,
     ): LogResponse {
         requests += LogRead(service, account, limit)
-        return LogResponse(service, account?.address, listOf("line-${service.name}"))
+        return LogResponse(
+            service,
+            account?.address,
+            linesByService[service] ?: listOf("line-${service.name}"),
+        )
     }
 }
 

@@ -84,7 +84,7 @@ internal class DockerComposeLogSource(
             return LogResponse(
                 service = service,
                 account = account?.address,
-                lines = fairTail(linesByService, responseLimit),
+                lines = fairTailLogLines(linesByService, responseLimit),
             )
         }
 
@@ -144,27 +144,6 @@ internal class DockerComposeLogSource(
         "logs", "--no-color", "--tail", limit.toString(), service,
     )
 
-    private fun fairTail(sources: List<List<String>>, limit: Int): List<String> {
-        val quotas = IntArray(sources.size)
-        var remaining = limit
-        while (remaining > 0) {
-            var progressed = false
-            sources.indices.forEach { index ->
-                if (remaining > 0 && quotas[index] < sources[index].size) {
-                    quotas[index]++
-                    remaining--
-                    progressed = true
-                }
-            }
-            if (!progressed) break
-        }
-        return buildList {
-            sources.forEachIndexed { index, lines ->
-                addAll(lines.takeLast(quotas[index]))
-            }
-        }
-    }
-
     private fun requireAddress(value: String) {
         require(ADDRESS.matches(value)) {
             "Log account filter must be a canonical local.test address"
@@ -183,6 +162,28 @@ internal class DockerComposeLogSource(
             LogService.OAUTH2,
             LogService.STALWART,
         )
+    }
+}
+
+internal fun fairTailLogLines(sources: List<List<String>>, limit: Int): List<String> {
+    require(limit >= 0) { "Log line limit cannot be negative" }
+    val quotas = IntArray(sources.size)
+    var remaining = limit
+    while (remaining > 0) {
+        var progressed = false
+        sources.indices.forEach { index ->
+            if (remaining > 0 && quotas[index] < sources[index].size) {
+                quotas[index]++
+                remaining--
+                progressed = true
+            }
+        }
+        if (!progressed) break
+    }
+    return buildList {
+        sources.forEachIndexed { index, lines ->
+            addAll(lines.takeLast(quotas[index]))
+        }
     }
 }
 

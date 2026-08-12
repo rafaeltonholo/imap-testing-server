@@ -332,6 +332,36 @@ class SingleStackPreservationTest {
         )
 
         requireFunctionalAccountLogs(account, accountLogs, probe)
+        val oauthBearer = "valid-${account.address}"
+        val oauthAccountLogs = accountLogs.copy(
+            lines = accountLogs.lines +
+                "[oauth2] oauth2-mock | Introspection identity=${account.address} outcome=active",
+        )
+        requireFunctionalOAuthAccountLogs(
+            account = account,
+            accountLogs = oauthAccountLogs,
+            globalLogs = LogResponse(
+                service = LogService.ALL,
+                lines = oauthAccountLogs.lines,
+            ),
+            submittedBearer = oauthBearer,
+        )
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalOAuthAccountLogs(
+                account = account,
+                accountLogs = accountLogs,
+                globalLogs = LogResponse(LogService.ALL, lines = accountLogs.lines),
+                submittedBearer = oauthBearer,
+            )
+        }
+        assertFailsWith<IllegalStateException> {
+            requireFunctionalOAuthAccountLogs(
+                account = account,
+                accountLogs = oauthAccountLogs.copy(lines = oauthAccountLogs.lines + oauthBearer),
+                globalLogs = LogResponse(LogService.ALL, lines = oauthAccountLogs.lines),
+                submittedBearer = oauthBearer,
+            )
+        }
         val stalwartAccount = generatedAccount(Provider.STALWART)
         val stalwartLine = "stalwart | accountId = 42 authentication rejected"
         requireFunctionalAccountLogs(

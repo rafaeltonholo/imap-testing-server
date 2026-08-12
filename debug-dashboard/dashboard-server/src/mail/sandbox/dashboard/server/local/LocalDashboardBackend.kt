@@ -391,13 +391,18 @@ internal class LocalDashboardBackend(
             Provider.DOVECOT -> LogResponse(
                 service = LogService.DOVECOT,
                 account = account.address,
-                lines = listOf(LogService.DOVECOT, LogService.POSTFIX)
-                    .flatMap { service ->
+                lines = fairTailLogLines(
+                    sources = listOf(
+                        LogService.DOVECOT,
+                        LogService.POSTFIX,
+                        LogService.OAUTH2,
+                    ).map { service ->
                         logSource.read(service, account = account).lines.map { line ->
                             "[${service.name.lowercase()}] $line"
                         }
-                    }
-                    .takeLast(ACCOUNT_LOG_LIMIT),
+                    },
+                    limit = ACCOUNT_LOG_LIMIT,
+                ),
             )
             Provider.STALWART -> logSource.read(LogService.STALWART, account = account)
         }

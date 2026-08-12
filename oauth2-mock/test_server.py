@@ -229,6 +229,32 @@ class OAuthServerTest(unittest.TestCase):
         self.assertTrue(eligible_prefix.json()["active"])
         self.assertEqual("eligible@local.test", eligible_prefix.json()["username"])
 
+    def test_introspection_logs_validated_identity_and_outcome_without_token(self):
+        valid_token = "valid-eligible@local.test"
+        invalid_token = "invalid-absent@local.test"
+        opaque_token = "opaque-sensitive-bearer"
+
+        self.assertTrue(self.post("/introspect", {"token": valid_token}).json()["active"])
+        self.assertFalse(self.post("/introspect", {"token": invalid_token}).json()["active"])
+        self.assertFalse(self.post("/introspect", {"token": opaque_token}).json()["active"])
+
+        combined_logs = "\n".join(self.logs)
+        self.assertIn(
+            "Introspection identity=eligible@local.test outcome=active",
+            combined_logs,
+        )
+        self.assertIn(
+            "Introspection identity=unknown outcome=invalid_token",
+            combined_logs,
+        )
+        self.assertGreaterEqual(
+            combined_logs.count("Introspection identity=unknown outcome=invalid_token"),
+            2,
+        )
+        self.assertNotIn(valid_token, combined_logs)
+        self.assertNotIn(invalid_token, combined_logs)
+        self.assertNotIn(opaque_token, combined_logs)
+
     def test_deleted_identity_becomes_inactive_without_restarting_server(self):
         token = "stored-deletion-check"
         server.access_tokens[token] = {

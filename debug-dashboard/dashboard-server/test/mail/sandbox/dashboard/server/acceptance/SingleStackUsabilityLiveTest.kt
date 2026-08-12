@@ -262,6 +262,18 @@ private class LiveDashboardApi(
                 rememberedPassword = originalPassword,
                 wrongPassword = wrongPassword,
             )
+            val oauthBearer = if (provider == Provider.DOVECOT) {
+                "valid-$address".also { bearer ->
+                    assertProbe(
+                        account,
+                        AuthenticationProtocol.OAUTH_IMAP,
+                        credentialOverride = bearer,
+                        expectedSuccess = true,
+                    )
+                }
+            } else {
+                null
+            }
             val accountLogProbe = assertProbe(
                 account,
                 account.primaryProtocol(),
@@ -272,6 +284,17 @@ private class LiveDashboardApi(
                 withProviderId(Routes.accountLogs(address, provider), providerAccountId),
             ).decode<LogResponse>(HttpStatusCode.OK)
             requireFunctionalAccountLogs(account, accountLogs, accountLogProbe)
+            oauthBearer?.let { bearer ->
+                val globalLogs = client.get(
+                    "${Routes.LOGS}?service=${LogService.ALL.name}",
+                ).decode<LogResponse>(HttpStatusCode.OK)
+                requireFunctionalOAuthAccountLogs(
+                    account = account,
+                    accountLogs = accountLogs,
+                    globalLogs = globalLogs,
+                    submittedBearer = bearer,
+                )
+            }
 
             val adoption = client.post(
                 withProviderId(
@@ -678,6 +701,37 @@ internal fun requireFunctionalAccountLogs(
         }
     }) {
         "Account logs did not contain output observed from the exact account authentication probe"
+    }
+}
+
+internal fun requireFunctionalOAuthAccountLogs(
+    account: AccountInfo,
+    accountLogs: LogResponse,
+    globalLogs: LogResponse,
+    submittedBearer: String,
+) {
+    check(account.provider == Provider.DOVECOT && submittedBearer.isNotBlank()) {
+        "OAuth account log proof requires a Dovecot account and submitted bearer"
+    }
+    check(
+        accountLogs.service == LogService.DOVECOT && accountLogs.account == account.address,
+    ) { "OAuth account logs returned inconsistent provider identity" }
+    check(globalLogs.service == LogService.ALL && globalLogs.account == null) {
+        "OAuth global logs returned inconsistent metadata"
+    }
+    val expected = "Introspection identity=${account.address} outcome=active"
+    val oauthPrefix = "[${LogService.OAUTH2.name.lowercase()}] "
+    check(accountLogs.lines.any { line -> line.startsWith(oauthPrefix) && expected in line }) {
+        "Account logs did not contain the successful OAuth introspection outcome"
+    }
+    check(globalLogs.lines.any { line -> line.startsWith(oauthPrefix) && expected in line }) {
+        "Global logs did not contain the successful OAuth introspection outcome"
+    }
+    check(accountLogs.lines.none { submittedBearer in it }) {
+        "Account logs exposed the submitted OAuth bearer"
+    }
+    check(globalLogs.lines.none { submittedBearer in it }) {
+        "Global logs exposed the submitted OAuth bearer"
     }
 }
 

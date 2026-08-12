@@ -83,6 +83,11 @@ PROTECTED_LOCAL_PARTS = frozenset({
     "dashboard-operator-a",
     "dashboard-operator-b",
 })
+INTROSPECTION_OUTCOMES = frozenset({
+    "expired_token",
+    "insufficient_scope",
+    "invalid_token",
+})
 
 
 class EligibilityResult(Enum):
@@ -1112,38 +1117,55 @@ class OAuthHandler(BaseHTTPRequestHandler):
         params = _read_form(self)
         token = params.get("token", [""])[0]
 
-        self.log_message("Introspection request")
-
         # First check the issued tokens store
         if token in access_tokens:
             entry = access_tokens[token]
             eligible = self._is_eligible(entry["username"])
             if entry["exp"] < time.time():
-                _json_response(self, {
+                result = {
                     "active": False,
                     "error": "expired_token",
                     "error_description": "The access token has expired",
-                })
-                return
-            if not eligible:
-                _json_response(self, {
+                }
+            elif not eligible:
+                result = {
                     "active": False,
                     "error": "invalid_token",
                     "error_description": "The token is not active",
-                })
-                return
-            _json_response(self, {
-                "active": True,
-                "username": entry["username"],
-                "email": entry["username"],
-                "scope": entry["scope"],
-                "token_type": "bearer",
-                "exp": entry["exp"],
-            })
-            return
+                }
+            else:
+                result = {
+                    "active": True,
+                    "username": entry["username"],
+                    "email": entry["username"],
+                    "scope": entry["scope"],
+                    "token_type": "bearer",
+                    "exp": entry["exp"],
+                }
+        else:
+            # Fall back to prefix-based convention for direct testing.
+            result = self._evaluate_token_by_prefix(token)
 
-        # Fall back to prefix-based convention for direct testing
-        _json_response(self, self._evaluate_token_by_prefix(token))
+        self._log_introspection_result(result)
+        _json_response(self, result)
+
+    def _log_introspection_result(self, result):
+        username = result.get("username")
+        identity = (
+            username
+            if EligibilityReader._is_canonical_address(username)
+            else "unknown"
+        )
+        if result.get("active") is True:
+            outcome = "active"
+        else:
+            error = result.get("error")
+            outcome = error if error in INTROSPECTION_OUTCOMES else "inactive"
+        self.log_message(
+            "Introspection identity=%s outcome=%s",
+            identity,
+            outcome,
+        )
 
     def _evaluate_token_by_prefix(self, token: str) -> dict:
         if token.startswith("valid-"):
